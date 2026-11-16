@@ -159,6 +159,10 @@ def main():
         print("\nDry run only. Re-run with --apply to make these changes.")
     else:
         print(
+            "\nThreads pick their permission mode from the lead (setup.md section 2): to stop rc threads asking for "
+            "every tool call, set `tw.py prefs --set thread_permission_mode=auto` or add allow rules."
+        )
+        print(
             "\nDone. In claude.ai, start a NEW session in this Remote Control environment and type /teamwork "
             "(skills load at session start)."
         )

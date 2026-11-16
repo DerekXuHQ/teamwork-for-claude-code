@@ -91,12 +91,14 @@ when it does not need the project folder. Do not archive anything yourself to ma
 For each ready task, oldest first:
 
 1. Thread does not have a session yet → create it:
+   - rc thread in a git project: `TW worktree <thread>` creates its worktree (`<project folder>-worktrees/<thread>`) and branch from the base, or reports that it exists. Do this before `create_session`, so the thread never has to guess a path, base or branch name.
    - `TW worker-prompt <thread>` → the full protocol text for that thread.
    - `create_session` with:
      - `environment_id`: rc env for `rc` threads, cloud env for `cloud` threads (from `TW lead`). Always pass it: the default is your own environment, which would silently make every thread rc.
      - `title`: the `title` printed by `TW thread add` (format `[<short>] <thread> · <focus>`). Keep it to about 24 characters: short thread names (`ui`, `api`, `core`) and a 1–3 word focus. `thread add` prints a `warning` when the title is too long; shorten `--focus`.
      - `tags`: the `tags` printed by `TW thread add` (`teamwork:<short>`, `teamwork-thread:<thread>`).
      - `append_system_prompt`: the worker-prompt output.
+     - `extra_allowed_tools` and `permission_mode`: from the `create_session` object printed by `TW thread add`. The tools are the reporting calls (send_message, get_session, list_events), so a thread never stalls on them. `permission_mode` appears only when the user set `TW prefs --set thread_permission_mode=<mode>`; otherwise pass your own mode if you know it (the thread must not be more permissive than you, and without it the thread falls back to the Remote Control server's default, which asks for every tool call). See setup.md §2.
      - `prompt`: the TASK message (references/messages.md).
      - cloud only: `source_url` = repo URL, `source_revision` = base branch, `outcome_branch` = the thread's branch.
      - rc only: `extra_allowed_tools`: `["mcp__claude-code-remote__send_message", "mcp__claude-code-remote__get_session", "mcp__claude-code-remote__list_events"]` so the thread can report and hand off without stalling on a prompt (only works if you have these pre-approved yourself, see setup.md §2).

@@ -37,6 +37,16 @@ In the test, an RC child stopped at "Waiting on permission: Send Message". `inst
 ] } }
 ```
 
+### Permission mode for threads (optional)
+
+Without a `permission_mode`, an rc thread gets the Remote Control server's default mode, and in field tests that meant a manual "allow" in claude.ai for nearly every Bash and Edit call. The lead therefore passes `permission_mode` to `create_session`: the user's choice from `tw.py prefs --set thread_permission_mode=<mode>` if set, otherwise the lead's own mode (a thread can never be more permissive than the lead). Options, from tightest to loosest:
+
+- keep `default` and add allow rules for what threads routinely run (for example `Bash(git *)`, `Bash(python3 *)`, `Edit`) to `<config dir>/settings.json`;
+- `acceptEdits`: file edits go through, shell commands still ask;
+- `auto`: Claude Code decides which calls are safe and asks only for risky ones. Recommended for threads that do real work.
+
+Changing the global default mode of the Remote Control server is the user's decision; the skill does not change it.
+
 `create_session` and `interrupt_session` are pre-approved only for the lead while `/teamwork` runs (skill `allowed-tools`); archiving always asks. If the organisation sets the connector to "ask", allow rules are ignored and the user approves prompts in each thread.
 
 ## §3 Project hook and the lead

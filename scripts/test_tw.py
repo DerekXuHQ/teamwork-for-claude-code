@@ -141,5 +141,67 @@ class ShortName(unittest.TestCase):
         self.assertIn("warning", out)
 
 
+class ThreadStart(unittest.TestCase):
+    """T9: worktree (I4), permission mode + tools (I1), header id rule (I6)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.proj = Path(self._tmp.name) / "proj"
+        self.proj.mkdir()
+        g = lambda *x: subprocess.run(["git", "-C", str(self.proj), *x], check=True, capture_output=True)
+        g("init", "-q", "-b", "main")
+        (self.proj / "a.txt").write_text("a\n")
+        g("add", ".")
+        g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "init")
+        self.tw("init", "proj")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def tw(self, *args, ok=True):
+        r = subprocess.run([sys.executable, str(TW), "-C", str(self.proj), *args], cwd=self.proj,
+                           capture_output=True, text=True)
+        if ok:
+            self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    def test_thread_add_prints_session_args_and_worktree(self):
+        out = json.loads(self.tw("thread", "add", "ui").stdout)
+        self.assertIn("mcp__claude-code-remote__send_message", out["create_session"]["extra_allowed_tools"])
+        self.assertNotIn("permission_mode", out["create_session"])
+        self.assertTrue(out["worktree"].endswith("proj-worktrees/ui"))
+        self.tw("prefs", "--set", "thread_permission_mode=auto")
+        out = json.loads(self.tw("thread", "add", "api").stdout)
+        self.assertEqual(out["create_session"]["permission_mode"], "auto")
+        self.assertNotEqual(self.tw("prefs", "--set", "thread_permission_mode=yolo", ok=False).returncode, 0)
+
+    def test_cloud_thread_has_no_worktree(self):
+        out = json.loads(self.tw("thread", "add", "docs", "--kind", "cloud").stdout)
+        self.assertNotIn("worktree", out)
+        self.assertNotEqual(self.tw("worktree", "docs", ok=False).returncode, 0)
+        self.assertIn("container's checkout", self.tw("worker-prompt", "docs").stdout)
+
+    def test_worktree_created_once(self):
+        self.tw("thread", "add", "ui")
+        dry = json.loads(self.tw("worktree", "ui", "--dry-run").stdout)
+        self.assertFalse(dry["created"])
+        wt = Path(dry["worktree"])
+        self.assertFalse(wt.exists())
+        r = json.loads(self.tw("worktree", "ui").stdout)
+        self.assertTrue(r["created"])
+        self.assertTrue((wt / "a.txt").exists())
+        branch = subprocess.run(["git", "-C", str(wt), "branch", "--show-current"], capture_output=True, text=True)
+        self.assertEqual(branch.stdout.strip(), "tw/proj/ui")
+        again = json.loads(self.tw("worktree", "ui").stdout)
+        self.assertFalse(again["created"])
+        wp = self.tw("worker-prompt", "ui").stdout
+        self.assertIn(str(wt), wp)
+        self.assertIn("worktree add -b tw/proj/ui", wp)
+
+    def test_header_id_rule_in_prompt(self):
+        self.tw("thread", "add", "ui")
+        self.assertIn("exactly one task id from the board", self.tw("worker-prompt", "ui").stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

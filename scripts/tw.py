@@ -17,6 +17,7 @@ import datetime as dt
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -151,6 +152,39 @@ def title_for(st, name):
     return f"[{tag(st)}] {name} · {focus}" if focus else f"[{tag(st)}] {name}"
 
 
+PERMISSION_MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions")
+# Pre-approved in every thread (create_session extra_allowed_tools) so reporting never stalls on a prompt.
+# The lead can only grant what it has pre-approved itself (install.py adds these allow rules).
+THREAD_TOOLS = [
+    "mcp__claude-code-remote__send_message",
+    "mcp__claude-code-remote__get_session",
+    "mcp__claude-code-remote__list_events",
+]
+
+
+def worktree_path(st, name):
+    """rc thread worktree: <project folder>-worktrees/<thread>, next to the project folder (full name, not short)."""
+    repo = Path(st.get("repo", {}).get("path") or ".")
+    return repo.parent / f"{repo.name}-worktrees" / name
+
+
+def worktree_cmd(st, name):
+    t = st["threads"][name]
+    repo = st.get("repo", {}).get("path") or "."
+    base = st.get("repo", {}).get("base") or "main"
+    path = t.get("worktree") or str(worktree_path(st, name))
+    return f'git -C "{repo}" worktree add -b {t["branch"]} "{path}" {base}'
+
+
+def session_args(st, name):
+    """Extra create_session arguments for a thread: permission mode and pre-approved tools."""
+    out = {"extra_allowed_tools": THREAD_TOOLS}
+    mode = (st.get("prefs", {}).get("thread_permission_mode") or "").strip()
+    if mode:
+        out["permission_mode"] = mode
+    return out
+
+
 def title_warning(title):
     if len(title) > TITLE_TARGET + 8:
         return (f"title is {len(title)} chars; aim for about {TITLE_TARGET}: shorten the thread name or --focus")
@@ -272,7 +306,8 @@ def cmd_init(a):
             "update_detail": "brief",
             "checkin_minutes": 10,
             "short_name": short,  # in titles [X], headers [tw:X], tags teamwork:X
-            "language": "",  # conversation language code (zh, en, ...); empty = follow the user's latest message
+            "language": "",
+            "thread_permission_mode": "",  # create_session permission_mode; empty = the lead's own mode  # conversation language code (zh, en, ...); empty = follow the user's latest message
         },
     }
     if not (d / "INSTRUCTIONS.md").exists():
@@ -342,6 +377,8 @@ def cmd_thread(a):
             "last_seen": None,
             "summary": a.summary or "",
         }
+        if a.kind == "rc":
+            st["threads"][name]["worktree"] = str(worktree_path(st, name))
         st["threads"][name]["title"] = title_for(st, name)
         save(
             d,
@@ -355,7 +392,11 @@ def cmd_thread(a):
             "branch": t["branch"],
             "tags": [f"teamwork:{tag(st)}", f"teamwork-thread:{name}"],
             "environment_id": st["envs"].get(a.kind),
+            "create_session": session_args(st, name),
         }
+        if t.get("worktree"):
+            out["worktree"] = t["worktree"]
+            out["next"] = f"tw.py worktree {name}  (before create_session)"
         if title_warning(t["title"]):
             out["warning"] = title_warning(t["title"])
         print(json.dumps(out, ensure_ascii=False))
@@ -595,6 +636,8 @@ def cmd_prefs(a):
             st["prefs"][k] = int(v)
         else:
             st["prefs"][k] = v
+        if k == "thread_permission_mode" and v and v not in PERMISSION_MODES:
+            sys.exit(f"thread_permission_mode: one of {', '.join(PERMISSION_MODES)}, or empty for the lead's own mode")
         if k == "short_name" and v and not re.fullmatch(SHORT_RE, v):
             sys.exit("short_name: letters/digits/hyphen, max 6 chars (e.g. TFCC)")
     retitled = {}
@@ -651,6 +694,9 @@ def cmd_worker_prompt(a):
         "REPORT_CHANNEL": channel,
         "FOLDER": st.get("repo", {}).get("path") or "-",
         "LANGUAGE": language_rule(st),
+        "WORKTREE": (f"`{t.get('worktree') or worktree_path(st, a.thread)}` (the lead creates it; if it is missing, "
+                     f"create it yourself with exactly: `{worktree_cmd(st, a.thread)}`)")
+        if t["kind"] == "rc" else "your container's checkout of the repo (cloud thread)",
     }
     out = tpl
     for k, v in fill.items():
@@ -659,6 +705,47 @@ def cmd_worker_prompt(a):
     if left:
         sys.exit(f"template placeholders not filled: {left}")
     print(out)
+
+
+def cmd_worktree(a):
+    """Create the rc thread's git worktree and branch if missing (idempotent)."""
+    d = need(find_dir())
+    st = load(d)
+    if a.thread not in st["threads"]:
+        sys.exit(f"unknown thread {a.thread}")
+    t = st["threads"][a.thread]
+    if t["kind"] != "rc":
+        sys.exit("cloud threads have no local worktree; they push their branch")
+    repo = st.get("repo", {}).get("path") or "."
+    base = st.get("repo", {}).get("base") or "main"
+    path = Path(t.get("worktree") or worktree_path(st, a.thread))
+    git = lambda *x: subprocess.run(["git", "-C", repo, *x], capture_output=True, text=True)
+    if git("rev-parse", "--git-dir").returncode != 0:
+        sys.exit(f"{repo} is not a git repository: no worktree needed; the thread works in the project folder")
+    res = {"thread": a.thread, "worktree": str(path), "branch": t["branch"]}
+    if path.exists():
+        res["created"] = False
+        res["note"] = "already exists"
+    else:
+        has_branch = git("show-ref", "--verify", "--quiet", f"refs/heads/{t['branch']}").returncode == 0
+        cmd = (["worktree", "add", str(path), t["branch"]] if has_branch
+               else ["worktree", "add", "-b", t["branch"], str(path), base])
+        res["command"] = "git -C " + repo + " " + " ".join(cmd)
+        if a.dry_run:
+            res["created"] = False
+            res["note"] = "dry run"
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            r = git(*cmd)
+            if r.returncode != 0:
+                sys.exit(f"git worktree add failed: {r.stderr.strip()}")
+            res["created"] = True
+    if t.get("worktree") != str(path):
+        t["worktree"] = str(path)
+        save(d, st, {"ev": "worktree", "thread": a.thread, "path": str(path)})
+    elif res.get("created"):
+        log(d, {"ev": "worktree", "thread": a.thread, "path": str(path)})
+    print(json.dumps(res, ensure_ascii=False))
 
 
 def find_projects(root):
@@ -829,6 +916,10 @@ def main():
     )
     x.add_argument("thread")
     x.set_defaults(f=cmd_worker_prompt)
+    x = s.add_parser("worktree", help="create an rc thread's git worktree + branch if missing (run before create_session)")
+    x.add_argument("thread")
+    x.add_argument("--dry-run", action="store_true")
+    x.set_defaults(f=cmd_worktree)
     x = s.add_parser("projects", help="portfolio view of all projects under --root")
     x.add_argument("--root", default="."); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_projects)
     s.add_parser(

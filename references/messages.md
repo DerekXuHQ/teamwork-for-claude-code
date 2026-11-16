@@ -6,6 +6,8 @@ Every message starts with one header line. Threads use the same header for their
 [tw:<short>] <TYPE> <from> -> <to> <task-id or ->
 ```
 
+The task-id slot holds exactly one id from the board (`T3`), or `-` when no board task applies. No lists (`T2,T7`), no sub-step or probe ids (`P2`); if the work was merged into another task, use that task's id and say so in the body.
+
 `<short>` is the project's short name (`prefs.short_name`, e.g. `TFCC`; projects without one use the full name). It is display only: branches keep the full project name.
 
 The recipient's app shows only the first line as a preview, so the header must say what this is.

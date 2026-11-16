@@ -13,7 +13,8 @@ Tested on a Pro account on 2026-11-15 with the `claude-code-remote` tools (`send
 | rename project tag/title mid-run | - | - | ✅ 2026-11-16: running rc thread kept working after the lead changed its title and tag; branch and folder names are not renamed (log P8) |
 | rc → new cloud, create + send | ✅ works | An RC session created a cloud session and messaged it. | not re-tested |
 | cloud → rc, send message | ⛔ refused by default | Error `elevated_session_untrusted_device`. It works only after the user approves a trust card for that cloud session (`confirm_repository_trust`). | not re-tested |
-| rc → a cloud session that was trust-elevated | ⛔ refused | Error: "the session you named needs proof of a trusted device". Once a cloud session is elevated so it can reach RC sessions, RC sessions can no longer message it. | not re-tested |
+| rc → a cloud session that was trust-elevated | ⛔ refused | Error: "the session you named needs proof of a trusted device". Once a cloud session is elevated so it can reach RC sessions, RC sessions can no longer message it. | ⛔ 2026-11-16 (lead, L2): `send_message` "needs proof of a trusted device", `list_events` `elevated_session_untrusted_device`; `get_session` still works |
+| cloud (elevated) → rc, send message | ✅ works | | ✅ 2026-11-16 (lead, L1): the elevated setup session's message reached the lead |
 | cloud (elevated) → create rc session | ✅ works | | not re-tested |
 | cloud → cloud | reported working by the user | not re-tested in this test run | not re-tested |
 | cloud → project folder | ⛔ | A cloud session cannot read the served folder. `list_computer_folders` returned nothing on this account. | not re-tested |
@@ -33,6 +34,13 @@ Tested on a Pro account on 2026-11-15 with the `claude-code-remote` tools (`send
 `before_id = first_id` until a `result` turns up. A thread still in its first turn has no `result`
 at all; use `get_session` → `task_summary` instead. (Re-tested 2026-11-16, see
 `docs/field-tests/2026-11-15.md`.)
+
+## Interrupt, then RECALL
+
+`interrupt_session` returns `cancel_queued: true`: messages still queued for the thread are dropped.
+Interrupt first, then send the RECALL; a RECALL sent before the interrupt is wiped. The interrupted
+thread only sees `[Request interrupted by user]`, so the RECALL's first sentence should say the lead
+did it. (Re-tested 2026-11-16, log P5 and L3.)
 
 ## Error strings and what to do
 

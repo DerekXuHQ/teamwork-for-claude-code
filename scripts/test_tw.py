@@ -4,6 +4,7 @@
   python3 scripts/test_tw.py
 """
 
+import datetime as dt
 import json
 import os
 import subprocess
@@ -201,6 +202,60 @@ class ThreadStart(unittest.TestCase):
     def test_header_id_rule_in_prompt(self):
         self.tw("thread", "add", "ui")
         self.assertIn("exactly one task id from the board", self.tw("worker-prompt", "ui").stdout)
+
+
+class Stuck(TwCase):
+    """T3: working threads silent longer than prefs.stuck_minutes show up as possibly stuck."""
+
+    T0 = "2026-11-15T10:00:00+00:00"
+
+    def at(self, minutes):
+        self.env["TW_NOW"] = (dt.datetime.fromisoformat(self.T0) + dt.timedelta(minutes=minutes)).isoformat()
+
+    def setUp(self):
+        super().setUp()
+        self.at(0)
+        self.tw("thread", "add", "ui", "--session", "s1", "--status", "working")
+        self.tw("thread", "add", "api", "--session", "s2", "--status", "waiting")
+
+    def ready(self):
+        return json.loads(self.tw("ready").stdout)["stuck"]
+
+    def test_default_threshold_and_board_group(self):
+        self.assertEqual(self.state()["prefs"]["stuck_minutes"], 30)
+        self.at(29)
+        self.assertEqual(self.ready(), {})
+        self.at(45)
+        self.assertEqual(self.ready(), {"ui": 45})  # api is waiting, not working: never "stuck"
+        board = self.tw("board").stdout
+        self.assertIn("Possibly stuck", board)
+        self.assertIn("no report for 45 min", board)
+        self.assertEqual(board.count("[demo] ui"), 1)  # listed once, not also under Working
+        self.assertEqual(json.loads(self.tw("open").stdout)[0]["stuck_minutes"], 45)
+
+    def test_report_resets_timer_plain_set_does_not(self):
+        self.at(40)
+        self.tw("thread", "set", "ui", "--summary", "lead note")  # not a report from the thread
+        self.assertIn("ui", self.ready())
+        self.tw("thread", "set", "ui", "--from-status", "--summary", "step 2 of 3")
+        self.assertEqual(self.ready(), {})
+        self.at(40 + 31)
+        self.assertEqual(self.ready(), {"ui": 31})
+
+    def test_custom_threshold_and_off(self):
+        self.tw("prefs", "--set", "stuck_minutes=10")
+        self.at(11)
+        self.assertIn("ui", self.ready())
+        self.tw("prefs", "--set", "stuck_minutes=0")
+        self.at(500)
+        self.assertEqual(self.ready(), {})
+
+    def test_old_project_without_pref_uses_default(self):
+        st = self.state()
+        del st["prefs"]["stuck_minutes"]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.at(31)
+        self.assertIn("ui", self.ready())
 
 
 if __name__ == "__main__":

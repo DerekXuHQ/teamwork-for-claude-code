@@ -52,7 +52,32 @@ NAME_RE = r"[a-z0-9][a-z0-9-]{0,23}"
 
 
 def now():
-    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    # TW_NOW (ISO time) fakes the clock for tests.
+    fake = os.environ.get("TW_NOW")
+    t = dt.datetime.fromisoformat(fake) if fake else dt.datetime.now()
+    return t.astimezone().isoformat(timespec="seconds")
+
+
+STUCK_DEFAULT = 30  # minutes without a report before a working thread counts as possibly stuck
+
+
+def stuck_threads(st):
+    """{thread: minutes since its last report} for working/starting threads silent longer than prefs.stuck_minutes."""
+    limit = st.get("prefs", {}).get("stuck_minutes", STUCK_DEFAULT)
+    if not limit:
+        return {}
+    cur = dt.datetime.fromisoformat(now())
+    out = {}
+    for n, t in st["threads"].items():
+        if t["status"] not in ("working", "starting"):
+            continue
+        since = t.get("last_status_at") or t.get("created")
+        if not since:
+            continue
+        mins = int((cur - dt.datetime.fromisoformat(since)).total_seconds() // 60)
+        if mins > limit:
+            out[n] = mins
+    return out
 
 
 LANG_NAMES = {"zh": "Chinese (中文)", "en": "English", "ja": "Japanese (日本語)", "ko": "Korean (한국어)",
@@ -228,10 +253,19 @@ def render_tasks(st, only_owner=None):
 
 
 def render_groups(st):
-    order = ["waiting", "review", "working", "starting", "landing", "planned", "idle", "resolved"]
+    order = ["waiting", "stuck", "review", "working", "starting", "landing", "planned", "idle", "resolved"]
+    stuck = stuck_threads(st)
     out = []
     for g in order:
-        names = [n for n, t in st["threads"].items() if t["status"] == g]
+        if g == "stuck":
+            if stuck:
+                out.append(f"**Possibly stuck (working, no report for over "
+                           f"{st['prefs'].get('stuck_minutes', STUCK_DEFAULT)} min)**")
+                for n, m in stuck.items():
+                    t = st["threads"][n]
+                    out.append(f"- {t.get('title') or n} ({t['kind']}) — no report for {m} min — {t.get('summary') or '-'}")
+            continue
+        names = [n for n, t in st["threads"].items() if t["status"] == g and n not in stuck]
         if not names:
             continue
         out.append(f"**{THREAD_STATUSES[g]}**")
@@ -306,6 +340,7 @@ def cmd_init(a):
             "update_detail": "brief",
             "checkin_minutes": 10,
             "short_name": short,  # in titles [X], headers [tw:X], tags teamwork:X
+            "stuck_minutes": STUCK_DEFAULT,  # working thread silent this long -> "possibly stuck"; 0 = off
             "language": "",
             "thread_permission_mode": "",  # create_session permission_mode; empty = the lead's own mode  # conversation language code (zh, en, ...); empty = follow the user's latest message
         },
@@ -412,6 +447,8 @@ def cmd_thread(a):
         t["status"] = a.status
     if a.summary is not None:
         t["summary"] = a.summary
+    if a.from_status:
+        t["last_status_at"] = now()
     if a.owns is not None:
         t["owns"] = csv(a.owns)
     if a.focus is not None:
@@ -516,6 +553,7 @@ def cmd_ready(a):
                 "busy_threads": busy,
                 "max_parallel": st["prefs"].get("max_parallel", 0) or "unlimited",
                 "slots": (max(0, st["prefs"]["max_parallel"] - busy) if st["prefs"].get("max_parallel") else "unlimited"),
+                "stuck": stuck_threads(st),
                 "rc_capacity_note": "a Remote Control server holds 32 sessions by default, shared by every project and lead on it; cloud threads do not count",
             }
         )
@@ -606,6 +644,7 @@ def cmd_roster(a):
 def cmd_open(a):
     d = need(find_dir())
     st = load(d)
+    stuck = stuck_threads(st)
     print(
         json.dumps(
             [
@@ -615,6 +654,8 @@ def cmd_open(a):
                     "session_id": t.get("session_id"),
                     "status": t["status"],
                     "last_seen": t.get("last_seen"),
+                    "last_status_at": t.get("last_status_at"),
+                    "stuck_minutes": stuck.get(n),
                 }
                 for n, t in st["threads"].items()
                 if t["status"] not in ("planned", "resolved", "archived")
@@ -773,6 +814,7 @@ def cmd_projects(a):
             "threads": sum(1 for t in th if t["status"] != "archived"),
             "tasks_done": f"{sum(1 for k in tasks if k['status'] == 'done')}/{len(tasks)}",
             "questions": sum(1 for q in st.get("questions", []) if not q.get("answered")),
+            "stuck": len(stuck_threads(st)),
             "updated": st.get("updated"),
         })
     if a.json:
@@ -865,6 +907,8 @@ def main():
     x.add_argument("--branch")
     x.add_argument("--status")
     x.add_argument("--summary")
+    x.add_argument("--from-status", action="store_true",
+                   help="this update comes from a report the thread sent (tw-status block or message): resets stuck timer")
     x.set_defaults(f=cmd_thread)
 
     x = s.add_parser("task", help="add or update a plan task")

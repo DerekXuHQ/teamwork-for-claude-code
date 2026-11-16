@@ -125,15 +125,19 @@ For each message from the user decide, and **say which in your reply**:
 A sweep refreshes the ledger from the threads. Run it when a timer or idle notice fires, when a thread messages you, and before answering "status".
 
 1. `TW open` lists the threads to check.
-2. For each: `get_session <id>`. Read `status_bucket`, `connection_status`, `post_turn_summary` (`recent_action`, `needs_action`). If you need more, `list_events` with `kinds: ["result"]` and a small `limit` (3) and parse the last `<tw-status>` block. Never call `list_events` without `kinds` and a small `limit`: transcripts are huge.
-3. Map to thread status and record it with `TW thread set <t> --status <s> --summary "<one line>"`:
+2. For each: `get_session <id>`. Read `status_bucket`, `connection_status`, `post_turn_summary` (`recent_action`, `needs_action`). If you need more, `list_events` with `kinds: ["result"]` and `limit: 100`, and parse the last `<tw-status>` block. `kinds` filters *after* the page is read, so a small `limit` often returns nothing; if no `result` is in the page and `has_more` is true, page back with `before_id` = `first_id`. A thread still in its first turn has no `result` yet: use `get_session`'s `task_summary` instead. Never call `list_events` without `kinds`.
+3. Map to thread status and record it with `TW thread set <t> --status <s> --summary "<one line>"`. Add `--from-status` whenever the update comes from something the thread itself reported (a `<tw-status>` block, a DONE/UPDATE/BLOCKED message): that resets its stuck timer.
    - `needs_action` set, or `waiting_on` user/permission, or `status_bucket` failed → `waiting`.
    - `<tw-status> state: review` → `review`; working → `working`; idle and nothing assigned → `idle`.
    - Update task status from the STATUS block (`done`, `blocked`, ...).
 4. A `handed_off` or `HANDOFF` you learn about → move the task's owner in the ledger, and if the receiver never ACKed, forward it yourself.
 5. A `MEMORY` proposal → if it is a durable fact for the whole project, `TW memory "<fact>"`; tell threads that need it.
 6. A `QUESTION` → `TW ask "<question>" --from <thread>`, ask the user. When answered: `ANSWER` message to the thread, `TW ask --answer <n>`.
-7. Then dispatch any newly ready tasks (step 3) and set the next timer.
+7. **Possibly stuck.** `TW ready` (`stuck`) and the board's "Possibly stuck" group list `working`/`starting` threads with no report for more than `stuck_minutes` (default 30; `TW prefs --set stuck_minutes=<n>`, 0 = off). For each:
+   - `get_session`: `status_bucket` failed or `connection_status` disconnected → the thread is not working; `TW thread set <t> --status waiting --summary "<what failed>"` and tell the user.
+   - Still running → read its latest `result` as above. Found a newer `<tw-status>` → record it with `--from-status`. Nothing new → send a `FOLLOWUP` asking for one STATUS block now (a long build is fine; silence is not).
+   - Still nothing after twice `stuck_minutes` → tell the user which thread is silent and since when, and offer to RECALL it or reassign the task (step 6). Do not recall on your own.
+8. Then dispatch any newly ready tasks (step 3) and set the next timer.
 
 Status reply to the user (keep this shape, newest information only):
 
@@ -141,6 +145,7 @@ Status reply to the user (keep this shape, newest information only):
 Waiting on you: <thread — what it needs, how to unblock (often: open the thread and approve a prompt)>
 Ready for review: <thread — result, where>
 Working: <thread — current step>
+Possibly stuck: <thread — no report for N min, what you did about it>
 Idle / resolved: <names>
 Next: <what you will do next, and when you check again>
 ```

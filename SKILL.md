@@ -59,7 +59,8 @@ No argument: run the portfolio view and ask which project this session should le
 ## 1. New project
 
 1. Ask (one message, skip what you already know): goal in one line; which folder (default: current); git remote URL if cloud threads should edit code; anything threads must never touch.
-2. The project folder is `<served folder>/<name>` unless the user names another folder inside the served folder (the served folder is your starting cwd). If a project with that name already exists (`tw.py projects`), ask whether to attach instead. Otherwise `TW init <name> --goal "<goal>" [--repo-url <url>] [--base <branch>]` (with `-C <served folder>/<name>`, which creates the folder). That folder is your project folder for the rest of this session.
+2. The project folder is `<served folder>/<name>` unless the user names another folder inside the served folder (the served folder is your starting cwd). If a project with that name already exists (`tw.py projects`), ask whether to attach instead. Otherwise `TW init <name> --goal "<goal>" [--short <X>] [--repo-url <url>] [--base <branch>]` (with `-C <served folder>/<name>`, which creates the folder). That folder is your project folder for the rest of this session.
+   The short name (`--short`, max 6 chars; default: the name itself if it fits, else its initials, e.g. `teamwork-for-claude-code` → `TFCC`) is for display only: session titles `[TFCC] ...`, message headers `[tw:TFCC]`, tags `teamwork:TFCC`. Branches (`tw/<name>/<thread>`) and worktree folders keep the full name and never change with it. To change it later: `TW prefs --set short_name=<X>`; it prints the threads whose titles changed, so update those sessions with `set_session_title` / `set_session_tags`.
 3. Put standing rules into `.teamwork/INSTRUCTIONS.md` (style, forbidden areas, how to verify). Keep it under 16k characters.
 4. Coordination prefs, defaults shown: `TW prefs --set max_parallel=0 propose_before_start=true update_detail=brief checkin_minutes=10 language=<code of the user's language>`. `max_parallel=0` means no limit: start every thread the plan needs. Set a number only when the user asks ("at most two at a time"). Change the others when the user says "just start, don't ask", "more detail", and so on.
 5. Make sure the hooks are installed (setup.md §3): run `python3 ${CLAUDE_SKILL_DIR}/scripts/install.py --link --project <project folder> --served <served folder>` as a dry run, show the user the changes, and `--apply` on their OK.
@@ -93,8 +94,8 @@ For each ready task, oldest first:
    - `TW worker-prompt <thread>` → the full protocol text for that thread.
    - `create_session` with:
      - `environment_id`: rc env for `rc` threads, cloud env for `cloud` threads (from `TW lead`). Always pass it: the default is your own environment, which would silently make every thread rc.
-     - `title`: the `title` printed by `TW thread add` (format `[<project>] <thread> · <focus>`).
-     - `tags`: `teamwork:<project>`, `teamwork-thread:<thread>`.
+     - `title`: the `title` printed by `TW thread add` (format `[<short>] <thread> · <focus>`). Keep it to about 24 characters: short thread names (`ui`, `api`, `core`) and a 1–3 word focus. `thread add` prints a `warning` when the title is too long; shorten `--focus`.
+     - `tags`: the `tags` printed by `TW thread add` (`teamwork:<short>`, `teamwork-thread:<thread>`).
      - `append_system_prompt`: the worker-prompt output.
      - `prompt`: the TASK message (references/messages.md).
      - cloud only: `source_url` = repo URL, `source_revision` = base branch, `outcome_branch` = the thread's branch.
@@ -107,7 +108,7 @@ For each ready task, oldest first:
 
 ## 4. Route every user message
 
-**Language first.** Answer the user in the language they wrote in, and write message bodies to threads in that language too (headers keep their English keywords: `[tw:<project>] TASK lead -> ui T2`). Record it with `TW prefs --set language=<code>` (`zh`, `en`, ...): `worker-prompt` and the SessionStart hook pass it to every new thread. **When the user switches language**, update the pref and broadcast one `FOLLOWUP` to every open thread saying so, in the new language. Files still follow the task (repo docs are English unless the task says otherwise).
+**Language first.** Answer the user in the language they wrote in, and write message bodies to threads in that language too (headers keep their English keywords: `[tw:<short>] TASK lead -> ui T2`). Record it with `TW prefs --set language=<code>` (`zh`, `en`, ...): `worker-prompt` and the SessionStart hook pass it to every new thread. **When the user switches language**, update the pref and broadcast one `FOLLOWUP` to every open thread saying so, in the new language. Files still follow the task (repo docs are English unless the task says otherwise).
 
 For each message from the user decide, and **say which in your reply**:
 

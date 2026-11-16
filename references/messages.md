@@ -3,8 +3,10 @@
 Every message starts with one header line. Threads use the same header for their replies (see the worker protocol).
 
 ```
-[tw:<project>] <TYPE> <from> -> <to> <task-id or ->
+[tw:<short>] <TYPE> <from> -> <to> <task-id or ->
 ```
+
+`<short>` is the project's short name (`prefs.short_name`, e.g. `TFCC`; projects without one use the full name). It is display only: branches keep the full project name.
 
 The recipient's app shows only the first line as a preview, so the header must say what this is.
 

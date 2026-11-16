@@ -70,7 +70,7 @@ def language_rule(st):
         "- If the user talks to a thread directly in another language, that thread answers the user in that language.\n"
         "- When the user switches language, the lead runs `tw.py prefs --set language=<code>` and broadcasts a "
         "FOLLOWUP to every thread; the newest one wins.\n"
-        f"- Message headers keep their fixed English keywords (`[tw:{st['project']}] TASK lead -> <thread> T2`); "
+        f"- Message headers keep their fixed English keywords (`[tw:{tag(st)}] TASK lead -> <thread> T2`); "
         "only the body follows the language.\n"
         "- Files follow what the task says (repo docs are English unless the task says otherwise); conversation "
         "follows the language."
@@ -128,12 +128,33 @@ def csv(s):
     return [x.strip() for x in s.split(",") if x.strip()] if s else []
 
 
+SHORT_RE = r"[A-Za-z0-9][A-Za-z0-9-]{0,5}"
+TITLE_TARGET = 24  # session titles are read in a narrow sidebar
+
+
+def default_short(project):
+    """Short name for a new project: the name itself if it fits in 6 chars, else the initials (TFCC)."""
+    if len(project) <= 6:
+        return project
+    initials = "".join(w[0] for w in project.split("-") if w).upper()
+    return initials[:6] if len(initials) >= 2 else project[:6]
+
+
+def tag(st):
+    """Project label used in titles, message headers and tags. Old projects without short_name keep the full name."""
+    return (st.get("prefs", {}).get("short_name") or "").strip() or st["project"]
+
+
 def title_for(st, name):
     t = st["threads"][name]
     focus = t.get("focus") or ""
-    return (
-        f"[{st['project']}] {name} · {focus}" if focus else f"[{st['project']}] {name}"
-    )
+    return f"[{tag(st)}] {name} · {focus}" if focus else f"[{tag(st)}] {name}"
+
+
+def title_warning(title):
+    if len(title) > TITLE_TARGET + 8:
+        return (f"title is {len(title)} chars; aim for about {TITLE_TARGET}: shorten the thread name or --focus")
+    return None
 
 
 # ------------------------------------------------------------------ rendering
@@ -196,7 +217,7 @@ def render_board(st):
     )
     r = st.get("repo", {})
     out = [
-        f"# teamwork: {st['project']}",
+        f"# teamwork: {st['project']}" + (f" ({tag(st)})" if tag(st) != st["project"] else ""),
         "",
         f"Goal: {st.get('goal') or '-'}",
         f"Plan: {approved}    Updated: {st.get('updated', '-')}",
@@ -227,6 +248,9 @@ def cmd_init(a):
         sys.exit(f"{d}/state.json already exists (use --force to overwrite)")
     if not re.fullmatch(NAME_RE, a.project):
         sys.exit("project name: lowercase letters/digits/hyphen, max 24 chars")
+    short = a.short or default_short(a.project)
+    if not re.fullmatch(SHORT_RE, short):
+        sys.exit("short name: letters/digits/hyphen, max 6 chars (e.g. TFCC, shop)")
     st = {
         "project": a.project,
         "goal": a.goal or "",
@@ -247,6 +271,7 @@ def cmd_init(a):
             "propose_before_start": True,
             "update_detail": "brief",
             "checkin_minutes": 10,
+            "short_name": short,  # in titles [X], headers [tw:X], tags teamwork:X
             "language": "",  # conversation language code (zh, en, ...); empty = follow the user's latest message
         },
     }
@@ -324,18 +349,16 @@ def cmd_thread(a):
             {"ev": "thread-add", "thread": name, "kind": a.kind, "session": a.session},
         )
         t = st["threads"][name]
-        print(
-            json.dumps(
-                {
-                    "name": name,
-                    "title": t["title"],
-                    "branch": t["branch"],
-                    "tags": [f"teamwork:{st['project']}", f"teamwork-thread:{name}"],
-                    "environment_id": st["envs"].get(a.kind),
-                },
-                ensure_ascii=False,
-            )
-        )
+        out = {
+            "name": name,
+            "title": t["title"],
+            "branch": t["branch"],
+            "tags": [f"teamwork:{tag(st)}", f"teamwork-thread:{name}"],
+            "environment_id": st["envs"].get(a.kind),
+        }
+        if title_warning(t["title"]):
+            out["warning"] = title_warning(t["title"])
+        print(json.dumps(out, ensure_ascii=False))
         return
     if name not in st["threads"]:
         sys.exit(f"unknown thread {name}; known: {', '.join(st['threads']) or '-'}")
@@ -572,8 +595,21 @@ def cmd_prefs(a):
             st["prefs"][k] = int(v)
         else:
             st["prefs"][k] = v
+        if k == "short_name" and v and not re.fullmatch(SHORT_RE, v):
+            sys.exit("short_name: letters/digits/hyphen, max 6 chars (e.g. TFCC)")
+    retitled = {}
+    if any(kv.partition("=")[0] == "short_name" for kv in a.set or []):
+        for n, t in st["threads"].items():
+            new = title_for(st, n)
+            if t.get("title") != new:
+                t["title"] = new
+                retitled[n] = new
     if a.set:
         save(d, st, {"ev": "prefs", "set": a.set})
+    if retitled:
+        print(json.dumps({"retitled": retitled, "tags": f"teamwork:{tag(st)}",
+                          "note": "update each session with set_session_title / set_session_tags"},
+                         ensure_ascii=False), file=sys.stderr)
     print(json.dumps(st["prefs"], ensure_ascii=False))
 
 
@@ -599,6 +635,7 @@ def cmd_worker_prompt(a):
         )
     fill = {
         "PROJECT": st["project"],
+        "TAG": tag(st),
         "GOAL": st.get("goal") or "-",
         "THREAD": a.thread,
         "KIND": t["kind"],
@@ -644,7 +681,7 @@ def cmd_projects(a):
         count = lambda *ss: sum(1 for t in th if t["status"] in ss)
         tasks = list(st.get("tasks", {}).values())
         rows.append({
-            "project": st["project"], "folder": str(f), "lead": st.get("lead", {}).get("session_id"),
+            "project": st["project"], "short_name": tag(st), "folder": str(f), "lead": st.get("lead", {}).get("session_id"),
             "waiting": count("waiting"), "review": count("review"), "working": count("starting", "working"),
             "threads": sum(1 for t in th if t["status"] != "archived"),
             "tasks_done": f"{sum(1 for k in tasks if k['status'] == 'done')}/{len(tasks)}",
@@ -720,6 +757,7 @@ def main():
     x.add_argument("--repo-url")
     x.add_argument("--base", default="main")
     x.add_argument("--force", action="store_true")
+    x.add_argument("--short", help="short name, max 6 chars, used in titles/headers/tags (default: initials, e.g. TFCC)")
     x.set_defaults(f=cmd_init)
 
     x = s.add_parser("lead", help="record lead session id, environment ids, repo url")

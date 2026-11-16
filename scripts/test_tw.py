@@ -77,5 +77,69 @@ class Language(TwCase):
         self.assertIn("not set", self.context())
 
 
+class ShortName(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def run_tw(self, *args, ok=True):
+        r = subprocess.run([sys.executable, str(TW), "-C", str(self.dir), *args], cwd=self.dir,
+                           capture_output=True, text=True)
+        if ok:
+            self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    def state(self):
+        return json.loads((self.dir / ".teamwork" / "state.json").read_text(encoding="utf-8"))
+
+    def test_default_initials_and_titles(self):
+        self.run_tw("init", "teamwork-for-claude-code")
+        self.assertEqual(self.state()["prefs"]["short_name"], "TFCC")
+        out = json.loads(self.run_tw("thread", "add", "core", "--focus", "skill").stdout)
+        self.assertEqual(out["title"], "[TFCC] core · skill")
+        self.assertIn("teamwork:TFCC", out["tags"])
+        self.assertEqual(out["branch"], "tw/teamwork-for-claude-code/core")  # branches keep the full name
+        self.assertNotIn("warning", out)
+        wp = self.run_tw("worker-prompt", "core").stdout
+        self.assertIn("[tw:TFCC] <TYPE> core ->", wp)
+        self.assertIn("[tw:TFCC] TASK lead ->", wp)
+
+    def test_short_project_name_kept(self):
+        self.run_tw("init", "shop")
+        self.assertEqual(self.state()["prefs"]["short_name"], "shop")
+
+    def test_explicit_and_invalid_short(self):
+        self.run_tw("init", "big-data-pipeline", "--short", "BDP2")
+        self.assertEqual(self.state()["prefs"]["short_name"], "BDP2")
+        r = self.run_tw("init", "x-y", "--short", "TOOLONG7", "--force", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_old_project_without_short_name_unchanged(self):
+        self.run_tw("init", "legacy-project")
+        st = self.state()
+        del st["prefs"]["short_name"]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        out = json.loads(self.run_tw("thread", "add", "ui").stdout)
+        self.assertEqual(out["title"], "[legacy-project] ui")
+        self.assertIn("teamwork:legacy-project", out["tags"])
+        self.assertIn("[tw:legacy-project] <TYPE> ui ->", self.run_tw("worker-prompt", "ui").stdout)
+
+    def test_setting_short_name_retitles_threads(self):
+        self.run_tw("init", "legacy-project")
+        self.run_tw("thread", "add", "ui", "--focus", "web")
+        r = self.run_tw("prefs", "--set", "short_name=LGP")
+        self.assertIn('"ui": "[LGP] ui · web"', r.stderr)
+        self.assertEqual(self.state()["threads"]["ui"]["title"], "[LGP] ui · web")
+        self.assertNotEqual(self.run_tw("prefs", "--set", "short_name=WAYTOOLONG", ok=False).returncode, 0)
+
+    def test_long_title_warns(self):
+        self.run_tw("init", "shop")
+        out = json.loads(self.run_tw("thread", "add", "ui", "--focus", "checkout flow and payment screens").stdout)
+        self.assertIn("warning", out)
+
+
 if __name__ == "__main__":
     unittest.main()

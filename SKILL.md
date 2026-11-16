@@ -62,7 +62,7 @@ No argument: run the portfolio view and ask which project this session should le
 2. The project folder is `<served folder>/<name>` unless the user names another folder inside the served folder (the served folder is your starting cwd). If a project with that name already exists (`tw.py projects`), ask whether to attach instead. Otherwise `TW init <name> --goal "<goal>" [--repo-url <url>] [--base <branch>]` (with `-C <served folder>/<name>`, which creates the folder). That folder is your project folder for the rest of this session.
 3. Put standing rules into `.teamwork/INSTRUCTIONS.md` (style, forbidden areas, how to verify). Keep it under 16k characters.
 4. Coordination prefs, defaults shown: `TW prefs --set max_parallel=0 propose_before_start=true update_detail=brief checkin_minutes=10`. `max_parallel=0` means no limit: start every thread the plan needs. Set a number only when the user asks ("at most two at a time"). Change the others when the user says "just start, don't ask", "more detail", and so on.
-5. Make sure the hooks are installed (setup.md §3): run `python3 ${CLAUDE_SKILL_DIR}/scripts/install.py --project <project folder> --served <served folder>` as a dry run, show the user the changes, and `--apply` on their OK.
+5. Make sure the hooks are installed (setup.md §3): run `python3 ${CLAUDE_SKILL_DIR}/scripts/install.py --link --project <project folder> --served <served folder>` as a dry run, show the user the changes, and `--apply` on their OK.
 
 ## 2. Plan (propose, then wait)
 

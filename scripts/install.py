@@ -3,10 +3,18 @@
 
 Run it from an RC session (the user never needs a terminal).
 
-  python3 install.py                     # show what would change (dry run)
-  python3 install.py --apply             # install skill + user allow rules
-  python3 install.py --apply --project <project folder> --served <served folder>
+  python3 install.py --link              # show what would change (dry run)
+  python3 install.py --link --apply      # install skill + user allow rules
+  python3 install.py --link --apply --project <project folder> --served <served folder>
                                          # also add the SessionStart hook to the project and the served folder
+
+--link (recommended) or copy:
+  --link  <config dir>/skills/teamwork becomes a symlink to this clone. Every new session runs the
+          clone's current checkout: upgrade with `git pull`, and whatever lands on the checked-out
+          branch is live at once (so keep that branch working).
+  copy    (no --link) a frozen snapshot of the skill files, without .git, .teamwork, .claude and
+          other local state. Nothing changes until you upgrade: delete <config dir>/skills/teamwork
+          and re-run the installer (it never overwrites an existing skills/teamwork).
 
 Never removes anything. Existing settings are merged, and a .bak copy is written before any settings file changes.
 """
@@ -30,6 +38,13 @@ ALLOW = [
     "mcp__claude-code-remote__list_sessions",
 ]
 HOOK_CMD = f'python3 "{DEST / "scripts" / "tw.py"}" context'
+# Never part of a copy install: version control, per-project teamwork state, the clone's own
+# Claude Code settings, editor/OS/build leftovers.
+COPY_SKIP = (
+    ".git", ".github", ".gitignore", ".gitattributes", ".teamwork", ".claude",
+    "__pycache__", "*.pyc", ".pytest_cache", ".venv", "venv", "node_modules",
+    ".DS_Store", ".idea", ".vscode", "*.bak", "*.swp",
+)
 
 
 def load(p):
@@ -54,14 +69,26 @@ def write(p, data, apply):
 
 
 def main():
+    global CONFIG_DIR, DEST, USER_SETTINGS, HOOK_CMD
+    detected = (
+        f"from $CLAUDE_CONFIG_DIR={os.environ['CLAUDE_CONFIG_DIR']}"
+        if os.environ.get("CLAUDE_CONFIG_DIR")
+        else "default ~/.claude, because $CLAUDE_CONFIG_DIR is not set"
+    )
     ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__,
+        epilog=f"Detected config dir: {CONFIG_DIR} ({detected}). Override with --config-dir.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument(
         "--apply", action="store_true", help="actually write (default is a dry run)"
     )
     ap.add_argument("--config-dir", help="Claude Code config dir (default: $CLAUDE_CONFIG_DIR or ~/.claude)")
-    ap.add_argument("--link", action="store_true", help="symlink the skill instead of copying it")
+    ap.add_argument(
+        "--link",
+        action="store_true",
+        help="symlink the skill to this clone (recommended): live on every pull. Without it: a frozen copy",
+    )
     ap.add_argument("--project", help="project folder to receive the SessionStart hook")
     ap.add_argument("--served", help="folder the Remote Control server serves (RC sessions start here); also gets the hook")
     ap.add_argument(
@@ -75,7 +102,6 @@ def main():
         help="also set autoMemoryEnabled=false in the project",
     )
     a = ap.parse_args()
-    global CONFIG_DIR, DEST, USER_SETTINGS, HOOK_CMD
     if a.config_dir:
         CONFIG_DIR = Path(a.config_dir).expanduser()
         DEST = CONFIG_DIR / "skills" / "teamwork"
@@ -94,15 +120,14 @@ def main():
         if a.apply:
             DEST.parent.mkdir(parents=True, exist_ok=True)
             DEST.symlink_to(SRC, target_is_directory=True)
+    elif DEST.resolve() == SRC or SRC in DEST.resolve().parents:
+        print(f"  {DEST} is inside the clone {SRC}: refusing to copy into itself; pick another --config-dir")
     else:
         print(f"  {'copying' if a.apply else 'would copy'} {SRC} -> {DEST}")
+        print(f"  (snapshot, skipping {', '.join(COPY_SKIP)}; to upgrade later, delete {DEST} and re-run."
+              " --link is recommended instead)")
         if a.apply:
-            shutil.copytree(
-                SRC,
-                DEST,
-                dirs_exist_ok=True,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".teamwork"),
-            )
+            shutil.copytree(SRC, DEST, ignore=shutil.ignore_patterns(*COPY_SKIP))
 
     if not a.no_allow:
         print("2. allow rules in user settings")

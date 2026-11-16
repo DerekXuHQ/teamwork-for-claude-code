@@ -20,6 +20,8 @@ python3 <path>/teamwork/scripts/install.py --link --project <project folder> --s
 python3 <path>/teamwork/scripts/install.py --apply --link --project <project folder> --served <served folder>  # writes
 ```
 
+Use `--link` (recommended): the skill becomes a symlink to the clone, so every new session runs the clone's current checkout; upgrade with `git pull`, and whatever lands on the checked-out branch is live at once. Without `--link` the installer copies a frozen snapshot (without `.git`, `.teamwork`, `.claude` and other local state); to upgrade a copy, delete `<config dir>/skills/teamwork` and re-run, since the installer never overwrites an existing one.
+
 Then start a **new** RC session (skills load at session start) and check `/teamwork` is listed.
 
 ## §2 Let RC threads report without stalling

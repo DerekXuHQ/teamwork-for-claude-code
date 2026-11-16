@@ -772,7 +772,7 @@ def cmd_prefs(a):
     for kv in a.set or []:
         k, _, v = kv.partition("=")
         cur = st["prefs"].get(k)
-        if isinstance(cur, bool):
+        if isinstance(cur, bool) or v.lower() in ("true", "false", "yes", "no", "on", "off"):
             st["prefs"][k] = v.lower() in ("1", "true", "yes", "on")
         elif v.isdigit():
             st["prefs"][k] = int(v)

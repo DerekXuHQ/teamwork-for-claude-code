@@ -381,6 +381,15 @@ class Review(TwCase):
         self.assertEqual(self.task()["review"]["result"], "skipped")
         self.assertEqual(self.task()["review"]["note"], "docs typo")
 
+    def test_bool_pref_on_missing_key(self):
+        st = self.state()
+        del st["prefs"]["require_review"]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.tw("prefs", "--set", "require_review=false")
+        self.assertIs(self.state()["prefs"]["require_review"], False)
+        self.tw("prefs", "--set", "require_review=true")
+        self.assertIs(self.state()["prefs"]["require_review"], True)
+
     def test_old_project_without_pref_not_gated(self):
         st = self.state()
         del st["prefs"]["require_review"]

@@ -12,6 +12,7 @@ Assignments per the lead, 2026-11-16.
 | I4 | medium | Worktree for a new rc thread is not created by the lead | core | assigned: core T9 |
 | I5 | low | Project rename does not cover branches, worktree paths, `.teamwork/` or thread prompts | core | assigned: core T8 (decision: short name is display-only) |
 | I6 | low | Header task ids drift to probe ids or ids not on the board | core | assigned: core T9 |
+| I8 | high | User requests have no ledger; nobody reports back after delivery | core | assigned: core T14 |
 | I7 | low | `install.py --help` does not say which config dir it found | core | fixed (main c95f9b8 / fa13016) |
 
 ## I1. Every tool call in an rc thread needs a manual "allow" (L5)
@@ -76,7 +77,18 @@ work was merged into another task, say so in the body.
 **Fix (core).** One line in `--help`: the detected dir and why (CLAUDE_CONFIG_DIR or default).
 Handed off as the P2 probe; core is doing it with T2.
 
-## Pending
+## I8. User requests have no ledger; nobody reports back after delivery
 
-- L6: cloud thread sweep timing and cloud → lead handoff through the STATUS block. Waiting for the
-  lead's FOLLOWUP; new issues from it go here.
+**Repro.** The user asks the lead for something; the lead routes it to a thread; the thread
+finishes and reports to the lead. Nothing records the original request, so nothing makes sure
+the result gets back to the user, and nobody can list which requests are still open.
+
+**Fix (core, T14, user's top priority).** Every user request gets a ledger entry when it arrives
+(who asked, what, which task it became). It is closed only when the result has been reported back to
+the user. The lead's sweep lists entries that were delivered but never reported back.
+
+## Not observed in this run
+
+- Child-session failure events (L6c): no thread failed. Re-test by forcing a turn error in a
+  throwaway thread.
+- Cloud → cloud messaging: not exercised.

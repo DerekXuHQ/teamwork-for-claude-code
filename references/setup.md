@@ -11,20 +11,20 @@ Projects live as subfolders of the served folder (e.g. `~/workspace/shop/`), so 
 
 ## §1 Install the skill
 
-The skill must be in `~/.claude/skills/teamwork/` on the computer that runs the Remote Control server: RC sessions are Claude Code running there and load personal skills from that home folder. Cloud sessions never load it; they get the protocol through `append_system_prompt`.
+The skill must be in `<config dir>/skills/teamwork/` on the computer that runs the Remote Control server: RC sessions are Claude Code running there and load personal skills from that config dir. The config dir is `$CLAUDE_CONFIG_DIR` when the server was started with it (for example `~/.claude-b` for a second account), otherwise `~/.claude`. A skill in the wrong one shows up as "unknown command /teamwork". To find it from an RC session: `echo $CLAUDE_CONFIG_DIR`. Cloud sessions never load it; they get the protocol through `append_system_prompt`.
 
 Have any RC session run (after the files are on the machine):
 
 ```
-python3 <path>/teamwork/scripts/install.py --project <project folder>            # dry run, shows changes
-python3 <path>/teamwork/scripts/install.py --apply --project <project folder>    # writes them
+python3 <path>/teamwork/scripts/install.py --link --project <project folder> --served <served folder>          # dry run
+python3 <path>/teamwork/scripts/install.py --apply --link --project <project folder> --served <served folder>  # writes
 ```
 
 Then start a **new** RC session (skills load at session start) and check `/teamwork` is listed.
 
 ## §2 Let RC threads report without stalling
 
-In the test, an RC child stopped at "Waiting on permission: Send Message". `install.py` adds these to `~/.claude/settings.json` on that computer, which every RC session there reads:
+In the test, an RC child stopped at "Waiting on permission: Send Message". `install.py` adds these to `<config dir>/settings.json` on that computer, which every RC session there reads:
 
 ```json
 { "permissions": { "allow": [

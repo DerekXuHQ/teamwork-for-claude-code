@@ -62,17 +62,20 @@ cloud threads cannot message a Remote Control lead, so the lead reads their tran
 Open a session in your Remote Control environment and ask it to run:
 
 ```bash
-git clone https://github.com/<owner>/teamwork-for-claude-code ~/.claude/skills/teamwork
+git clone https://github.com/DerekXuHQ/teamwork-for-claude-code <served folder>/teamwork-for-claude-code
 ```
 
 ```bash
-python3 ~/.claude/skills/teamwork/scripts/install.py --project <served folder>/<project> --served <served folder>
+python3 <served folder>/teamwork-for-claude-code/scripts/install.py --link --project <served folder>/<project> --served <served folder>
 ```
 
 That is a dry run that prints every change. Re-run with `--apply` to write them. The installer:
 
-1. keeps the skill at `~/.claude/skills/teamwork` (copies it there if you cloned elsewhere);
-2. adds four allow rules to `~/.claude/settings.json` so threads can report without stalling on a permission prompt
+1. links (or, without `--link`, copies) the skill into `<config dir>/skills/teamwork`. The config dir is
+   `$CLAUDE_CONFIG_DIR` if set, else `~/.claude`. **Check which one your Remote Control server uses**: if it runs with
+   e.g. `CLAUDE_CONFIG_DIR=~/.claude-b`, pass `--config-dir ~/.claude-b`, or `/teamwork` will not be found. An existing
+   `skills/teamwork` is never overwritten;
+2. adds four allow rules to `<config dir>/settings.json` so threads can report without stalling on a permission prompt
    (`send_message`, `get_session`, `list_events`, `list_sessions` from the `claude-code-remote` tools), after writing a `.bak` copy;
 3. adds a SessionStart hook to the project folder and the served folder so sessions see the board.
 

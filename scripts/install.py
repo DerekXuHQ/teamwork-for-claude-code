@@ -13,20 +13,23 @@ Never removes anything. Existing settings are merged, and a .bak copy is written
 
 import argparse
 import json
+import os
 import shutil
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent
 HOME = Path.home()
-DEST = HOME / ".claude" / "skills" / "teamwork"
-USER_SETTINGS = HOME / ".claude" / "settings.json"
+# Claude Code reads CLAUDE_CONFIG_DIR when set (a Remote Control server may run with e.g. ~/.claude-b).
+CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (HOME / ".claude")).expanduser()
+DEST = CONFIG_DIR / "skills" / "teamwork"
+USER_SETTINGS = CONFIG_DIR / "settings.json"
 ALLOW = [
     "mcp__claude-code-remote__send_message",
     "mcp__claude-code-remote__get_session",
     "mcp__claude-code-remote__list_events",
     "mcp__claude-code-remote__list_sessions",
 ]
-HOOK_CMD = 'python3 "$HOME/.claude/skills/teamwork/scripts/tw.py" context'
+HOOK_CMD = f'python3 "{DEST / "scripts" / "tw.py"}" context'
 
 
 def load(p):
@@ -57,12 +60,14 @@ def main():
     ap.add_argument(
         "--apply", action="store_true", help="actually write (default is a dry run)"
     )
+    ap.add_argument("--config-dir", help="Claude Code config dir (default: $CLAUDE_CONFIG_DIR or ~/.claude)")
+    ap.add_argument("--link", action="store_true", help="symlink the skill instead of copying it")
     ap.add_argument("--project", help="project folder to receive the SessionStart hook")
     ap.add_argument("--served", help="folder the Remote Control server serves (RC sessions start here); also gets the hook")
     ap.add_argument(
         "--no-allow",
         action="store_true",
-        help="skip adding allow rules to ~/.claude/settings.json",
+        help="skip adding allow rules to <config dir>/settings.json",
     )
     ap.add_argument(
         "--no-auto-memory",
@@ -70,10 +75,25 @@ def main():
         help="also set autoMemoryEnabled=false in the project",
     )
     a = ap.parse_args()
+    global CONFIG_DIR, DEST, USER_SETTINGS, HOOK_CMD
+    if a.config_dir:
+        CONFIG_DIR = Path(a.config_dir).expanduser()
+        DEST = CONFIG_DIR / "skills" / "teamwork"
+        USER_SETTINGS = CONFIG_DIR / "settings.json"
+        HOOK_CMD = f'python3 "{DEST / "scripts" / "tw.py"}" context'
+    print(f"Claude Code config dir: {CONFIG_DIR}"
+          + ("" if os.environ.get("CLAUDE_CONFIG_DIR") or a.config_dir else "  (CLAUDE_CONFIG_DIR not set; check it matches the one your Remote Control server uses)"))
 
     print("1. skill files")
-    if SRC == DEST:
-        print(f"  already running from {DEST}")
+    if DEST.exists() and DEST.resolve() == SRC:
+        print(f"  already in place: {DEST}")
+    elif DEST.exists() or DEST.is_symlink():
+        print(f"  {DEST} already exists: left untouched (remove it yourself to reinstall)")
+    elif a.link:
+        print(f"  {'linking' if a.apply else 'would link'} {DEST} -> {SRC}")
+        if a.apply:
+            DEST.parent.mkdir(parents=True, exist_ok=True)
+            DEST.symlink_to(SRC, target_is_directory=True)
     else:
         print(f"  {'copying' if a.apply else 'would copy'} {SRC} -> {DEST}")
         if a.apply:

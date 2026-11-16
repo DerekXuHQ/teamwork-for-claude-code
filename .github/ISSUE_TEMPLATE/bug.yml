@@ -1,0 +1,42 @@
+name: Bug
+description: Something in the skill, tw.py or install.py does not work as documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got.
+    validations: {required: true}
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. In the lead session, run ...
+        2. ...
+    validations: {required: true}
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options: [lead session, rc thread, cloud thread, tw.py, install.py, docs, not sure]
+    validations: {required: true}
+  - type: textarea
+    id: error
+    attributes:
+      label: Exact error text
+      description: Paste tool errors verbatim (e.g. `elevated_session_untrusted_device`). Remove session ids if you prefer.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Versions
+      description: Commit of this repo, and Claude Code version (`container_cc_version` in get_session).
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I removed names, emails, machine names and home paths from this report.
+          required: true

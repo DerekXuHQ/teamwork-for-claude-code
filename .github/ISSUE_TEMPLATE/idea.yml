@@ -1,0 +1,20 @@
+name: Idea
+description: A feature, a change to the protocol, or a better default.
+labels: [idea]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or slow today? Concrete examples help.
+    validations: {required: true}
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change. Which file or command, if you know.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [protocol and messages, tw.py and the board, install and permissions, transport (rc / cloud), docs, other]

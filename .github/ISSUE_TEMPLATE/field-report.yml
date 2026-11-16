@@ -1,0 +1,41 @@
+name: Field test report
+description: You ran a team with this skill. Tell us which messaging paths worked and which did not.
+labels: [field-test]
+body:
+  - type: input
+    id: plan
+    attributes:
+      label: Account plan and date
+      placeholder: Pro, 2026-11-15
+    validations: {required: true}
+  - type: textarea
+    id: team
+    attributes:
+      label: Team shape
+      description: How many threads, which were rc and which cloud.
+    validations: {required: true}
+  - type: textarea
+    id: paths
+    attributes:
+      label: Paths tested
+      description: One row per path. Use the table in references/transport.md as a checklist.
+      value: |
+        | From → To | Action | Result | Error text | Latency |
+        |---|---|---|---|---|
+        | rc → rc | send_message | | | |
+        | rc → cloud | send_message | | | |
+        | cloud → rc | send_message | | | |
+        | rc → rc | interrupt + RECALL | | | |
+    validations: {required: true}
+  - type: textarea
+    id: friction
+    attributes:
+      label: Friction
+      description: Permission prompts, stalls, confusing messages, anything you had to do by hand.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I removed names, emails, machine names and home paths from this report.
+          required: true

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: What works between rc and cloud sessions
+    url: https://github.com/DerekXuHQ/teamwork-for-claude-code/blob/main/references/transport.md
+    about: Check the tested paths before filing a transport bug.

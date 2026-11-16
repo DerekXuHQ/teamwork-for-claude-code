@@ -304,13 +304,18 @@ def render_tasks(st, only_owner=None):
         if only_owner and k.get("owner") != only_owner:
             continue
         deps = ",".join(k.get("deps", [])) or "-"
+        rv = k.get("review") or {}
+        review = f"{rv['result']} ({rv.get('reviewer') or '-'})" if rv else "-"
+        if k.get("checks"):
+            review += f", checks {k['checks']}"
         rows.append(
-            f"| {tid} | {k['title']} | {k.get('owner') or '-'} | {deps} | {k['status']} | {k.get('accept') or '-'} |"
+            f"| {tid} | {k['title']} | {k.get('owner') or '-'} | {deps} | {k['status']} | {k.get('accept') or '-'} "
+            f"| {review} |"
         )
     if not rows:
         return "(no tasks)"
     return (
-        "| id | task | owner | deps | status | done when |\n|---|---|---|---|---|---|\n"
+        "| id | task | owner | deps | status | done when | review |\n|---|---|---|---|---|---|---|\n"
         + "\n".join(rows)
     )
 
@@ -409,6 +414,7 @@ def cmd_init(a):
             "update_detail": "brief",
             "checkin_minutes": 10,
             "short_name": short,  # in titles [X], headers [tw:X], tags teamwork:X
+            "require_review": True,  # task done needs an independent review pass (task set --review)
             "stuck_minutes": STUCK_DEFAULT,  # working thread silent this long -> "possibly stuck"; 0 = off
             "language": "",
             "thread_permission_mode": "",  # create_session permission_mode; empty = the lead's own mode  # conversation language code (zh, en, ...); empty = follow the user's latest message
@@ -559,9 +565,30 @@ def cmd_task(a):
         if a.id not in st["tasks"]:
             sys.exit(f"unknown task {a.id}")
         k = st["tasks"][a.id]
+        if a.checks:
+            k["checks"] = a.checks
+        if a.review:
+            if not a.reviewer:
+                sys.exit("--review needs --reviewer (a lead subagent, a review thread, ...)")
+            if a.reviewer == k.get("owner"):
+                sys.exit(f"{a.reviewer} owns {a.id}: the reviewer must be someone without its context")
+            k["review"] = {"result": a.review, "reviewer": a.reviewer, "note": a.review_note or "", "at": now()}
+            if a.review == "fail" and not a.status:
+                k["status"] = "working"
+                print(f"{a.id} back to working: send its owner a FOLLOWUP with the review findings", file=sys.stderr)
         if a.status:
             if a.status not in TASK_STATUSES:
                 sys.exit(f"status must be one of {TASK_STATUSES}")
+            if a.status == "done" and st["prefs"].get("require_review") and not a.skip_review:
+                rv = k.get("review") or {}
+                if rv.get("result") != "pass":
+                    sys.exit(f"{a.id}: no passing review yet. Have an independent reviewer check the diff against "
+                             f"'done when', then `task set {a.id} --review pass --reviewer <who>` "
+                             "(or --skip-review \"<reason>\")")
+                if k.get("checks") == "fail" and a.checks != "pass":
+                    sys.exit(f"{a.id}: checks failed; fix them and record `--checks pass` first")
+            if a.skip_review:
+                k["review"] = {"result": "skipped", "note": a.skip_review, "at": now()}
             k["status"] = a.status
             if a.status == "done":
                 for r in deliver_ready(st):
@@ -1160,6 +1187,11 @@ def main():
     x.add_argument("--accept")
     x.add_argument("--status")
     x.add_argument("--notes")
+    x.add_argument("--review", choices=["pass", "fail"], help="independent review result against 'done when'")
+    x.add_argument("--reviewer", help="who reviewed (not the owner): lead-subagent, review thread name, user")
+    x.add_argument("--review-note")
+    x.add_argument("--checks", choices=["pass", "fail", "none"], help="tests / checks result on the branch")
+    x.add_argument("--skip-review", metavar="REASON", help="mark done without review (recorded)")
     x.set_defaults(f=cmd_task)
 
     x = s.add_parser("plan", help="show, approve or reopen the plan")

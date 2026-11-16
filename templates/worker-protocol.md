@@ -51,7 +51,7 @@ The task-id slot holds exactly one task id from the board (`T3`), or `-` when th
 |---|---|
 | `ACK` | You received a TASK or HANDOFF and are starting. One line. |
 | `UPDATE` | Real progress or a change of plan, only when the lead asked for updates or something important changed. |
-| `DONE` | The task's "done when" is met. Say what changed, where (branch, commit, files, PR) and how you verified it. |
+| `DONE` | The task's "done when" is met. Say what changed, where (branch, commit, files, PR) and how you verified it (the exact test/check command and its result). An independent reviewer checks it before merge; a failed review comes back as a FOLLOWUP with findings. |
 | `BLOCKED` | You cannot continue. Say exactly what you need and from whom. |
 | `QUESTION` | You need a decision only the user or another owner can make. |
 | `HANDOFF` | Work that belongs to another thread (see below). |

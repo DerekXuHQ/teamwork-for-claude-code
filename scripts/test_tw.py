@@ -278,9 +278,9 @@ class Requests(TwCase):
         self.tw("req", "link", "R1", "T1", "T2")
         self.assertEqual(self.req("R1")["status"], "dispatched")
         self.assertNotEqual(self.tw("req", "link", "R1", "T9", ok=False).returncode, 0)
-        self.tw("task", "set", "T1", "--status", "done")
+        self.tw("task", "set", "T1", "--status", "done", "--review", "pass", "--reviewer", "rev")
         self.assertEqual(self.req("R1")["status"], "dispatched")  # T2 still open
-        r = self.tw("task", "set", "T2", "--status", "done")
+        r = self.tw("task", "set", "T2", "--status", "done", "--review", "pass", "--reviewer", "rev")
         self.assertIn("request R1 delivered", r.stderr)
         self.assertEqual(self.req("R1")["status"], "delivered")
         self.assertNotEqual(self.tw("req", "close", "R1", "--confirmed", ok=False).returncode, 0)  # not reported yet
@@ -302,7 +302,7 @@ class Requests(TwCase):
         self.tw("req", "add", "done thing")
         self.tw("req", "add", "dropped")
         self.tw("req", "close", "R3", "--declined")
-        self.tw("task", "set", "T1", "--status", "done")
+        self.tw("task", "set", "T1", "--status", "done", "--review", "pass", "--reviewer", "rev")
         board = self.tw("board").stdout
         self.assertLess(board.index("## Your requests (not closed)"), board.index("## Overview"))
         self.assertIn("**R1** [delivered (report it!)] fix login", board)
@@ -342,6 +342,50 @@ class Requests(TwCase):
         again = json.loads(self.tw("req", "import", str(md)).stdout)
         self.assertEqual(again["imported"], [])  # idempotent: existing ids are skipped
         self.assertEqual(json.loads(self.tw("req", "add", "next one").stdout).keys(), {"R5"})
+
+
+class Review(TwCase):
+    """T10: independent review gate before done."""
+
+    def setUp(self):
+        super().setUp()
+        self.tw("thread", "add", "ui")
+        self.tw("task", "add", "T1", "--owner", "ui", "--accept", "button is blue")
+
+    def task(self):
+        return self.state()["tasks"]["T1"]
+
+    def test_done_needs_independent_pass(self):
+        self.assertTrue(self.state()["prefs"]["require_review"])
+        self.assertNotEqual(self.tw("task", "set", "T1", "--status", "done", ok=False).returncode, 0)
+        r = self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "ui", ok=False)
+        self.assertIn("must be someone without its context", r.stderr)
+        self.assertNotEqual(self.tw("task", "set", "T1", "--review", "pass", ok=False).returncode, 0)
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "lead-subagent")
+        self.tw("task", "set", "T1", "--status", "done")
+        self.assertEqual(self.task()["status"], "done")
+        self.assertIn("pass (lead-subagent)", self.tw("board").stdout)
+
+    def test_fail_sends_back_and_checks_gate(self):
+        self.tw("task", "set", "T1", "--status", "review")
+        r = self.tw("task", "set", "T1", "--review", "fail", "--reviewer", "rev", "--review-note", "still red")
+        self.assertIn("back to working", r.stderr)
+        self.assertEqual(self.task()["status"], "working")
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--checks", "fail")
+        self.assertNotEqual(self.tw("task", "set", "T1", "--status", "done", ok=False).returncode, 0)
+        self.tw("task", "set", "T1", "--status", "done", "--checks", "pass")
+        self.assertEqual(self.task()["checks"], "pass")
+
+    def test_skip_review_is_recorded(self):
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "docs typo")
+        self.assertEqual(self.task()["review"]["result"], "skipped")
+        self.assertEqual(self.task()["review"]["note"], "docs typo")
+
+    def test_old_project_without_pref_not_gated(self):
+        st = self.state()
+        del st["prefs"]["require_review"]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.tw("task", "set", "T1", "--status", "done")
 
 
 if __name__ == "__main__":

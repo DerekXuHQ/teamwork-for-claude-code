@@ -258,5 +258,91 @@ class Stuck(TwCase):
         self.assertIn("ui", self.ready())
 
 
+class Requests(TwCase):
+    """T14: every user request is tracked until reported and closed."""
+
+    def setUp(self):
+        super().setUp()
+        self.tw("thread", "add", "ui")
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "ui")
+
+    def req(self, r):
+        return self.state()["requests"][r]
+
+    def test_lifecycle_and_rules(self):
+        out = json.loads(self.tw("req", "add", "make the button blue").stdout)
+        self.assertEqual(out["R1"]["status"], "open")
+        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "reported", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "closed", ok=False).returncode, 0)
+        self.tw("req", "link", "R1", "T1", "T2")
+        self.assertEqual(self.req("R1")["status"], "dispatched")
+        self.assertNotEqual(self.tw("req", "link", "R1", "T9", ok=False).returncode, 0)
+        self.tw("task", "set", "T1", "--status", "done")
+        self.assertEqual(self.req("R1")["status"], "dispatched")  # T2 still open
+        r = self.tw("task", "set", "T2", "--status", "done")
+        self.assertIn("request R1 delivered", r.stderr)
+        self.assertEqual(self.req("R1")["status"], "delivered")
+        self.assertNotEqual(self.tw("req", "close", "R1", "--confirmed", ok=False).returncode, 0)  # not reported yet
+        self.assertNotEqual(self.tw("req", "close", "R1", ok=False).returncode, 0)  # needs a reason
+        self.tw("req", "set", "R1", "--status", "reported", "--followup", "ask if blue is right")
+        self.assertIn("reported_at", self.req("R1"))
+        self.tw("req", "close", "R1", "--confirmed")
+        self.assertEqual(self.req("R1")["closed_reason"], "confirmed")
+
+    def test_declined_closes_from_any_state(self):
+        self.tw("req", "add", "maybe a dark mode")
+        self.tw("req", "close", "R1", "--declined", "--note", "user: not now")
+        self.assertEqual(self.req("R1")["status"], "closed")
+        self.assertEqual(json.loads(self.tw("req", "list").stdout), {})
+        self.assertIn("R1", json.loads(self.tw("req", "list", "--all").stdout))
+
+    def test_board_hook_and_ready_show_unreported(self):
+        self.tw("req", "add", "fix login", "--tasks", "T1")
+        self.tw("req", "add", "done thing")
+        self.tw("req", "add", "dropped")
+        self.tw("req", "close", "R3", "--declined")
+        self.tw("task", "set", "T1", "--status", "done")
+        board = self.tw("board").stdout
+        self.assertLess(board.index("## Your requests (not closed)"), board.index("## Overview"))
+        self.assertIn("**R1** [delivered (report it!)] fix login", board)
+        self.assertNotIn("dropped", board)
+        ctx = self.context()
+        self.assertIn("Delivered, not yet reported to the user: R1: fix login", ctx)
+        self.assertEqual(json.loads(self.tw("ready").stdout)["unreported_requests"], {"R1": "fix login"})
+        self.tw("req", "set", "R1", "--status", "reported")
+        self.assertNotIn("not yet reported", self.context())
+
+    def test_chinese_labels(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("req", "add", "按钮改成蓝色")
+        self.tw("thread", "set", "ui", "--session", "s1", "--status", "working")
+        board = self.tw("board").stdout
+        for zh in ("## 你提的事（未关闭）", "[待办]", "## 总览", "**进行中**", "## 计划"):
+            self.assertIn(zh, board)
+
+    def test_import_markdown_ledger(self):
+        md = self.dir / "REQUESTS.md"
+        md.write_text(
+            "| # | 用户说的 | 落到哪里 | 状态 | 回访 |\n|---|---|---|---|---|\n"
+            "| R1 | 克隆仓库 | — | 已关闭 | — |\n"
+            "| R2 | 写成文件 | T1（framework） | 已派 | 英文版先审 |\n"
+            "| R3 | 看一下示例应用 | 摘要发了 | 已交付 | 要回报 |\n"
+            "| R4 | research 都改进去 | T1–T2 | 已派 | 逐个回报 |\n", encoding="utf-8")
+        dry = json.loads(self.tw("req", "import", str(md), "--dry-run").stdout)
+        self.assertEqual(set(dry["would_import"]), {"R1", "R2", "R3", "R4"})
+        self.assertNotIn("requests", {k for k, v in self.state().items() if v})  # dry run wrote nothing
+        self.tw("req", "import", str(md))
+        st = self.state()["requests"]
+        self.assertEqual(st["R1"]["status"], "closed")
+        self.assertEqual(st["R2"]["tasks"], ["T1"])
+        self.assertEqual(st["R2"]["followup"], "英文版先审")
+        self.assertEqual(st["R3"]["status"], "delivered")
+        self.assertEqual(st["R4"]["tasks"], ["T1", "T2"])
+        again = json.loads(self.tw("req", "import", str(md)).stdout)
+        self.assertEqual(again["imported"], [])  # idempotent: existing ids are skipped
+        self.assertEqual(json.loads(self.tw("req", "add", "next one").stdout).keys(), {"R5"})
+
+
 if __name__ == "__main__":
     unittest.main()

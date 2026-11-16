@@ -112,6 +112,8 @@ For each ready task, oldest first:
 
 **Language first.** Answer the user in the language they wrote in, and write message bodies to threads in that language too (headers keep their English keywords: `[tw:<short>] TASK lead -> ui T2`). Record it with `TW prefs --set language=<code>` (`zh`, `en`, ...): `worker-prompt` and the SessionStart hook pass it to every new thread. **When the user switches language**, update the pref and broadcast one `FOLLOWUP` to every open thread saying so, in the new language. Files still follow the task (repo docs are English unless the task says otherwise).
 
+**Record before you route.** Every separate thing the user asks for, decides or wants checked becomes a request: `TW req add "<their words, short>" [--tasks T3]` → `R<n>`. Nothing the user said may be dropped: one message with three asks gives three requests. Link it when you create or find the task (`TW req link R4 T7`; open → dispatched). The ledger then moves it for you: when all its tasks are `done` it becomes `delivered`. Lifecycle: open → dispatched → delivered → **reported** (you told the user what came back: `TW req set R4 --status reported [--followup "<what to check with them later>"]`) → closed (`TW req close R4 --confirmed` once the user confirms, or `--declined` when they say not to do it). Answered on the spot? `req add`, then `set --status delivered`, answer, `set --status reported`. Never close a request yourself without one of those two.
+
 For each message from the user decide, and **say which in your reply**:
 
 - **Answer in place**: questions about the project, status, plans. Answer from the board and recent reports.
@@ -138,10 +140,12 @@ A sweep refreshes the ledger from the threads. Run it when a timer or idle notic
    - Still running → read its latest `result` as above. Found a newer `<tw-status>` → record it with `--from-status`. Nothing new → send a `FOLLOWUP` asking for one STATUS block now (a long build is fine; silence is not).
    - Still nothing after twice `stuck_minutes` → tell the user which thread is silent and since when, and offer to RECALL it or reassign the task (step 6). Do not recall on your own.
 8. Then dispatch any newly ready tasks (step 3) and set the next timer.
+9. **Report what was delivered.** `TW ready` → `unreported_requests` (also at the top of the SessionStart context and the board). For each: tell the user, in their language, what came back and where, then `TW req set <R> --status reported`, with `--followup` for anything you must check with them later. Reported requests with a follow-up stay on the board until the user confirms (`req close --confirmed`).
 
-Status reply to the user (keep this shape, newest information only):
+Status reply to the user (keep this shape, newest information only; headings in the user's language, the board's labels with `language=zh` are: 你提的事 / 等你处理 / 可能卡住 / 待审 / 进行中 / 空闲 / 下一步):
 
 ```
+Your requests: <R<n> — status; delivered ones are reported here first>
 Waiting on you: <thread — what it needs, how to unblock (often: open the thread and approve a prompt)>
 Ready for review: <thread — result, where>
 Working: <thread — current step>

@@ -58,6 +58,69 @@ def now():
     return t.astimezone().isoformat(timespec="seconds")
 
 
+# Board / status labels follow prefs.language (en fallback).
+LABELS = {
+    "en": {
+        "planned": "Suggested (no session yet)", "starting": "Created, first turn not finished",
+        "working": "Working", "waiting": "Waiting on you (question, permission prompt, or failure)",
+        "review": "Ready for review", "landing": "Landing (approved, being merged)",
+        "idle": "Idle (finished its turn, nothing pending)", "resolved": "Resolved",
+        "stuck": "Possibly stuck (working, no report for over {n} min)", "no_report": "no report for {m} min",
+        "overview": "Overview", "questions": "Waiting on the user", "roster": "Roster", "plan": "Plan",
+        "requests": "Your requests (not closed)", "unreported": "Delivered, not yet reported to the user",
+        "req_open": "open", "req_dispatched": "dispatched", "req_delivered": "delivered (report it!)",
+        "req_reported": "reported", "req_closed": "closed", "followup": "follow-up",
+        "no_threads": "(no threads yet)",
+    },
+    "zh": {
+        "planned": "建议中（还没有会话）", "starting": "已创建，第一轮还没结束",
+        "working": "进行中", "waiting": "等你处理（问题、权限弹窗或失败）",
+        "review": "待审", "landing": "合并中（已批准）",
+        "idle": "空闲（本轮结束，没有待办）", "resolved": "已完结",
+        "stuck": "可能卡住（进行中，超过 {n} 分钟没有汇报）", "no_report": "{m} 分钟没有汇报",
+        "overview": "总览", "questions": "等你回答", "roster": "成员", "plan": "计划",
+        "requests": "你提的事（未关闭）", "unreported": "已交付、还没回报给用户",
+        "req_open": "待办", "req_dispatched": "已派", "req_delivered": "已交付（待回报！）",
+        "req_reported": "已回报", "req_closed": "已关闭", "followup": "回访",
+        "no_threads": "（还没有线程）",
+    },
+}
+
+
+def lab(st, key, **kw):
+    code = (st.get("prefs", {}).get("language") or "en").strip().lower().split("-")[0]
+    return LABELS.get(code, LABELS["en"]).get(key, LABELS["en"][key]).format(**kw)
+
+
+REQ_STATUSES = ["open", "dispatched", "delivered", "reported", "closed"]
+# Accepted when importing a markdown ledger (status column in either language).
+REQ_STATUS_ALIASES = {"待办": "open", "已派": "dispatched", "已交付": "delivered", "已回报": "reported",
+                      "已关闭": "closed", **{x: x for x in REQ_STATUSES}}
+
+
+def unreported(st):
+    return {r: q for r, q in st.get("requests", {}).items() if q["status"] == "delivered"}
+
+
+def render_requests(st):
+    reqs = [(r, q) for r, q in st.get("requests", {}).items() if q["status"] != "closed"]
+    if not reqs:
+        return None
+    order = {"delivered": 0, "open": 1, "dispatched": 2, "reported": 3}
+    reqs.sort(key=lambda x: (order.get(x[1]["status"], 9), int(x[0][1:]) if x[0][1:].isdigit() else 0))
+    out = []
+    for r, q in reqs:
+        line = f"- **{r}** [{lab(st, 'req_' + q['status'])}] {q['text']}"
+        extra = [", ".join(q.get("tasks", [])), q.get("where") or ""]
+        extra = " · ".join(x for x in extra if x)
+        if extra:
+            line += f" — {extra}"
+        if q.get("followup"):
+            line += f" — {lab(st, 'followup')}: {q['followup']}"
+        out.append(line)
+    return "\n".join(out)
+
+
 STUCK_DEFAULT = 30  # minutes without a report before a working thread counts as possibly stuck
 
 
@@ -259,22 +322,22 @@ def render_groups(st):
     for g in order:
         if g == "stuck":
             if stuck:
-                out.append(f"**Possibly stuck (working, no report for over "
-                           f"{st['prefs'].get('stuck_minutes', STUCK_DEFAULT)} min)**")
+                out.append(f"**{lab(st, 'stuck', n=st['prefs'].get('stuck_minutes', STUCK_DEFAULT))}**")
                 for n, m in stuck.items():
                     t = st["threads"][n]
-                    out.append(f"- {t.get('title') or n} ({t['kind']}) — no report for {m} min — {t.get('summary') or '-'}")
+                    out.append(f"- {t.get('title') or n} ({t['kind']}) — {lab(st, 'no_report', m=m)} — "
+                               f"{t.get('summary') or '-'}")
             continue
         names = [n for n, t in st["threads"].items() if t["status"] == g and n not in stuck]
         if not names:
             continue
-        out.append(f"**{THREAD_STATUSES[g]}**")
+        out.append(f"**{lab(st, g)}**")
         for n in names:
             t = st["threads"][n]
             out.append(
                 f"- {t.get('title') or n} ({t['kind']}) — {t.get('summary') or '-'}"
             )
-    return "\n".join(out) or "(no threads yet)"
+    return "\n".join(out) or lab(st, "no_threads")
 
 
 def render_board(st):
@@ -287,12 +350,17 @@ def render_board(st):
     out = [
         f"# teamwork: {st['project']}" + (f" ({tag(st)})" if tag(st) != st["project"] else ""),
         "",
+    ]
+    reqs = render_requests(st)
+    if reqs:
+        out += [f"## {lab(st, 'requests')}", "", reqs, ""]
+    out += [
         f"Goal: {st.get('goal') or '-'}",
         f"Plan: {approved}    Updated: {st.get('updated', '-')}",
         f"Folder: {r.get('path') or '-'}    Repo: {r.get('url') or '-'}    Base branch: {r.get('base') or 'main'}",
         f"Prefs: {json.dumps(st.get('prefs', {}), ensure_ascii=False)}",
         "",
-        "## Overview",
+        f"## {lab(st, 'overview')}",
         "",
         render_groups(st),
     ]
@@ -300,10 +368,10 @@ def render_board(st):
         (i, q) for i, q in enumerate(st.get("questions", [])) if not q.get("answered")
     ]
     if open_q:
-        out += ["", "## Waiting on the user", ""] + [
+        out += ["", f"## {lab(st, 'questions')}", ""] + [
             f"- [{i}] ({q['from']}) {q['text']}" for i, q in open_q
         ]
-    out += ["", "## Roster", "", render_roster(st), "", "## Plan", "", render_tasks(st)]
+    out += ["", f"## {lab(st, 'roster')}", "", render_roster(st), "", f"## {lab(st, 'plan')}", "", render_tasks(st)]
     return "\n".join(out) + "\n"
 
 
@@ -334,6 +402,7 @@ def cmd_init(a):
         "tasks": {},
         "plan_approved": False,
         "questions": [],
+        "requests": {},
         "prefs": {
             "max_parallel": 0,  # 0 = no limit; set only when the user asks for one
             "propose_before_start": True,
@@ -494,6 +563,10 @@ def cmd_task(a):
             if a.status not in TASK_STATUSES:
                 sys.exit(f"status must be one of {TASK_STATUSES}")
             k["status"] = a.status
+            if a.status == "done":
+                for r in deliver_ready(st):
+                    print(f"request {r} delivered (all its tasks are done): report it to the user, then "
+                          f"`tw.py req set {r} --status reported`", file=sys.stderr)
         if a.owner is not None:
             if a.owner and a.owner not in st["threads"]:
                 sys.exit(f"unknown owner {a.owner}")
@@ -554,6 +627,7 @@ def cmd_ready(a):
                 "max_parallel": st["prefs"].get("max_parallel", 0) or "unlimited",
                 "slots": (max(0, st["prefs"]["max_parallel"] - busy) if st["prefs"].get("max_parallel") else "unlimited"),
                 "stuck": stuck_threads(st),
+                "unreported_requests": {r: q["text"] for r, q in unreported(st).items()},
                 "rc_capacity_note": "a Remote Control server holds 32 sessions by default, shared by every project and lead on it; cloud threads do not count",
             }
         )
@@ -789,6 +863,172 @@ def cmd_worktree(a):
     print(json.dumps(res, ensure_ascii=False))
 
 
+def deliver_ready(st):
+    """Requests whose linked tasks are all done move open/dispatched -> delivered. Returns the ids moved."""
+    moved = []
+    for r, q in st.get("requests", {}).items():
+        ts = q.get("tasks") or []
+        if q["status"] in ("open", "dispatched") and ts and all(
+                st["tasks"].get(t, {}).get("status") == "done" for t in ts):
+            q["status"] = "delivered"
+            q["updated"] = now()
+            moved.append(r)
+    return moved
+
+
+def unreported_note(st):
+    u = unreported(st)
+    if not u:
+        return ""
+    items = "; ".join(f"{r}: {q['text']}" for r, q in u.items())
+    return (f"{lab(st, 'unreported')}: {items}. Tell the user what came back, then "
+            "`tw.py req set <R> --status reported`.\n\n")
+
+
+def next_req_id(st):
+    nums = [int(r[1:]) for r in st.get("requests", {}) if r[1:].isdigit()]
+    return f"R{max(nums, default=0) + 1}"
+
+
+def check_tasks(st, ids):
+    bad = [t for t in ids if t not in st["tasks"]]
+    if bad:
+        sys.exit(f"unknown task(s) {', '.join(bad)}; add them with `task add` first")
+
+
+def set_req_status(st, r, q, new, by_import=False):
+    if new not in REQ_STATUSES:
+        sys.exit(f"status must be one of {REQ_STATUSES}")
+    if by_import:
+        q["status"] = new
+        return
+    if new == "closed":
+        sys.exit("use `req close R --confirmed` (user confirmed) or `--declined` (user said not to do it)")
+    if new == "reported" and q["status"] not in ("delivered", "reported"):
+        sys.exit(f"{r} is {q['status']}: only a delivered request can be reported (deliver first)")
+    q["status"] = new
+    if new == "reported":
+        q["reported_at"] = now()
+
+
+def cmd_req(a):
+    d = need(find_dir())
+    st = load(d)
+    reqs = st.setdefault("requests", {})
+    if a.action == "list":
+        rows = {r: q for r, q in reqs.items() if a.all or q["status"] != "closed"}
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+    if a.action == "import":
+        cmd_req_import(a, d, st)
+        return
+    if a.action == "add":
+        if not a.args:
+            sys.exit('usage: req add "<what the user asked, close to their words>" [--tasks T1,T2]')
+        r = a.id or next_req_id(st)
+        if r in reqs:
+            sys.exit(f"request {r} exists")
+        tasks = csv(a.tasks)
+        check_tasks(st, tasks)
+        q = {"text": " ".join(a.args), "status": "open", "tasks": tasks, "where": a.where or "",
+             "followup": a.followup or "", "created": now(), "updated": now()}
+        reqs[r] = q
+        if tasks:
+            q["status"] = "dispatched"
+        save(d, st, {"ev": "req-add", "req": r, "text": q["text"], "tasks": tasks})
+        print(json.dumps({r: q}, ensure_ascii=False))
+        return
+    if not a.args:
+        sys.exit(f"usage: req {a.action} R<n> ...")
+    r = a.args[0]
+    if r not in reqs:
+        sys.exit(f"unknown request {r}; known: {', '.join(reqs) or '-'}")
+    q = reqs[r]
+    if a.action == "link":
+        tasks = csv(",".join(a.args[1:])) + csv(a.tasks)
+        if not tasks:
+            sys.exit("usage: req link R<n> T1 [T2 ...]")
+        check_tasks(st, tasks)
+        q["tasks"] = list(dict.fromkeys(q.get("tasks", []) + tasks))
+        if q["status"] == "open":
+            q["status"] = "dispatched"
+        deliver_ready(st)
+    elif a.action == "set":
+        if a.status:
+            set_req_status(st, r, q, a.status)
+        for k in ("where", "followup", "text"):
+            v = getattr(a, k)
+            if v is not None:
+                q[k] = v
+    elif a.action == "close":
+        if a.confirmed == a.declined:
+            sys.exit("say why: --confirmed (the user confirmed it is done) or --declined (the user said not to do it)")
+        if a.confirmed and q["status"] != "reported":
+            sys.exit(f"{r} is {q['status']}: report it to the user first (`req set {r} --status reported`), "
+                     "then close it when they confirm")
+        q["status"] = "closed"
+        q["closed_reason"] = "confirmed" if a.confirmed else "declined"
+        if a.note:
+            q["closed_note"] = a.note
+    q["updated"] = now()
+    save(d, st, {"ev": f"req-{a.action}", "req": r, "status": q["status"]})
+    print(json.dumps({r: q}, ensure_ascii=False))
+
+
+def cmd_req_import(a, d, st):
+    """Import a markdown table ledger: | # | what the user said | where | status | follow-up |."""
+    if not a.args:
+        sys.exit("usage: req import <file.md> [--dry-run]")
+    lines = Path(a.args[0]).read_text(encoding="utf-8").splitlines()
+    rows = [[c.strip() for c in ln.strip().strip("|").split("|")] for ln in lines if ln.strip().startswith("|")]
+    rows = [r for r in rows if not all(set(c) <= set("-: ") for c in r)]
+    if not rows:
+        sys.exit("no markdown table found")
+    head, body = rows[0], rows[1:]
+    def col(*names):
+        for i, h in enumerate(head):
+            if any(n in h.lower() for n in names):
+                return i
+        return None
+    ci = {"id": col("#", "id"), "text": col("用户说的", "request", "asked", "said"),
+          "where": col("落到哪里", "where"), "status": col("状态", "status"), "followup": col("回访", "follow")}
+    if ci["id"] is None or ci["text"] is None or ci["status"] is None:
+        sys.exit(f"table needs id, request and status columns; found header {head}")
+    reqs = st.setdefault("requests", {})
+    out, skipped = {}, []
+    for row in body:
+        get = lambda k: (row[ci[k]] if ci[k] is not None and ci[k] < len(row) else "").strip()
+        r = get("id")
+        if not re.fullmatch(r"R\d+", r):
+            continue
+        if r in reqs:
+            skipped.append(r)
+            continue
+        status = REQ_STATUS_ALIASES.get(get("status"))
+        if status is None:
+            sys.exit(f"{r}: unknown status {get('status')!r}; use one of {sorted(REQ_STATUS_ALIASES)}")
+        clean = lambda v: "" if v in ("—", "-", "–") else v
+        where = clean(get("where"))
+        tasks = [t for t in dict.fromkeys(re.findall(r"\bT\d+\b", where)) if t in st["tasks"]]
+        span = re.search(r"\bT(\d+)\s*[–-]\s*T(\d+)\b", where)  # T10–T13
+        if span:
+            tasks += [f"T{i}" for i in range(int(span.group(1)), int(span.group(2)) + 1)
+                      if f"T{i}" in st["tasks"] and f"T{i}" not in tasks]
+        tasks.sort(key=lambda t: int(t[1:]))
+        q = {"text": get("text"), "status": "open", "tasks": tasks, "where": where,
+             "followup": clean(get("followup")), "created": now(), "updated": now(), "imported": True}
+        set_req_status(st, r, q, status, by_import=True)
+        if status == "closed":
+            q["closed_reason"] = "imported"
+        out[r] = q
+    if a.dry_run:
+        print(json.dumps({"would_import": out, "skipped_existing": skipped}, ensure_ascii=False, indent=2))
+        return
+    reqs.update(out)
+    save(d, st, {"ev": "req-import", "file": a.args[0], "ids": list(out), "skipped": skipped})
+    print(json.dumps({"imported": list(out), "skipped_existing": skipped}, ensure_ascii=False))
+
+
 def find_projects(root):
     root = Path(root).expanduser().resolve()
     hits = set()
@@ -844,7 +1084,7 @@ def cmd_context(a):
                   "cd into its folder first (its own board then applies)."}}, ensure_ascii=False))
         return
     st = load(d)
-    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\n" + language_rule(st) + "\n\n" + render_board(
+    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\n" + language_rule(st) + "\n\n" + unreported_note(st) + render_board(
         st
     ) + "\n\nProject instructions (.teamwork/INSTRUCTIONS.md):\n" + read_file(
         d, "INSTRUCTIONS.md"
@@ -960,6 +1200,19 @@ def main():
     )
     x.add_argument("thread")
     x.set_defaults(f=cmd_worker_prompt)
+    x = s.add_parser("req", help="user requests ledger: add / link / set / close / list / import")
+    x.add_argument("action", choices=["add", "link", "set", "close", "list", "import"])
+    x.add_argument("args", nargs="*", help='add: "<text>"; link: R<n> T1 [T2]; set/close: R<n>; import: <file.md>')
+    x.add_argument("--id", help="add: explicit id (default next R<n>)")
+    x.add_argument("--tasks", help="comma list of task ids to link")
+    x.add_argument("--status", help="set: open | dispatched | delivered | reported (closed only via close)")
+    x.add_argument("--where"); x.add_argument("--followup"); x.add_argument("--text")
+    x.add_argument("--confirmed", action="store_true", help="close: the user confirmed it is done")
+    x.add_argument("--declined", action="store_true", help="close: the user said not to do it")
+    x.add_argument("--note")
+    x.add_argument("--all", action="store_true", help="list: include closed")
+    x.add_argument("--dry-run", action="store_true", help="import: show what would be imported")
+    x.set_defaults(f=cmd_req)
     x = s.add_parser("worktree", help="create an rc thread's git worktree + branch if missing (run before create_session)")
     x.add_argument("thread")
     x.add_argument("--dry-run", action="store_true")

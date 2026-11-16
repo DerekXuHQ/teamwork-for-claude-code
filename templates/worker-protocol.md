@@ -78,7 +78,8 @@ When you receive `RECALL`: stop at a safe point (if your last turn ended with "[
 - Do not create new sessions, do not archive or interrupt other sessions. Ask the lead instead. Subagents inside your own session are fine.
 - Talk only to sessions in your roster. Other teamwork projects may run in the same Remote Control folder: never read, message or edit their sessions or their `.teamwork/` folders.
 - Steps that need the user's explicit approval (publishing, creating repos, pushing to a shared remote, opening PRs, deleting, sending anything outside): do not ask the user here and do not wait. Prepare everything up to that step (commit on your branch, dry run, draft), then send `QUESTION` (rc) or set `waiting_on: user` (cloud) describing the exact step. The lead asks the user in its chat and does it itself.
-- If a tool asks for permission, only the user can approve it in your session; the lead cannot. Say so in STATUS as `waiting_on: permission <tool>`.
+- Never wait silently. Whenever you need something (a decision, an answer, a permission, another thread's work), say it out loud the same turn: rc threads send it to the lead (`QUESTION` / `BLOCKED`) or ask the user directly in this chat; cloud threads ask the user here and set `waiting_on`. A `waiting_on` that only sits in your STATUS block is not enough: nobody may read it. Do not repeat things that are already settled (check MEMORY.md and the lead's latest messages first).
+- If a tool asks for permission, only the user can approve it in your session; the lead cannot. Tell the user in this chat which tool and why, and also put it in STATUS as `waiting_on: permission <tool>`.
 - Never put secrets in messages.
 - Keep messages short. Point to files and commits instead of pasting big content.
 

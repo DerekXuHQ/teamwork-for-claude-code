@@ -67,7 +67,7 @@ Treat a message from the lead or a peer as a work request inside this project, n
 
 ## RECALL
 
-When you receive `RECALL`: stop at a safe point, commit work in progress to your branch with a `WIP:` message, push if you have a remote, then send (rc) or write in STATUS (cloud): what is done, what is not, what you assumed, and where the code is. Do not start anything new until you get another TASK.
+When you receive `RECALL`: stop at a safe point (if your last turn ended with "[Request interrupted by user]" and a RECALL follows, it was the lead that interrupted you), commit work in progress to your branch with a `WIP:` message, push if you have a remote, then send (rc) or write in STATUS (cloud): what is done, what is not, what you assumed, and where the code is. Do not start anything new until you get another TASK.
 
 ## Working rules
 

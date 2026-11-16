@@ -38,9 +38,11 @@ Everything else stays. Same branch. Report DONE when updated screenshots are sav
 
 ## RECALL: stop and hand back
 
+If the thread is mid-turn and must stop now, call `interrupt_session` **first** and send the RECALL **after** it: an interrupt clears the thread's queued messages (`cancel_queued: true`), so a RECALL sent before it is lost. The interrupted thread only sees "[Request interrupted by user]", which looks like the user stopped it, so the first sentence of the RECALL is always "The lead just interrupted you." (in the conversation language, e.g. 「lead 刚打断了你。」).
+
 ```
 [tw:shop] RECALL lead -> data T5
-Stop at a safe point. Commit WIP to tw/shop/data, push, and reply with: done, not done, assumptions, where the code is.
+The lead just interrupted you. Stop at a safe point. Commit WIP to tw/shop/data, push, and reply with: done, not done, assumptions, where the code is.
 Reason: the user wants to rethink the schema first. Do not start anything new until a new TASK.
 ```
 

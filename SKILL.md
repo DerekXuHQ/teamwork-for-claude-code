@@ -146,7 +146,7 @@ Permission prompts live inside each thread. You cannot approve them; tell the us
 
 ## 6. Recall, reassign, stop
 
-- **Recall**: `send_message` a `RECALL` to the thread. If it is mid-turn and must stop now, `interrupt_session` first, then the RECALL. Mark `TW task set <id> --status recalled`. Read its reply/STATUS for what is done and where the code is.
+- **Recall**: `send_message` a `RECALL` to the thread. If it is mid-turn and must stop now, `interrupt_session` first, then the RECALL, never the other way round: the interrupt clears queued messages. Start the RECALL with "The lead just interrupted you." (the thread otherwise thinks the user stopped it). Mark `TW task set <id> --status recalled`. Read its reply/STATUS for what is done and where the code is.
 - **Reassign**: `TW task set <id> --owner <other>` and send the new owner a TASK that includes the old owner's summary and branch. Update `owns` on both threads if the boundary moved and broadcast `ROSTER`.
 - **Wrong direction**: say exactly what to change in a FOLLOWUP; do not restart a thread whose history is useful.
 - Never archive, delete, or force anything in a thread without the user's explicit OK.

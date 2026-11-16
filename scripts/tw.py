@@ -54,6 +54,29 @@ def now():
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+LANG_NAMES = {"zh": "Chinese (中文)", "en": "English", "ja": "Japanese (日本語)", "ko": "Korean (한국어)",
+              "fr": "French", "de": "German", "es": "Spanish"}
+
+
+def language_rule(st):
+    """The conversation-language rule, with the project's current language (prefs.language)."""
+    code = (st.get("prefs", {}).get("language") or "").strip()
+    cur = (f"{LANG_NAMES.get(code.lower(), code)} (prefs.language={code})" if code
+           else "not set: use the language of the user's latest message")
+    return (
+        f"Language (most important rule). Current conversation language: {cur}.\n"
+        "- Reply in the language you were asked in. The lead writes to threads, threads answer the lead and talk to "
+        "each other in the current conversation language.\n"
+        "- If the user talks to a thread directly in another language, that thread answers the user in that language.\n"
+        "- When the user switches language, the lead runs `tw.py prefs --set language=<code>` and broadcasts a "
+        "FOLLOWUP to every thread; the newest one wins.\n"
+        f"- Message headers keep their fixed English keywords (`[tw:{st['project']}] TASK lead -> <thread> T2`); "
+        "only the body follows the language.\n"
+        "- Files follow what the task says (repo docs are English unless the task says otherwise); conversation "
+        "follows the language."
+    )
+
+
 def find_dir(create_at=None):
     if create_at:
         d = Path(create_at).resolve() / ".teamwork"
@@ -224,6 +247,7 @@ def cmd_init(a):
             "propose_before_start": True,
             "update_detail": "brief",
             "checkin_minutes": 10,
+            "language": "",  # conversation language code (zh, en, ...); empty = follow the user's latest message
         },
     }
     if not (d / "INSTRUCTIONS.md").exists():
@@ -589,6 +613,7 @@ def cmd_worker_prompt(a):
         "MEMORY": read_file(d, "MEMORY.md").strip() or "(empty)",
         "REPORT_CHANNEL": channel,
         "FOLDER": st.get("repo", {}).get("path") or "-",
+        "LANGUAGE": language_rule(st),
     }
     out = tpl
     for k, v in fill.items():
@@ -653,7 +678,7 @@ def cmd_context(a):
                   "cd into its folder first (its own board then applies)."}}, ensure_ascii=False))
         return
     st = load(d)
-    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\n" + render_board(
+    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\n" + language_rule(st) + "\n\n" + render_board(
         st
     ) + "\n\nProject instructions (.teamwork/INSTRUCTIONS.md):\n" + read_file(
         d, "INSTRUCTIONS.md"

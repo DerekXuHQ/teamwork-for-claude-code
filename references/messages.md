@@ -8,6 +8,13 @@ Every message starts with one header line. Threads use the same header for their
 
 The recipient's app shows only the first line as a preview, so the header must say what this is.
 
+The header's keywords (`tw`, the TYPE, `->`) are always English, so they can be parsed and scanned. The body is written in the conversation language (`prefs.language`, the language the user speaks): a Chinese-speaking user means Chinese bodies between the lead and threads and between threads. When the user switches language, the lead updates `prefs.language` and sends every open thread a FOLLOWUP:
+
+```
+[tw:shop] FOLLOWUP lead -> ui -
+从现在起用中文：给 lead 和其他线程的消息正文都用中文，消息头关键字不变。用户直接用别的语言跟你说话时，用那种语言回他。
+```
+
 ## TASK: new work for a thread
 
 ```

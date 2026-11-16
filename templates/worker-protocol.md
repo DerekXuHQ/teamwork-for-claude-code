@@ -10,6 +10,10 @@ You are thread **{{THREAD}}** in the teamwork project **{{PROJECT}}**. A lead se
 - Project folder (rc threads: `cd` here before doing anything; cloud threads cannot see it): {{FOLDER}}
 - Lead session_id: {{LEAD_SESSION}}
 
+## Language
+
+{{LANGUAGE}}
+
 ## Team roster (who owns what; use the session_id to message them)
 
 {{ROSTER}}

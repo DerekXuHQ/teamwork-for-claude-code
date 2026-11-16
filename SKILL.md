@@ -61,7 +61,7 @@ No argument: run the portfolio view and ask which project this session should le
 1. Ask (one message, skip what you already know): goal in one line; which folder (default: current); git remote URL if cloud threads should edit code; anything threads must never touch.
 2. The project folder is `<served folder>/<name>` unless the user names another folder inside the served folder (the served folder is your starting cwd). If a project with that name already exists (`tw.py projects`), ask whether to attach instead. Otherwise `TW init <name> --goal "<goal>" [--repo-url <url>] [--base <branch>]` (with `-C <served folder>/<name>`, which creates the folder). That folder is your project folder for the rest of this session.
 3. Put standing rules into `.teamwork/INSTRUCTIONS.md` (style, forbidden areas, how to verify). Keep it under 16k characters.
-4. Coordination prefs, defaults shown: `TW prefs --set max_parallel=0 propose_before_start=true update_detail=brief checkin_minutes=10`. `max_parallel=0` means no limit: start every thread the plan needs. Set a number only when the user asks ("at most two at a time"). Change the others when the user says "just start, don't ask", "more detail", and so on.
+4. Coordination prefs, defaults shown: `TW prefs --set max_parallel=0 propose_before_start=true update_detail=brief checkin_minutes=10 language=<code of the user's language>`. `max_parallel=0` means no limit: start every thread the plan needs. Set a number only when the user asks ("at most two at a time"). Change the others when the user says "just start, don't ask", "more detail", and so on.
 5. Make sure the hooks are installed (setup.md §3): run `python3 ${CLAUDE_SKILL_DIR}/scripts/install.py --link --project <project folder> --served <served folder>` as a dry run, show the user the changes, and `--apply` on their OK.
 
 ## 2. Plan (propose, then wait)
@@ -106,6 +106,8 @@ For each ready task, oldest first:
 5. Arrange the next check. RC threads message you when they finish (DONE/BLOCKED arrive as new turns here). Cloud threads cannot, so start a background timer (`sleep <checkin_minutes*60>` with `run_in_background`, which re-invokes you when it ends) and sweep when it fires. For checks more than an hour away, use `send_later` to schedule a message to yourself.
 
 ## 4. Route every user message
+
+**Language first.** Answer the user in the language they wrote in, and write message bodies to threads in that language too (headers keep their English keywords: `[tw:<project>] TASK lead -> ui T2`). Record it with `TW prefs --set language=<code>` (`zh`, `en`, ...): `worker-prompt` and the SessionStart hook pass it to every new thread. **When the user switches language**, update the pref and broadcast one `FOLLOWUP` to every open thread saying so, in the new language. Files still follow the task (repo docs are English unless the task says otherwise).
 
 For each message from the user decide, and **say which in your reply**:
 
@@ -173,7 +175,7 @@ The user should only ever need to talk to you. Threads exist so they *can* open 
 - **Permission prompts are the exception.** A tool prompt inside a thread can only be answered in that thread. Avoid them
   (setup.md §2 allow rules, `extra_allowed_tools`); when one happens anyway, tell the user exactly which thread and which
   prompt, in one line, and offer to do the step yourself instead.
-- **Report results, not process.** The user should not need to read thread transcripts; summarize what came back.
+- **Report results, not process.** The user should not need to read thread transcripts; summarize what came back. Report in the user's language, even when threads' reports or repo files are in another one.
 
 ## Rules
 

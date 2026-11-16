@@ -1,17 +1,18 @@
 # Open issues from field tests
 
 Collected from `2026-11-15.md`. Each item has a repro and the thread that owns the fix.
-Status: `open` = not yet handed off, `handed off` = owner ACKed, `fixed` = merged to main.
+Status: `open` = not yet assigned, `assigned: <thread> <task>` = on that thread's board, `fixed` = merged to main.
+Assignments per the lead, 2026-11-16.
 
 | # | Severity | Issue | Owner | Status |
 |---|---|---|---|---|
-| I1 | high | Every tool call in an rc thread needs a manual "allow" | core | open |
-| I2 | medium | Interrupt wipes queued messages, and RECALL looks like a user stop | core | handed off (ACK 2026-11-16) |
-| I3 | medium | `list_events` with `kinds` and a small `limit` returns nothing | core | open |
-| I4 | medium | Worktree for a new rc thread is not created by the lead | core | open |
-| I5 | low | Project rename does not cover branches, worktree paths, `.teamwork/` or thread prompts | core | open |
-| I6 | low | Header task ids drift to probe ids or ids not on the board | core | open |
-| I7 | low | `install.py --help` does not say which config dir it found | core | handed off (ACK 2026-11-16, merged into core T2) |
+| I1 | high | Every tool call in an rc thread needs a manual "allow" | core | assigned: core T9 |
+| I2 | medium | Interrupt wipes queued messages, and RECALL looks like a user stop | core | fixed (main c95f9b8 / fa13016) |
+| I3 | medium | `list_events` with `kinds` and a small `limit` returns nothing | core | assigned: core T3 |
+| I4 | medium | Worktree for a new rc thread is not created by the lead | core | assigned: core T9 |
+| I5 | low | Project rename does not cover branches, worktree paths, `.teamwork/` or thread prompts | core | assigned: core T8 (decision: short name is display-only) |
+| I6 | low | Header task ids drift to probe ids or ids not on the board | core | assigned: core T9 |
+| I7 | low | `install.py --help` does not say which config dir it found | core | fixed (main c95f9b8 / fa13016) |
 
 ## I1. Every tool call in an rc thread needs a manual "allow" (L5)
 
@@ -59,8 +60,8 @@ brief includes the exact `git worktree add -b <branch> <path> <base>` with "if m
 working, but the branch `tw/<old name>/<thread>`, the worktree path, the `.teamwork/` folder and
 each thread's system prompt still carry the old name.
 
-**Fix (core).** Decide whether the short name is display-only (then document that branches and
-folders keep the long name forever), or make rename a `tw.py` command that updates all of them.
+**Decision (lead, 2026-11-16).** The short name is display-only: titles, tags and message headers.
+Branches, worktree paths and `.teamwork/` keep the long name. Core documents this in T8.
 
 ## I6. Header task ids drift (P2, P2a)
 

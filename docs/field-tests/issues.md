@@ -176,3 +176,16 @@ review notes on core's branch have the details.
 - R16-8 Archives nested deeper than 2 levels, with more than 2000 entries, or with a single entry over 64 MB are skipped.
 - R16-9 A corrupt zip is treated as clean.
 - R16-10 In docx, XML-escaped words and words split across runs are missed.
+
+### T24: thread kinds and asks
+
+- R24-1 `ask --need-thread` dedup does not normalise `--from` (case, surrounding whitespace) and does not check it is a known thread, so `ghost` or `lead` can be recorded; the name is not checked against `NAME_RE` either.
+- R24-2 Once a thread's request for a given name has been answered, the same thread can never record it again. Needs an explicit `--again`.
+- R24-3 An rc thread changed to cloud after `worktree` leaves its worktree and branch on disk with no owner; changing cloud to rc does not prompt to run `tw.py worktree`.
+- R24-4 One `thread set` call accepts both `--session` and `--kind`.
+- R24-5 `lead --session` checks "a lead already exists" before checking for a subagent id; `strip` is applied twice.
+- R24-6 The subagent-id check misses forms such as `subagent.1`, `agent 7`, `general_purpose`, `toolu01ABC`.
+- R24-7 `thread set ghost --kind cloud` on a thread that does not exist reports "kind is fixed" instead of unknown thread.
+- R24-8 For a cloud thread that already has a reason, `--kind cloud` without a reason is refused, but `--cloud-reason ""` keeps the old reason: the two are handled inconsistently.
+- R24-9 The rc capacity limit is only in the docs; nothing checks it (e.g. warn when `ready --sessions` exceeds 30).
+- R24-10 Nothing in code stops a thread from calling `create_session` (it works even in bypassPermissions mode); only the protocol forbids it. SKILL.md already says so.

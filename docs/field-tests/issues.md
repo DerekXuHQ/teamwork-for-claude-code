@@ -189,3 +189,13 @@ review notes on core's branch have the details.
 - R24-8 For a cloud thread that already has a reason, `--kind cloud` without a reason is refused, but `--cloud-reason ""` keeps the old reason: the two are handled inconsistently.
 - R24-9 The rc capacity limit is only in the docs; nothing checks it (e.g. warn when `ready --sessions` exceeds 30).
 - R24-10 Nothing in code stops a thread from calling `create_session` (it works even in bypassPermissions mode); only the protocol forbids it. SKILL.md already says so.
+
+### T23: review rounds and caps
+
+- R23-1 When a task goes to done as `capped` or `pass` with remaining findings, nothing warns if some of them were never opened as follow-up tasks.
+- R23-2 Old records (a `pass` with no stored cap, `skipped`, rows with only a round count) show the current cap in `task reviews`; with no stored cap they should show `?`.
+- R23-3 The help text for `--remaining` and `followups` says "capped" and does not mention that `pass` can use them too.
+- R23-4 SKILL.md: the user-decision row of the Rules table does not mention lowering `review_max_rounds`; §8 Close does not require listing unfinished follow-up tasks; "step 7" in the rules table is ambiguous and should read "§7 Integrate results".
+- R23-5 After `rebuild`, `prefs_user_said` and `plan_user_said` are lost (older issue; the verbatim text is still in the log). See also R13-4.
+- R23-6 When `--rounds` jumps by more than one from the last record, there is no warning and no note is required.
+- R23-7 The cap in a worker prompt is fixed at dispatch; changing `review_max_rounds` mid-run does not remind the lead to send a FOLLOWUP to working threads.

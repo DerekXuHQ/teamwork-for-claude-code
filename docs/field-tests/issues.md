@@ -199,3 +199,15 @@ review notes on core's branch have the details.
 - R23-5 After `rebuild`, `prefs_user_said` and `plan_user_said` are lost (older issue; the verbatim text is still in the log). See also R13-4.
 - R23-6 When `--rounds` jumps by more than one from the last record, there is no warning and no note is required.
 - R23-7 The cap in a worker prompt is fixed at dispatch; changing `review_max_rounds` mid-run does not remind the lead to send a FOLLOWUP to working threads.
+
+### T27: installer permission rules
+
+Reviewed at core branch commit 4aabb32, `scripts/install.py` (rules in `ASK` and `_push_rules`).
+
+- R27-1 `git *push*` matches the whole command text, so a commit message containing `push`, `-f`, `:main` or `+main` is caught and prompts once more. Suggestion: narrow the rule to commands starting with `git push` or `git -C * push`.
+- R27-2 Combined short options are not caught: `git push -fu origin main`, `git push -uf origin main`.
+- R27-3 The ask rules only know `main` and `master`; a project whose base branch has another name is not protected. Suggestion: generate the rules from the project's base branch.
+- R27-4 `gh api -X delete` (lower case), and changing visibility through `--input body.json`, are not caught. This is a limit of text matching; setup.md could say so.
+- R27-5 A `TMPDIR` that points into a subfolder of the home directory (e.g. `~/Documents/x`) is added to `additionalDirectories` as is.
+- R27-6 A malformed settings.json is only detected after step 1 has copied the skill, leaving a half-installed state. Re-running works, but the check could move first.
+- R27-7 `install.py` and `tw.py` compute the worktree folder differently (`--project` vs `repo.path`). When the project folder is not the repo root, the two disagree.

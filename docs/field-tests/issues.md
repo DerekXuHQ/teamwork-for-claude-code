@@ -92,3 +92,87 @@ the user. The lead's sweep lists entries that were delivered but never reported 
 - Child-session failure events (L6c): no thread failed. Re-test by forcing a turn error in a
   throwaway thread.
 - Cloud → cloud messaging: not exercised.
+
+## Minor issues from code review (non-blocking)
+
+Handed off by core on 2026-11-16, from the independent reviews of core's last rounds on its
+branch. These were found by review, not seen in a field run. They do not block merging (lead's
+rule). Owner for all: **core**. Status: `open`. Each line names the case that goes wrong; the
+review notes on core's branch have the details.
+
+### T20: status checks
+
+- R20-1 Owner names are not normalised (e.g. `ui/..`, `ui/self`). Independence of a review is judged by name only, not by session.
+- R20-2 Zero-width spaces are accepted in the user's verbatim request.
+- R20-3 With skip-review, the done criterion can be empty.
+- R20-4 When a task goes to done, the user's verbatim request is not recorded with it.
+- R20-5 `req import` imports rows that are already closed.
+- R20-6 After the user moves a request from `reported` back to `dispatched`, the old result is delivered again.
+- R20-7 `req set` does not call `deliver_ready` afterwards.
+- R20-8 `req set --text` can rewrite a request that is in progress.
+- R20-9 `req drop` does not remind the lead to recall the work.
+- R20-10 There is no `unlink` command.
+- R20-11 `--review fail --status review` is accepted as a combination.
+- R20-12 With `require_review` off, a review `fail` is ignored.
+- R20-13 A task that is already done can still be set to `--checks fail`.
+- R20-14 `task set dispatched` does not check file leases.
+- R20-15 `init --force` does not require the user's verbatim request.
+- R20-16 Fields that only appear in the UI have no parsing tests.
+- R20-17 Thread status transitions are not validated.
+- R20-18 The `close` prompt text needs work.
+
+### T11: file leases
+
+- R11-1 A squash commit message without a task id.
+- R11-2 Task ids written as `[T1, T2]`, or in lower case.
+- R11-3 A revert after a squash.
+- R11-4 A rebase merge whose last commit has no task id.
+- R11-5 `/` inside a glob character class.
+- R11-6 Unicode case folding.
+- R11-7 Nested braces such as `{a,{b}}`.
+- R11-8 A real directory whose name contains braces, sitting between two declared leases.
+- R11-9 Lease-vs-lease overlap checks are too conservative.
+- R11-10 `--touches` given an absolute path.
+- R11-11 Git submodules.
+- R11-12 No warning when git is not available.
+- R11-13 A cherry-picked file releases its lease too early.
+- R11-14 A shared branch lists every completed task.
+- R11-15 A squash merge where conflicts were resolved by hand only releases once the branch is deleted.
+
+### T12: seats and session history
+
+- R12-1 Session ordering.
+- R12-2 Leftover tagged sessions from before.
+- R12-3 End times are only approximate.
+- R12-4 `rebuild --apply` does not take a snapshot.
+- R12-5 SKILL.md 6.4 and 6.5 both describe the ROSTER broadcast (duplicate).
+- R12-6 Until reseat, worker-prompt still carries the old session id.
+- R12-7 An archived seat cannot get its own session back.
+- R12-8 An archived seat still accepts `set --session`.
+
+### T13: rebuild
+
+- R13-1 A snapshot with wrong value types crashes the program.
+- R13-2 Thread names in the log are not checked against `NAME_RE`.
+- R13-3 Maliciously crafted session files.
+- R13-4 The user's verbatim requests in plan and prefs are not replayed.
+- R13-5 The lead is not recovered from `parent_session_id`.
+- R13-6 `--apply` can overwrite newer state with older state.
+- R13-7 `--short` accepts only one value.
+- R13-8 With no log, an old short name can re-seat a retired session.
+- R13-9 The MCP outer wrapper is not unwrapped.
+- R13-10 A missing page in the middle is not detected.
+- R13-11 Archived seats get sessions assigned.
+
+### T16: privacy guard
+
+- R16-1 Brackets in path rules can reveal one letter.
+- R16-2 Grafts and shallow clones.
+- R16-3 Does not recurse into submodules.
+- R16-4 The git settings `log.showRoot` and `diffMerges` are not pinned.
+- R16-5 Phrases only match exactly (space, hyphen and underscore are not treated as equivalent).
+- R16-6 Cloud threads push without going through the guard.
+- R16-7 `--private` files other than PRIVATE.md fail silently when missing.
+- R16-8 Archives nested deeper than 2 levels, with more than 2000 entries, or with a single entry over 64 MB are skipped.
+- R16-9 A corrupt zip is treated as clean.
+- R16-10 In docx, XML-escaped words and words split across runs are missed.

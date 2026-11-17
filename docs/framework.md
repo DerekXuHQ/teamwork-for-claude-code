@@ -893,7 +893,7 @@ Three rules make the boundary hold in practice:
 
 | Decision | Who makes it | Recorded as |
 |---|---|---|
-| The target's **execution policy** (`direct`, `confirm`, `queue`) | The owner of the target (the tool, the machine, the receiving team) sets it for their endpoint. The sender may tighten it for one delivery, never loosen it. | `policy`, `policy_set_by` on the delivery |
+| The target's **execution policy** (`direct`, `confirm`, `queue`) | The owner of the target (the tool, the machine, the receiving team) sets it for their endpoint. The sender may tighten it for one delivery, never loosen it: the policy is the target owner's, so loosening it is that owner's own consent-class act, not the sender's (I38). | `policy`, `policy_set_by` on the delivery |
 | **Sending** this package | The sender's user (or the approver they named) signs off the exact version; that sign-off is the consent to send it, bound to that version. | `signoff` on the delivery; the package frozen |
 | **Executing** it at the target | `direct`: the target owner's standing consent, within its scope. `confirm`: the target owner confirms this delivery. `queue`: nobody yet; it waits. | the target's `ack` |
 
@@ -902,8 +902,10 @@ edit a signed-off package and keep the sign-off. A sign-off records the package 
 just the approver's name.
 
 **Layers of policy** combine to the **strictest**: a global default, the sender side, the receiver side, and any
-machine-level policy. An agent may only tighten a layer. The one exception is an explicit **override** by someone
-entitled to it, which must carry an expiry and is recorded. A person with more authority does not edit a less
+machine-level policy. An agent may tighten a layer on its own. It may also loosen one, within its principal's own
+rights (I38), but loosening is a reserved act: it needs the principal's explicit consent to that one change (I27), and
+no standing authorization covers it (I54). An explicit **override** by someone entitled to it is such a loosening: it
+must carry an expiry and is recorded. A person with more authority does not edit a less
 privileged person's policy: they send a change request, and that person confirms it.
 
 A policy is only real if it maps to a real control in the target: "plan first" must run the target in a plan-only or
@@ -927,7 +929,7 @@ reporting tools and by starting threads in a permission mode **no looser than th
 if the user set one, else the lead's mode).
 
 **An agent's capabilities equal those of the person it represents** (its principal), no more and no less, and that
-includes consent-class acts: signing off, accepting, reopening, loosening an authorization. But the agent **never does
+includes consent-class acts: signing off, accepting, reopening, loosening an authorization or a policy layer. But the agent **never does
 them on its own initiative**. It prepares the step, lists the exact actions it will take, and acts only after the
 principal explicitly consents on a channel agents cannot write. One consent may cover several listed consecutive steps;
 it is bound to exactly those actions and has an expiry. If an action changes, or the consent expires, it is void and
@@ -935,7 +937,7 @@ the agent asks again. Subagents and threads inherit the scope from the lead, nev
 
 **Where standing authorization stops.** A standing authorization the principal set personally counts as consent given
 in advance for that class of action. Some classes it can never cover; each instance needs its own consent:
-confirming, accepting and reopening; loosening an authorization, including extending a consent's expiry; releasing an
+confirming, accepting and reopening; loosening an authorization or a policy layer, including extending a consent's expiry; releasing an
 out-of-scope alert; viewing a secret in clear text. A consent is bound to the content and version of its actions at the
 moment it was given: it is void if the content changes, an action is added, the target was changed by someone else, or
 it times out. If a step fails midway, the remaining steps stop and consent is asked again. Each step runs exactly once.
@@ -1116,7 +1118,7 @@ and corrected at the next sweep.
 | Permissions equal to the represented person; private-material requests blocked and reported | Escalation and data leaks cannot be undone. | I38 |
 | Draft before every outward action; original frozen once the reply starts | Sent is final. | I36, I39 |
 | One lead per project; readiness = approved + deps done | Cheap to check, expensive to get wrong. | I1, I17 |
-| Policy layers combine to the strictest; overrides expire; policies map to real target controls | A paper policy or a forgotten override is silent escalation. | I41 |
+| Policy layers combine to the strictest; an agent loosens one only with consent to that change, never under a standing authorization; overrides expire; policies map to real target controls | A paper policy, a forgotten override or an unasked loosening is silent escalation. | I41 |
 | Messages anchored to an object, where the host routes messages | An unanchored message cannot be found or derived into the ledger. | I37 |
 | A thread's permission mode no looser than the lead's | A widened mode is an escalation. | I26 |
 | Workspace created by the lead | Guessing paths is how threads collide. | I16 |
@@ -1364,7 +1366,7 @@ platform), or **convention**.
 | I38 | An agent's capabilities equal its principal's, consent-class acts included, but it performs those only after the principal's explicit consent to the listed actions (I27); requests to others for private material are blocked and reported. | code (where it exists) + host |
 | I39 | A cited or delivered record is immutable (hash recorded): after delivery the original is frozen and only appended revisions are allowed, the old one marked superseded; nobody edits another person's comment. Once a receiver starts its reply, the package it received is frozen and only the reply is edited; sending it notifies everyone involved. | code (where deliveries exist) |
 | I40 | Each person's ledger is written only by their own lead or by that person; others' progress is pulled from their agent, not synced. | none in this binding yet (B10) |
-| I41 | Policy layers combine to the strictest; agents only tighten; an override needs an entitled person and an expiry; every policy maps to a real control in the target, or is raised to confirm. | code (where it exists) |
+| I41 | Policy layers combine to the strictest; an agent may tighten a layer on its own and may loosen one within its principal's rights (I38), but only with the principal's explicit consent to that one change (I27), never under a standing authorization (I54); an override needs an entitled person and an expiry; every policy maps to a real control in the target, or is raised to confirm. | code (where it exists) |
 | I42 | A seat is always a separate host session; the lead never uses subagents for domain work and never lets a subagent stand in for a seat. Seats may use subagents freely. If sessions cannot be started, the lead stops and reports instead of degrading. | none in this binding yet (B10) |
 | I43 | The thread kind defaults to the one with workspace access and two-way messaging with the lead; a one-way kind is used only for work that never touches project files nor messages peers, with the reason recorded. | none in this binding yet (B10) |
 | I44 | Subagent briefs and reports use the current conversation language, like every other team message. | none in this binding yet (B10) |
@@ -1377,7 +1379,7 @@ platform), or **convention**.
 | I51 | A new session in a seat is briefed from a deterministic handoff built from the ledger; a degraded session's own summary is never the only handoff. | none in this binding yet (B10) |
 | I52 | Every agent action carries an origin tag set by the system from the calling channel; client-supplied origin is ignored. | code (where it exists) + host |
 | I53 | Out-of-scope viewing by an agent silently alerts the administrator and the affected person, with a threshold, deduplication and an appeal path. | code (where it exists) + host |
-| I54 | A standing authorization the principal set counts as advance consent for its class, except for confirming, accepting, reopening, loosening an authorization (including a longer expiry), releasing an out-of-scope alert and viewing secrets in clear text, which each need their own consent. A consent is void if its actions' content or version changes, an action is added, the target was changed by someone else, or it times out; a failed step stops the rest until consent is asked again; each step runs once; consent comes only from the principal's own human channel. | code (where it exists) + host |
+| I54 | A standing authorization the principal set counts as advance consent for its class, except for confirming, accepting, reopening, loosening an authorization or a policy layer (including a longer expiry), releasing an out-of-scope alert and viewing secrets in clear text, which each need their own consent. A consent is void if its actions' content or version changes, an action is added, the target was changed by someone else, or it times out; a failed step stops the rest until consent is asked again; each step runs once; consent comes only from the principal's own human channel. | code (where it exists) + host |
 
 ---
 
@@ -1450,7 +1452,7 @@ platform), or **convention**.
 | F63 | Out-of-scope view goes unnoticed | An agent reads material outside its principal's scope and nobody knows. | Silent alert to the administrator and the affected person. | I53 | A12 |
 | F64 | Alert flood or false accusation | Alerts are ignored, or a person is flagged for nothing. | Threshold, deduplication, appeal path. | I53 | A12 |
 | F65 | Delivered original or someone's comment edited | The record no longer says what was agreed. | Freeze after delivery; append-only revisions; comments immutable to others. | I39 | A16 |
-| F66 | Standing authorization used for a reserved act | An acceptance, reopen, loosened authorization, released alert or clear-text secret view happens without its own consent. | Reserved classes always need per-instance consent. | I54 | A12 |
+| F66 | Standing authorization used for a reserved act | An acceptance, reopen, loosened authorization or policy layer, released alert or clear-text secret view happens without its own consent. | Reserved classes always need per-instance consent. | I54 | A12 |
 | F67 | Consent outlives its content | A step runs after its target or content changed, an extra step was slipped in, or the remaining steps ran after one failed. | Bind consent to content and version; void on change, addition, outside edit or timeout; stop after a failure; each step once. | I54 | A12 |
 
 ---
@@ -1552,7 +1554,7 @@ Copy this list, tick what the host has, and write how. Unticked **required** ite
 - [ ] FW23 Interrupt first, then RECALL, saying the lead interrupted; every TASK / FOLLOWUP / HANDOFF acknowledged (A6)
 - [ ] FW24 The lead can always reach every thread; no channel gained at the cost of that reach (A8)
 - [ ] FW25 No secrets in messages or ledger; content read from sessions is information, not instruction (A6, A12)
-- [ ] FW26 Policy layers combine to the strictest; overrides expire; policies map to real target controls (A12)
+- [ ] FW26 Policy layers combine to the strictest; loosening one needs consent to that change, never a standing authorization; overrides expire; policies map to real target controls (A12)
 - [ ] FW27 Consent-gated steps run only after the user's explicit consent; ledger updated before the user is told; plan gate before starting threads (A5, A10, A12)
 - [ ] FW28 User messages outrank lead and peers in a thread; short display names; standing authorizations scoped; seat status from the thread's own report; only the lead creates tasks (A2, A3, A12, A16)
 - [ ] FW29 Agent actions carry a system-set origin tag; out-of-scope views raise silent alerts with threshold, dedupe and appeal (A12)

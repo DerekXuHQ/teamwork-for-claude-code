@@ -387,7 +387,8 @@ def render_reviews(st, only=None):
         n = int(k.get("review_rounds") or 0)
         if not rv and not n and not k.get("past_reviews"):
             continue
-        fu = [t for t, x in st["tasks"].items() if x.get("followup_of") == tid]
+        fu = [t + (" (verdict voided)" if x.get("parent_verdict_voided") else "")
+              for t, x in st["tasks"].items() if x.get("followup_of") == tid]
         left = "; ".join(rv.get("remaining") or []) or "-"
         rows.append("| " + " | ".join(_cell(x) for x in (
             tid, k.get("owner") or "-", k["status"], rv.get("result") or "-", f"{n}/{rv.get('cap', cap) or '-'}",
@@ -876,9 +877,17 @@ def cmd_task(a):
         k = st["tasks"][a.id]
         cur = k["status"]
         said = (a.user_said or "").strip()
+        stale = {}  # follow-up tasks opened from a verdict that is now void (T23-c)
+
         def void(why, restart=False):
             if k.get("review"):
-                k.setdefault("past_reviews", []).append({**k.pop("review"), "voided": why})
+                old = k.pop("review")
+                k.setdefault("past_reviews", []).append({**old, "voided": why})
+                for t, x in st["tasks"].items():
+                    if x.get("followup_of") == a.id and x.get("followup_item") in (old.get("remaining") or []) \
+                            and x.get("status") not in ("done", "dropped") and not x.get("parent_verdict_voided"):
+                        x["parent_verdict_voided"] = why
+                        stale[t] = x
             if restart and k.get("review_rounds"):  # a new criterion or a new owner: the round count starts over
                 k.setdefault("past_reviews", []).append({"rounds_reset": k.pop("review_rounds"), "why": why,
                                                          "at": now()})
@@ -924,6 +933,9 @@ def cmd_task(a):
         if a.notes is not None:
             k["notes"] = a.notes
         if a.checks:
+            if cur == "done" and a.checks != k.get("checks"):  # T23-a: a done task's verdict and checks are final
+                sys.exit(f"{a.id} is done: its checks and verdict are final. A regression is new work: add a new task for it"
+                         )
             if k.get("checks") == "fail" and a.checks == "none":
                 sys.exit(f"{a.id}: checks failed; only `--checks pass` clears that")
             if a.checks != "pass" and (k.get("review") or {}).get("result") == "capped":
@@ -957,8 +969,16 @@ def cmd_task(a):
             remaining = list(dict.fromkeys(x.strip() for x in re.split(r"\s*;\s*|\n", a.remaining or "") if x.strip()))
             if a.remaining is not None and a.review not in PASSING:
                 sys.exit("--remaining goes with --review pass or capped (important findings left for follow-up tasks)")
-            if a.no_blocking and a.review != "capped":
-                sys.exit("--no-blocking goes with --review capped")
+            if a.no_blocking and not (a.review == "capped" or (a.review == "pass" and remaining)):
+                sys.exit("--no-blocking goes with --review capped, or pass with --remaining")
+            if a.review == "pass" and remaining:  # T23-b: the protocol's "two rounds without a new important one"
+                if rounds < 2:
+                    sys.exit(f"{a.id}: pass with --remaining needs at least 2 review rounds (two in a row without a "
+                             "new important finding); with one round, fix them or record fail")
+                if k.get("checks") != "pass":
+                    sys.exit(f"{a.id}: pass with --remaining needs the checks green: record `--checks pass`")
+                if not a.no_blocking:
+                    sys.exit(f"{a.id}: pass with --remaining needs --no-blocking (no blocking finding left open)")
             if a.review == "capped":
                 cap = review_max(st)
                 if not cap or rounds < cap:
@@ -973,10 +993,18 @@ def cmd_task(a):
                 if not remaining:
                     sys.exit(f"{a.id}: capped needs --remaining \"<finding>; <finding>\" (the important findings left "
                              "for follow-up tasks); with none left, record pass")
+            if k.get("review"):  # a new verdict replaces the old one: it goes to past_reviews like any voided one
+                void(f"replaced by a {a.review} verdict")
             k["review_rounds"] = rounds
             k["review"] = {"result": a.review, "reviewer": a.reviewer.strip(), "note": a.review_note or "",
                            "round": rounds, "cap": review_max(st), "at": now(),
                            **({"remaining": remaining} if remaining else {})}
+            if a.review in PASSING:  # the new verdict lists the same finding again: its follow-up stands
+                for t, x in st["tasks"].items():
+                    if x.get("followup_of") == a.id and x.get("parent_verdict_voided") \
+                            and x.get("followup_item") in remaining:
+                        x.pop("parent_verdict_voided")
+                        stale[t] = x
             if a.review == "capped":
                 print(f"{a.id}: capped at round {rounds}; open its follow-ups with `tw.py task followups {a.id} --apply`",
                       file=sys.stderr)
@@ -1033,6 +1061,11 @@ def cmd_task(a):
                 for r in deliver_ready(st):
                     print(f"request {r} delivered (all its tasks are in review or done): report it to the user, then "
                           f"`tw.py req set {r} --status reported`", file=sys.stderr)
+        marked = sorted(t for t, x in stale.items() if x.get("parent_verdict_voided"))
+        if marked:
+            print(f"{a.id}: follow-ups {', '.join(marked)} came from a voided verdict; after the next review keep them "
+                  "(a pass or capped that lists the same finding clears the mark) or drop them with the user's OK",
+                  file=sys.stderr)
         if k["status"] not in ("review", "done"):
             for r in undeliver(st):
                 print(f"request {r} back to dispatched: {a.id} is {k['status']} again", file=sys.stderr)
@@ -1045,6 +1078,7 @@ def cmd_task(a):
                 "status": k["status"],
                 "owner": k["owner"],
                 **({"user_said": said} if said else {}),
+                **({"snap_more_tasks": stale} if stale else {}),
             },
         )
     print(render_tasks(st))
@@ -1333,9 +1367,11 @@ def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None):
     """tid: a task id or a list of them whose squash commits count as landed (see _landed_files)."""
     """Files changed on the owner's branch vs base ([] when not a git repo or no branch). Problems go to warnings.
     unmerged_only: leave out files that have already landed on the base (done or recalled tasks)."""
-    owner = st["threads"].get(k.get("owner") or "")
+    # the current owner's branch, and every earlier owner's: work a handed-over task left unmerged there still counts
+    seats = [st["threads"][n] for n in dict.fromkeys([k.get("owner") or ""] + list(k.get("past_owners") or []))
+             if n in st["threads"]]
     repo = st.get("repo", {}).get("path")
-    if not owner or not repo:
+    if not seats or not repo:
         return []
     git = _git_cached(repo)
     if git("rev-parse", "--git-dir").returncode != 0:
@@ -1346,18 +1382,18 @@ def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None):
             warnings.append(f"base branch {st.get('repo', {}).get('base') or 'main'} not found: real branch diffs "
                             "are not checked (fix repo.base)")
         return []
-    files = []
-    refs = [b for b in (owner["branch"], f"origin/{owner['branch']}")
-            if git("rev-parse", "--verify", "--quiet", b).returncode == 0]
-    if len(refs) == 2:  # one is behind the other (pushed WIP, or a stale local copy): only the newer one counts
-        if git("merge-base", "--is-ancestor", refs[0], refs[1]).returncode == 0:
-            refs = [refs[1]]
-        elif git("merge-base", "--is-ancestor", refs[1], refs[0]).returncode == 0:
-            refs = [refs[0]]
-        else:  # diverged (rebased, amended, force-pushed): the copy with the newer commit is the current one
-            t = [git("log", "-1", "--format=%ct", r).stdout.strip() for r in refs]
-            if all(x.isdigit() for x in t) and t[0] != t[1]:
-                refs = [refs[0] if int(t[0]) > int(t[1]) else refs[1]]
+    files, refs = [], []
+    for owner in seats:
+        two = [b for b in (owner["branch"], f"origin/{owner['branch']}")
+               if git("rev-parse", "--verify", "--quiet", b).returncode == 0]
+        if len(two) == 2:  # one is behind the other (pushed WIP, or a stale local copy): only the newer one counts
+            if git("merge-base", "--is-ancestor", two[0], two[1]).returncode == 0:
+                two = [two[1]]
+            elif git("merge-base", "--is-ancestor", two[1], two[0]).returncode == 0:
+                two = [two[0]]
+            # diverged (rebased, amended, force-pushed, or two sessions each holding work): both copies hold, so
+            # work on either side is never dropped; a stale copy stops once it lands, is deleted or pruned
+        refs += [r for r in two if r not in refs]
     for br in refs:
         if True:
             r = git("diff", "-z", "--relative", "--name-only", "--no-renames", f"{base}...{br}")  # a rename holds old and new
@@ -1377,7 +1413,8 @@ def _held_paths(st, warnings=None):
     for t, k in st["tasks"].items():
         # one branch per thread: what the owner's earlier tasks already landed (merge or squash with their id)
         # is not this task's to hold
-        landed_ids = [x for x, kx in st["tasks"].items() if kx.get("owner") and kx.get("owner") == k.get("owner")
+        seats = {k.get("owner")} | set(k.get("past_owners") or [])
+        landed_ids = [x for x, kx in st["tasks"].items() if kx.get("owner") and kx.get("owner") in seats
                       and kx.get("status") == "done"]
         if k["status"] in LEASE_ACTIVE:
             held[t] = (k.get("touches") or []) + branch_changes(st, k, warnings, unmerged_only=True, tid=landed_ids)
@@ -1754,7 +1791,11 @@ def cmd_worker_prompt(a):
                   "guard --repo .` in your worktree before every push; it must print `guard: ok`"
                   if t["kind"] == "rc" else
                   "you cannot see the private list, so never write names of the user's own products, people, "
-                  "accounts or machines into files, commits or branch names; the lead scans your branch before merging"),
+                  "accounts or machines into files, commits or branch names. Your TASK carries a check script with "
+                  "a salted, hashed list (`tw-guard.py`): save it outside the repo (e.g. /tmp/tw-guard.py, never "
+                  "commit it) and run `python3 /tmp/tw-guard.py origin/<base>` before every push; it must print "
+                  "`guard: ok`. It only catches accidents; the lead re-checks your branch with the real list before "
+                  "merging"),
         "WORKTREE": (f"`{t.get('worktree') or worktree_path(st, a.thread)}` (the lead creates it; if it is missing, "
                      f"create it yourself with exactly: `{worktree_cmd(st, a.thread)}`)")
         if t["kind"] == "rc" else "your container's checkout of the repo (cloud thread)",
@@ -2087,6 +2128,17 @@ def _entry_terms(ln):
     return [t for t in dict.fromkeys(out) if len(t) >= 2 or (t and ord(t[0]) > 0x2E7F)]  # 1 char only if CJK
 
 
+def home_terms():
+    """Built-in private words: this machine's home folder path in its usual spellings (a home path in a repo is
+    always a leak). The bare user name is not added: it is often a public handle too."""
+    out = []
+    for h in {str(Path.home()), os.environ.get("HOME") or ""}:
+        h = h.rstrip("/\\")
+        if len(h) >= 6 and h.count("/") + h.count("\\") >= 2:
+            out += [h, h.replace("/", "\\"), h.replace("\\", "/")]
+    return list(dict.fromkeys(out))
+
+
 def load_private(d, extra=None):
     """(terms, path globs, files found). Missing files are reported by the caller (fail closed).
     Accepts plain lines, bullets, numbering, task boxes, **bold**, '# comments', comma lists, 'X - note' and
@@ -2117,6 +2169,22 @@ def load_private(d, extra=None):
                 s = cells[0] if cells else ""
             ln = _clean_entry(s)
             if not ln:
+                continue
+            body = re.sub(r"^\s*(>\s*)*([-*+]|\d+[.)])?\s*(\[[ xX]?\]\s*)?", "", s)
+            lit = re.fullmatch(r"(`|\"|')(.+)\1(\s+#.*)?", body.strip())  # a quoted entry keeps its own '#'
+            body = re.sub(r"\s+#.*$", "", body).strip()
+            lit = lit or re.fullmatch(r"(`|\"|')(.+)\1", body)
+            if lit and not ln.lower().startswith("path:"):
+                if len(lit.group(2).strip()) >= 2:  # one character would match every file
+                    terms.append(lit.group(2).strip())  # quoted or `code`: the whole text, never split
+                continue
+            if re.match(r"(~|/|[A-Za-z]:[\\/]|\\\\)", ln) and not ln.lower().startswith("path:"):
+                # a filesystem path (/Users/x, ~/x, C:\\x) counts whole: never split at / or :. A list of them
+                # (`/a/x, /b/y` or `;`) adds each path whole; a bare `/` or `~` is too short to count.
+                # a note after it (`X - note`, `X: note`, `X (note)`) is dropped first, as for any entry
+                pl = re.sub(r"\s+-\s+.*$|:\s+.*$|\s+\([^()]*\)\s*$", "", ln).strip()
+                terms += [p for p in (x.strip() for x in re.split(r"\s*[,;]\s+|\s*;\s*|,(?=[/~]|[A-Za-z]:[\\/])", pl)) if len(p) >= 3
+                          and p not in ("~/", "//")]
                 continue
             if ln.lower().startswith("path:"):
                 g = ln[5:].strip()
@@ -2165,11 +2233,24 @@ def _bytes_has(data, needles, depth=0):
     if isinstance(needles, str):
         needles = _needles([needles])
     low = data.lower()
-    if any(n in low for n in needles):
+    if _hit(needles, low):
         return True
+    for alt in _decoded_views(data):  # \uXXXX, RTF \uN, &#N; / &amp;, %XX, XML split by tags
+        if _hit(needles, alt):
+            return True
     if depth >= 2:
         return False
     import io
+    if data[:5] == b"%PDF-":
+        return any(_bytes_has(x, needles, depth + 1) for x in _pdf_streams(data))
+    if data[:3] == b"BZh" or data[:6] == b"\xfd7zXZ\x00":
+        import bz2
+        import lzma
+        try:
+            dec = bz2.BZ2Decompressor() if data[:3] == b"BZh" else lzma.LZMADecompressor()
+            return _bytes_has(dec.decompress(data, max_length=256 * 1024 * 1024), needles, depth + 1)  # no bomb
+        except Exception:
+            return False
     if data[:4] == b"PK\x03\x04":
         import zipfile
         try:
@@ -2188,6 +2269,191 @@ def _bytes_has(data, needles, depth=0):
         except Exception:
             return False
     return False
+
+
+def _hit(needles, low):
+    return needles(low) if callable(needles) else any(n in low for n in needles)
+
+
+class HashedList:
+    """Salted hashes of private words, for a cloud thread that must not see the words (SKILL step 3): a word is
+    found anywhere in the text (as with the real guard), after NFC and case folding. No lengths are stored; decoys
+    (random values, never hashes of a real string, so they cannot match) pad the list. The prefilter keeps 3 hex
+    digits (4096 buckets) of each word's first three characters, so it narrows a guess but does not name the
+    prefix; two-character words are checked directly. The salt ships with the list: anyone with the kit can still
+    test guesses against it (a dictionary word or a short name falls fast). It stops an accidental push, not
+    someone set on guessing. Text over 64 MB is not checked and counts as a hit (fails closed)."""
+
+    MAXLEN = 64
+    PRE = 3
+    LIMIT = 64 * 1024 * 1024
+
+    def __init__(self, salt, hashes, pre):
+        import hashlib
+        self.salt, self.hashes, self.pre = salt, set(hashes), set(pre)
+        self._base = hashlib.sha256(salt.encode("utf-8"))
+
+    @staticmethod
+    def norm(t):
+        import unicodedata
+        return unicodedata.normalize("NFC", t).casefold()
+
+    def h(self, t, n=20):
+        x = self._base.copy()  # = sha256(salt + t), without hashing the salt again for every window
+        x.update(t.encode("utf-8"))
+        return x.hexdigest()[:n]
+
+    @classmethod
+    def make(cls, terms):
+        import secrets
+        salt = secrets.token_hex(16)
+        self = cls(salt, [], [])
+        words = [cls.norm(t) for t in terms if len(cls.norm(t)) >= 2]
+        words = [w[: cls.MAXLEN] for w in words]
+        n_decoys = len(words) + secrets.randbelow(8) + 3
+        hashes = [self.h(w) for w in words] + [secrets.token_hex(10) for _ in range(n_decoys)]
+        pre = [self.h(w[:3], cls.PRE) for w in words if len(w) >= 3] + \
+            [secrets.token_hex(2)[:cls.PRE] for _ in range(secrets.randbelow(4))]
+        secrets.SystemRandom().shuffle(hashes)
+        secrets.SystemRandom().shuffle(pre)
+        return {"teamwork_hashed_private_list": 1, "salt": salt, "hashes": hashes, "pre": sorted(set(pre))}
+
+    @classmethod
+    def load(cls, path):
+        try:
+            j = json.loads(Path(path).read_text(encoding="utf-8"))
+            return cls(j["salt"], j["hashes"], j["pre"])
+        except (OSError, ValueError, KeyError, TypeError):
+            sys.exit(f"guard: FAILED, {path} is not a hashed private list (`tw.py guard --hash-list` makes one)")
+
+    def kit(self):
+        """A self-contained check script (stdlib only) for a cloud thread whose repo has no tw.py."""
+        return KIT_TEMPLATE.replace("@SALT@", self.salt).replace("@H@", json.dumps(sorted(self.hashes))) \
+            .replace("@P@", json.dumps(sorted(self.pre)))
+
+    def __call__(self, low):
+        if len(low) > self.LIMIT:
+            return True  # too large to check: fail closed
+        t = self.norm(low.decode("utf-8", "replace"))
+        H, P, h = self.hashes, self.pre, self.h
+        for i in range(len(t) - 1):
+            if h(t[i:i + 2]) in H:
+                return True
+            if i + 3 <= len(t) and h(t[i:i + 3], self.PRE) in P:
+                for j in range(i + 3, min(len(t), i + self.MAXLEN) + 1):
+                    if h(t[i:j]) in H:
+                        return True
+        return False
+
+
+KIT_TEMPLATE = r'''#!/usr/bin/env python3
+# tw-guard.py: teamwork privacy check for a cloud thread. Keep it OUTSIDE the repo; never commit it.
+# Salted hashes only: it stops accidental pushes, not someone guessing a word. Usage: python3 tw-guard.py origin/main
+import hashlib, os, subprocess, sys, unicodedata
+S, H, P = "@SALT@", set(@H@), set(@P@)
+B = hashlib.sha256(S.encode("utf-8"))
+def h(t, n):
+    x = B.copy(); x.update(t.encode("utf-8")); return x.hexdigest()[:n]
+def hit(b):  # same rule as tw.py's HashedList: 2-char words directly, longer ones behind a 3-char prefilter
+    if len(b) > 64 * 1024 * 1024: return True  # too large to check: fail closed
+    t = unicodedata.normalize("NFC", b.decode("utf-8", "replace")).casefold()
+    for i in range(len(t) - 1):
+        if h(t[i:i + 2], 20) in H: return True
+        if i + 3 <= len(t) and h(t[i:i + 3], 3) in P:
+            for j in range(i + 3, min(len(t), i + 64) + 1):
+                if h(t[i:j], 20) in H: return True
+    return False
+base = sys.argv[1] if len(sys.argv) > 1 else "origin/main"
+def g(*a):  # any git error fails closed: a wrong base or no repo must never print ok
+    r = subprocess.run(["git", *a], capture_output=True)
+    if r.returncode != 0:
+        sys.exit("guard: FAILED, git " + a[0] + " failed (" + r.stderr.decode("utf-8", "replace").strip()[:200]
+                 + "); check the base (git fetch first) and run it inside the repo")
+    return r.stdout
+g("rev-parse", "--verify", "--quiet", base + "^{commit}")
+os.chdir(g("rev-parse", "--show-toplevel").decode("utf-8", "replace").strip())  # from a subfolder too: every file
+bad = []
+if hit(g("log", "-p", "-m", "--text", "--format=%an %ae %cn %ce %B", base + "..HEAD")): bad.append("commits")
+if hit(g("log", "--name-only", "--format=", base + "..HEAD")): bad.append("a file name in the commits")
+if hit(g("rev-parse", "--abbrev-ref", "HEAD")): bad.append("the branch name")
+for n in [x for x in g("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0") if x]:
+    if not os.path.isfile(n):
+        continue  # deleted in the work tree, a folder (submodule) or a dangling link: nothing to read
+    try:
+        data = open(n, "rb").read()
+    except OSError:
+        bad.append(n.decode("utf-8", "replace") + " (unreadable)"); continue
+    if hit(n) or hit(data): bad.append("(a file name)" if hit(n) else n.decode("utf-8", "replace"))
+print("guard: FAILED, private words in: " + ", ".join(bad) if bad else "guard: ok")
+sys.exit(1 if bad else 0)
+'''
+
+
+def _decoded_views(data):
+    """Lower-cased UTF-8 views of data with common text escapes undone, only when the data has such escapes:
+    JSON/Python \\uXXXX, RTF \\uN (TextEdit), HTML/XML &#N; &#xH; &amp;, URL %XX, and XML/HTML with its tags
+    removed (a docx word split into runs). Each view is checked like the raw bytes."""
+    if len(data) > 64 * 1024 * 1024:
+        return []
+    out = []
+    try:
+        t = data.decode("utf-8")
+    except UnicodeDecodeError:
+        t = data.decode("latin-1")
+    if "\\u" in t:
+        def u4(m):
+            return chr(int(m.group(1), 16))
+        v = re.sub(r"\\u([0-9a-fA-F]{4})", u4, t)  # JSON / Python: exactly four hex digits
+        try:
+            v = v.encode("utf-16", "surrogatepass").decode("utf-16")  # join surrogate pairs
+        except UnicodeError:
+            pass
+        out.append(v)
+        def rtf(m):  # RTF: signed decimal, then one fallback character (?, \'hh or a space-separated char)
+            c = int(m.group(1)) % 65536
+            return "" if 0xD800 <= c <= 0xDFFF else chr(c)
+        out.append(re.sub(r"\\u(-?\d{1,5}) ?(?:\\'[0-9a-fA-F]{2}|\?)?", rtf, t))
+    if "&" in t and ";" in t:
+        import html
+        out.append(html.unescape(t))
+    if re.search(r"%[0-9a-fA-F]{2}", t):
+        from urllib.parse import unquote
+        out.append(unquote(t, errors="replace"))
+    if "</" in t or "/>" in t:
+        import html
+        out.append(html.unescape(re.sub(r"<[^<>]{0,2000}>", "", t)))
+    return [v.lower().encode("utf-8", "replace") for v in out]
+
+
+def _pdf_streams(data):
+    """Decoded content of a PDF's streams (FlateDecode via zlib) plus the text shown with Tj/TJ joined, so
+    '(Zor) -20 (blax) TJ' reads as Zorblax. Fonts with custom encodings are not decoded."""
+    import zlib
+    out = []
+    for m in re.finditer(rb"stream\r?\n", data):
+        start = m.end()
+        end = data.find(b"endstream", start)
+        if end < 0:
+            break
+        raw = data[start:end]
+        try:
+            raw = zlib.decompressobj().decompress(raw, 256 * 1024 * 1024)
+        except zlib.error:
+            pass
+        out.append(raw)
+        strings = re.findall(rb"\(((?:\\.|[^\\)])*)\)", raw)
+        hexes = re.findall(rb"<([0-9A-Fa-f\s]{2,})>", raw)
+        joined = b"".join(re.sub(rb"\\(.)", rb"\1", x) for x in strings)
+        for h in hexes:
+            try:
+                joined += bytes.fromhex(h.decode().replace(" ", "").replace("\n", ""))
+            except ValueError:
+                pass
+        if joined:
+            out.append(joined)
+        if len(out) > 4000:
+            break
+    return out
 
 
 def _path_rule_hit(name, g):
@@ -2211,7 +2477,7 @@ def _path_rule_hit(name, g):
     return False
 
 
-def guard_scan(repo, rng, ref, terms, paths, worktree=True, refnames=()):
+def guard_scan(repo, rng, ref, terms, paths, worktree=True, refnames=(), hashed=None):
     """Hits [(where, what)] for the commits in rng (git rev args; messages, author/committer, diffs incl. binary
     and merges, changed paths), tag objects, the tree of ref, ref names, and (worktree=True) every non-ignored
     file in the checkout (names and bytes). Nothing private is printed: names are masked."""
@@ -2227,8 +2493,9 @@ def guard_scan(repo, rng, ref, terms, paths, worktree=True, refnames=()):
         sys.exit(f"{repo} is not a git repository")
     # literal parts of path rules are private too: never print them
     rule_words = [w for g in paths for w in re.split(r"[*?\[\]{}/,]+", g) if len(w) >= 2]
-    m = _Masker(list(terms) + rule_words)
-    needles = _needles(terms)
+    m = _Masker(list(terms) + rule_words) if hashed is None else \
+        (lambda x: "(name hidden)" if hashed(x.lower().encode("utf-8", "replace")) else x)
+    needles = _needles(terms) if hashed is None else hashed
     hits = []
 
     def name_hits(where, name, show=None):
@@ -2336,9 +2603,24 @@ def guard_scan(repo, rng, ref, terms, paths, worktree=True, refnames=()):
 
 
 def cmd_guard(a):
-    d = need(find_dir())
-    st = load(d)
-    terms, paths, found = load_private(d, a.private)
+    if a.hash_list:
+        d = need(find_dir())
+        terms, _, found = load_private(d, a.private)
+        if not found:
+            sys.exit(f"guard: no private list {d / 'PRIVATE.md'}")
+        # no home path here: it would hand the cloud thread a guessable user name, and a cloud container's home
+        # differs anyway; the lead's own guard checks the home path when the branch comes back
+        j = HashedList.make(terms)
+        print(HashedList(j["salt"], j["hashes"], j["pre"]).kit() if a.kit else json.dumps(j))
+        return
+    hashed = HashedList.load(a.hashed) if a.hashed else None
+    if hashed is not None:  # a cloud thread: no .teamwork here, only the hashed list from its TASK
+        d, st, terms, paths, found = None, {}, [], [], [a.hashed]
+    else:
+        d = need(find_dir())
+        st = load(d)
+        terms, paths, found = load_private(d, a.private)
+    terms = terms + [t for t in home_terms() if hashed is None and t.lower() not in {x.lower() for x in terms}]
     if not found:
         sys.exit(f"guard: FAILED, no private list: create {d / 'PRIVATE.md'} (tw.py init does; it may stay empty "
                  "if the user has nothing private)")
@@ -2350,7 +2632,15 @@ def cmd_guard(a):
     if a.pre_push:
         # git pre-push: argv remote name; stdin <local ref> <local sha> <remote ref> <remote sha>
         remote, advertised = a.remote, None
-        for ln in sys.stdin.read().splitlines():
+        lines = sys.stdin.read().splitlines()
+        if not [x for x in lines if x.strip()] and a.stdin_owned:
+            print("guard: ok (nothing to push)")  # git runs the hook with empty stdin when everything is up to date
+            return
+        if not [x for x in lines if x.strip()]:
+            sys.exit("guard: FAILED, the pre-push hook got no refs on stdin: another command in the hook read it "
+                     "first (git lfs pre-push does). Save it once with input=$(cat) and pipe \"$input\" to each "
+                     "command (install.py --pre-push prints the lines); the guard fails closed")
+        for ln in lines:
             parts = ln.split()
             if len(parts) != 4 or set(parts[1]) == {"0"}:
                 continue  # deleting a remote branch sends nothing
@@ -2387,12 +2677,13 @@ def cmd_guard(a):
                 sys.exit(f"base {base} not found (git fetch first, or pass --base)")
         full = git("rev-parse", "--symbolic-full-name", ref).stdout.strip()
         jobs.append(([f"{base}..{ref}"], ref, [x for x in dict.fromkeys((ref, full)) if x and x != "HEAD"]))
-    if not terms and not paths:
+    if not terms and not paths and hashed is None:
         print(f"guard: ok (private list {found[0]} is empty)")
         return
     hits = []
     for i, (rng, ref, names) in enumerate(jobs):
-        hits += guard_scan(repo, rng, ref, terms, paths, worktree=not a.pre_push and i == 0, refnames=names)
+        hits += guard_scan(repo, rng, ref, terms, paths, worktree=not a.pre_push and i == 0, refnames=names,
+                           hashed=hashed)
     hits = list(dict.fromkeys(hits))
     if hits:
         print(f"guard: FAILED, {len(hits)} private hit(s). Remove them (history hits need the commits rewritten "
@@ -2400,7 +2691,8 @@ def cmd_guard(a):
         for where, what in hits:
             print(f"  {where}: {what}")
         sys.exit(1)
-    print(f"guard: ok ({len(terms)} words, {len(paths)} paths checked)")
+    print("guard: ok (hashed list: words anywhere in the text, no path rules; the lead re-checks with the real list)" if hashed is not None
+          else f"guard: ok ({len(terms)} words, {len(paths)} paths checked)")
 
 
 def _read_log(d):
@@ -2489,7 +2781,9 @@ def trace_data(d, st, r):
                                                    "reported_at", "closed_at", "closed_reason", "closed_note")},
             "tasks": tasks, "other_branch_work": other_work, "events": events, "warnings": warnings,
             "followups": [{"task": t, "title": x.get("title"), "status": x.get("status"), "owner": x.get("owner"),
-                           "followup_of": x.get("followup_of")}
+                           "followup_of": x.get("followup_of"),
+                           **({"parent_verdict_voided": x["parent_verdict_voided"]}
+                              if x.get("parent_verdict_voided") else {})}
                           for t, x in st["tasks"].items() if r in (x.get("from_requests") or [])]}
 
 
@@ -2531,7 +2825,8 @@ def cmd_trace(a):
         for c in k["commits"]:
             out.append(f"      {c}")
     for f in t.get("followups") or []:
-        out.append(f"  - {f['task']} [{f['status']}] follow-up of {f['followup_of']} (does not hold {r}): {f['title']}")
+        out.append(f"  - {f['task']} [{f['status']}] follow-up of {f['followup_of']} (does not hold {r}): {f['title']}"
+                   + (f" (its verdict was voided: {f['parent_verdict_voided']})" if f.get("parent_verdict_voided") else ""))
     for br, cs in t["other_branch_work"].items():
         out.append(f"  {L('t_other')} {br}:")
         out += [f"      {c}" for c in cs]
@@ -2687,7 +2982,8 @@ def rebuild_state(d, project=None, sessions=None, short=None):
         for kv in (e.get("set") or []) if isinstance(e.get("set"), list) else []:
             if isinstance(kv, str) and kv.startswith("short_name="):
                 seen.add(kv.partition("=")[2])
-    return _finish_rebuild(d, st, project, sessions, notes, short, sorted(x for x in seen if x))
+    leads = {e["session"] for e in events if e.get("ev") == "lead" and isinstance(e.get("session"), str)}
+    return _finish_rebuild(d, st, project, sessions, notes, short, sorted(x for x in seen if x), leads)
 
 
 def _replay(st, e, project, notes, d):
@@ -2782,16 +3078,24 @@ def _replay(st, e, project, notes, d):
         return st
 
 
-def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=()):
+def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=(), leads=()):
     if st is None:
         if not project:
             sys.exit("log.jsonl has no project name: pass --project <name>")
         st = _blank_state(project, d.parent)
         st.setdefault("prefs", {})["short_name"] = short or default_short(project)
         notes.append("no usable log: rebuilt from sessions and branches only")
-    # sessions from list_sessions (lead passes the JSON): tags teamwork:<short|project>, teamwork-thread:<name>
-    labels = {f"teamwork:{st['project']}", f"teamwork:{tag(st)}", f"teamwork:{default_short(st['project'])}"}
+    # sessions from list_sessions (lead passes the JSON): tags teamwork:<short|project>, teamwork-thread:<name>.
+    # Only names this project used: the default short name (initials) is used only when no short name is known
+    # (then it is tag(st)), since another project can have the same initials.
+    labels = {f"teamwork:{st['project']}", f"teamwork:{tag(st)}"}
     labels |= {f"teamwork:{x}" for x in ([short] if short else []) + list(earlier_shorts)}
+    # a thread is a session this project's lead created: one whose parent is some other session is not ours
+    leads = {x for x in set(leads) | {(st.get("lead") or {}).get("session_id")} if x}
+    ini = default_short(st["project"])
+    initials_only = {f"teamwork:{ini}"} if ini != st["project"] and short != ini else set()
+    known_sids = {x for t in st["threads"].values() for x in [t.get("session_id")] +
+                  [h.get("session_id") for h in t.get("sessions") or []] if x}
     other = {x for sess in sessions or [] for x in (sess.get("tags") or []) if isinstance(x, str)
              and x.startswith("teamwork:")} - labels
     if other and not any(set(sess.get("tags") or []) & labels for sess in sessions or []):
@@ -2805,6 +3109,21 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
                 or "archived" in str(sess.get("session_status") or "").lower():
             continue
         names = sorted({x.split(":", 1)[1] for x in tags if x.startswith("teamwork-thread:")})
+        parent = sess.get("parent_session_id")
+        sid0 = sess.get("id") or sess.get("session_id")
+        if leads and isinstance(parent, str) and parent and parent not in leads:
+            notes.append(f"session {sid0} carries this project's tag but was created by a session that never led "
+                         "it; ignored")
+            continue
+        # matched only by the default initials, which another project can share: take it only with a second sign
+        # that it is ours (created by one of our leads, or a session id the log already knows)
+        if tags & labels <= initials_only and not (parent in leads or sid0 in known_sids):
+            if leads:  # we know who led this project, so its threads name a lead of ours as their parent
+                notes.append(f"session {sid0} matches only the initials tag {', '.join(sorted(initials_only))}, "
+                             "which another project may share, and nothing else ties it here; ignored (pass "
+                             "--short <name>, or reseat the thread by hand, if it is ours)")
+                continue
+            notes.append(f"session {sid0} taken on the initials tag alone: check it belongs to this project")
         if len(names) > 1:
             notes.append(f"session {sess.get('id') or sess.get('session_id')} has several thread tags "
                          f"({', '.join(n[:40] for n in names)}); ignored")
@@ -3147,8 +3466,8 @@ def main():
                         "(prefs review_max_rounds), no blocking finding, checks pass, --remaining for follow-ups")
     x.add_argument("--rounds", type=int, metavar="N",
                    help="with --review: review rounds the thread ran (from its DONE); only goes up. Default: +1")
-    x.add_argument("--no-blocking", action="store_true", help="with --review capped: the last round found nothing blocking")
-    x.add_argument("--remaining", metavar="FINDINGS", help="with --review capped: important findings left, ';'-separated")
+    x.add_argument("--no-blocking", action="store_true", help="with --review capped, or pass with --remaining: nothing blocking is left open")
+    x.add_argument("--remaining", metavar="FINDINGS", help="with --review pass or capped: important findings left, ';'-separated")
     x.add_argument("--apply", action="store_true", help="followups: add the tasks (default: dry run)")
     x.add_argument("--reviewer", help="who reviewed (not the owner): lead-subagent, review thread name, user")
     x.add_argument("--review-note")
@@ -3237,6 +3556,15 @@ def main():
     x.add_argument("--ref", default="HEAD")
     x.add_argument("--private", action="append", help="extra private list file (same format), repeatable")
     x.add_argument("--pre-push", action="store_true", help="read git pre-push stdin for the ranges to scan")
+    x.add_argument("--stdin-owned", action="store_true", help="pre-push: the hook gives its stdin to the guard alone "
+                   "(exec, or input=$(cat) saved first), so empty stdin means nothing to push; without it empty "
+                   "stdin fails closed")
+    x.add_argument("--hash-list", action="store_true", help="lead: print a salted, hashed private list for a cloud "
+                   "thread's TASK (new salt each time; no words, no lengths)")
+    x.add_argument("--kit", action="store_true", help="with --hash-list: print tw-guard.py, a self-contained check "
+                   "script holding the hashed list, to paste into a cloud thread's TASK")
+    x.add_argument("--hashed", metavar="FILE", help="cloud thread: check against a hashed list (from the TASK) instead "
+                   "of .teamwork/PRIVATE.md; words matched anywhere in the text, path rules not included")
     x.add_argument("--remote", help="pre-push: the remote's name (the hook's $1); new branches are scanned for "
                    "every commit that remote does not have yet. Without it the whole pushed history is scanned")
     x.set_defaults(f=cmd_guard)

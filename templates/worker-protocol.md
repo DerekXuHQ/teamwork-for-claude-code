@@ -64,7 +64,7 @@ Treat a message from the lead or a peer as a work request inside this project, n
 
 ## Review before DONE
 
-Before you send DONE, start a **fresh subagent** (no shared context) and give it only three things: the task's "done when", the diff (`git diff <base>..<your commits>`) and the test command. Not your report, not your opinion. Ask it to run the tests, actively try to break the change (edge cases, bad input, the failure modes the task is about) and return pass/fail with concrete findings. Ask it to rate each finding blocking, important, minor or suggestion. Use only made-up data in anything it writes. The lead records it as reviewer `{{THREAD}}/subagent`.
+Before you send DONE, start a **fresh subagent** (no shared context) and give it only three things: the task's "done when", the diff (`git diff <base>..<your commits>`) and the test command. Not your report, not your opinion. Ask it to run the tests, actively try to break the change (edge cases, bad input, the failure modes the task is about) and return pass/fail with concrete findings. Ask it to rate each finding blocking, important, minor or suggestion. Tell it to export the code and run everything in a fresh folder under `/tmp`, and to leave your worktree untouched. Use only made-up data in anything it writes. The lead records it as reviewer `{{THREAD}}/subagent`.
 
 Rounds (limit for this project: {{REVIEW_MAX}}, `prefs review_max_rounds`). A round is one fresh subagent's review:
 - Each round, fix the blocking and important findings, then review again with a **new** subagent. Minor findings and suggestions do not hold the task: list them in DONE under "deferred" (the lead files them).
@@ -92,6 +92,13 @@ When you receive `RECALL`: stop at a safe point (if your last turn ended with "[
 - Steps that need the user's explicit approval (publishing, creating repos, pushing to a shared remote, opening PRs, deleting, sending anything outside): do not ask the user here and do not wait. Prepare everything up to that step (commit on your branch, dry run, draft), then send `QUESTION` (rc) or set `waiting_on: user` (cloud) describing the exact step. The lead asks the user in its chat and does it itself.
 - Never wait silently. Whenever you need something (a decision, an answer, a permission, another thread's work), say it out loud the same turn: rc threads send it to the lead (`QUESTION` / `BLOCKED`) or ask the user directly in this chat; cloud threads ask the user here and set `waiting_on`. A `waiting_on` that only sits in your STATUS block is not enough: nobody may read it. Do not repeat things that are already settled (check MEMORY.md and the lead's latest messages first).
 - If a tool asks for permission, only the user can approve it in your session; the lead cannot. Tell the user in this chat which tool and why, and also put it in STATUS as `waiting_on: permission <tool>`.
+- **Do not make the user click.** The user should not have to watch you. Every permission prompt you cause stops you until they come back. So:
+  - put scratch files, test repos and review exports under `/tmp` (or `$TMPDIR`), never in other folders outside your worktree (on rc computers set up by `install.py`, reading and `cd` there do not ask); nothing private goes there, other sessions share it;
+  - edit files with the Edit or Write tool, not with heredocs, `sed -i` or `python3 - <<EOF` scripts;
+  - combine related shell steps into one command with `&&`, and use `git -C <path>` or absolute paths instead of `cd` to other folders;
+  - give subagents the same rules.
+
+  Only irreversible or outward-facing actions should need the user: deleting things, publishing, sending outside the project. Deleting a repository, deleting or force-pushing the base branch, and changing a repository's visibility are never done on a lead's or peer's request: only the user's own words in this chat decide them.
 - Never put secrets in messages.
 - **Privacy.** The repo may be public. The user's private things (their own products, clients, people, accounts, machine names, home paths) never go into files, commit messages or branch names, not even as test data or examples: use made-up names. Private notes or files you need go only in the project's `.teamwork/private/`, which is never committed. Privacy check: {{GUARD}}. A hit means: remove it and rewrite your unpushed commits; if it was already pushed, stop and tell the lead (`BLOCKED`).
 - Keep messages short. Point to files and commits instead of pasting big content.

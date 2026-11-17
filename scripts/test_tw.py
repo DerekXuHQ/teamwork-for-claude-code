@@ -514,6 +514,175 @@ class Guard(unittest.TestCase):
     def guard(self, *a):
         return self.tw("guard", *a)
 
+    def tw_mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tw", TW)
+        tw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tw)
+        return tw
+
+    def test_t25_escaped_and_packed_words(self):
+        import bz2, io, lzma, zipfile, zlib
+        w = "蓝鲸星"
+        docx = io.BytesIO()
+        with zipfile.ZipFile(docx, "w") as z:
+            z.writestr("word/document.xml", "<w:r><w:t>Zor</w:t></w:r><w:r><w:t>blax</w:t></w:r>")
+        stream = zlib.compress(b"BT /F1 12 Tf [(Zor) -20 (blax)] TJ ET")
+        files = {
+            "fixture.json": json.dumps({"name": w}).encode(),  # ensure_ascii: \u84dd...
+            "notes.rtf": b"{\\rtf1 \\uc1\\u34013 ?\\u40120 ?\\u26143 ?}",
+            "page.html": "&#34013;&#x9cb8;&#26143;".encode(),
+            "link.txt": b"https://x.invalid/?q=%5A%6F%72%62%6C%61%78",
+            "report.docx": docx.getvalue(),
+            "report.pdf": b"%PDF-1.4\n1 0 obj<</Filter/FlateDecode>>stream\n" + stream + b"\nendstream endobj",
+            "dump.bz2": bz2.compress(b"abc" * 50 + b" Zorblax" * 20),
+            "dump.xz": lzma.compress(b"abc" * 50 + b" Zorblax" * 20),
+        }
+        (self.proj / ".teamwork" / "PRIVATE.md").write_text(f"- Zorblax\n- {w}\n")
+        for name, data in files.items():
+            (self.proj / name).write_bytes(data)
+            self.commit("add " + name)
+            r = self.guard("--base", "origin/main")
+            self.assertEqual(r.returncode, 1, name + ": " + r.stdout + r.stderr)
+            self.git("reset", "-q", "--hard", "origin/main")
+            self.git("clean", "-qfd")
+        (self.proj / "plain.json").write_text(json.dumps({"a": "caf\u00e9 \u00e5"}) + " &amp; %41 <b>ok</b>\n")
+        self.commit("clean escapes")
+        self.assertEqual(self.guard("--base", "origin/main").returncode, 0)
+
+    def test_t25_empty_pre_push_input_fails_closed(self):
+        r = self.pre_push("")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("input=$(cat)", r.stdout + r.stderr)
+        # the hook install.py writes owns stdin: empty means git had nothing to push ("Everything up-to-date")
+        for stdin in ("", "\n"):
+            r = subprocess.run([sys.executable, str(TW), "-C", str(self.proj), "guard", "--pre-push", "--remote",
+                                "origin", "--stdin-owned"], cwd=self.proj, input=stdin, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("nothing to push", r.stdout)
+
+    def test_t25_paths_and_quoted_entries_stay_whole(self):
+        tw = self.tw_mod()
+        pm = self.proj / ".teamwork" / "PRIVATE.md"
+        pm.write_text('- /Users/zorbuser\n- ~/quixbar-notes\n- C:\\Users\\zorb\n- "Quixbar, Ltd"\n- `a/b`\n- Zorblax/Quixbar\n')
+        terms, _, _ = tw.load_private(self.proj / ".teamwork")
+        for t in ("/Users/zorbuser", "~/quixbar-notes", "C:\\Users\\zorb", "Quixbar, Ltd", "a/b"):
+            self.assertIn(t, terms)
+        for t in ("Users", "zorbuser", "quixbar-notes", "Ltd", "a", "b"):
+            self.assertNotIn(t, terms)
+        self.assertIn("Zorblax", terms)  # a plain 'X/Y' line still adds both
+        pm.write_text("1. /srv/zorblax, /opt/quixbar\n- /\n- ~\n- /a/zorb,/b/quix\n")  # a list of paths: each one whole
+        terms, _, _ = tw.load_private(self.proj / ".teamwork")
+        self.assertEqual(terms, ["/srv/zorblax", "/opt/quixbar", "/a/zorb", "/b/quix"])  # a bare / or ~ never counts
+        # a note after a path is dropped, as for any entry; a quoted entry keeps its own '#'; one character never counts
+        pm.write_text('- /Users/zorbuser - my home\n- /srv/quixbar (old box)\n- ~/lanjing: notes\n- "Quixbar #1"\n'
+                      '- "x"\n')
+        terms, _, _ = tw.load_private(self.proj / ".teamwork")
+        self.assertEqual(terms, ["/Users/zorbuser", "/srv/quixbar", "~/lanjing", "Quixbar #1"])
+
+    def test_t25_home_path_is_built_in(self):
+        home = Path(self._tmp.name) / "home" / "quixuser"
+        home.mkdir(parents=True)
+        env = {**os.environ, "HOME": str(home)}
+        (self.proj / "cfg.json").write_text(json.dumps({"hook": f"python3 {home}/x/tw.py context"}))
+        self.commit("absolute path")
+        r = subprocess.run([sys.executable, str(TW), "-C", str(self.proj), "guard", "--base", "origin/main"],
+                           cwd=self.proj, env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("quixuser", r.stdout)
+
+    def test_t25_hashed_list_and_cloud_kit(self):
+        (self.proj / ".teamwork" / "PRIVATE.md").write_text("- Zorblax\n- 蓝鲸星\n")
+        j1 = json.loads(self.guard("--hash-list").stdout)
+        j2 = json.loads(self.guard("--hash-list").stdout)
+        self.assertNotEqual(j1["salt"], j2["salt"])  # a new salt every time
+        blob = json.dumps(j1)
+        for w in ("zorblax", "蓝鲸星", "\\u84dd"):
+            self.assertNotIn(w, blob.lower())
+        self.assertGreater(len(j1["hashes"]), 2)  # decoys pad the list
+        self.assertNotIn("len", "".join(j1))  # no lengths stored
+        kit = self.guard("--hash-list", "--kit").stdout
+        self.assertNotIn("Zorblax", kit)
+        root = Path(self._tmp.name)
+        (root / "tw-guard.py").write_text(kit)
+        (root / "h.json").write_text(json.dumps(j1))
+        cloud = root / "cloud"
+        subprocess.run(["git", "clone", "-q", str(self.remote), str(cloud)], check=True)
+        g = lambda *x: subprocess.run(["git", "-C", str(cloud), "-c", "user.name=t", "-c", "user.email=t@e.invalid",
+                                       *x], capture_output=True, text=True)
+        g("checkout", "-qb", "work")
+        (cloud / "n.md").write_text("the 蓝鲸星 plan\n")
+        g("add", "-A")
+        g("commit", "-qm", "n")
+        kitrun = lambda: subprocess.run([sys.executable, "-I", str(root / "tw-guard.py"), "origin/main"], cwd=cloud,
+                                        capture_output=True, text=True)
+        hashed = lambda: subprocess.run([sys.executable, str(TW), "guard", "--hashed", str(root / "h.json"),
+                                         "--repo", str(cloud), "--base", "origin/main"], cwd=cloud,
+                                        capture_output=True, text=True)
+        self.assertEqual(kitrun().returncode, 1)
+        r = hashed()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)  # works without any .teamwork folder
+        self.assertNotIn("蓝鲸星", r.stdout)
+        g("reset", "-q", "--hard", "origin/main")
+        (cloud / "ok.md").write_text("Quixbar is fine\n")
+        g("add", "-A")
+        g("commit", "-qm", "ok")
+        self.assertEqual(kitrun().returncode, 0, kitrun().stdout)
+        self.assertEqual(hashed().returncode, 0)
+        # run from a subfolder: an untracked file at the top is still read
+        (cloud / "sub").mkdir()
+        (cloud / "top.md").write_text("蓝鲸星\n")
+        r = subprocess.run([sys.executable, "-I", str(root / "tw-guard.py"), "origin/main"], cwd=cloud / "sub",
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        (cloud / "top.md").unlink()
+        # any git error fails closed: a base that does not exist, or no repo at all
+        for args, cwd in ((["origin/nope"], cloud), (["origin/main"], root)):
+            r = subprocess.run([sys.executable, "-I", str(root / "tw-guard.py"), *args], cwd=cwd,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, (args, r.stdout, r.stderr))
+            self.assertNotIn("guard: ok", r.stdout)
+        # decoys are random values, never hashes of a string: hex-heavy files (lock files, SHAs) do not trip them
+        tw = self.tw_mod()
+        import secrets
+        noise = "\n".join(secrets.token_hex(20) for _ in range(3000)).encode()
+        for _ in range(10):
+            j = json.loads(self.guard("--hash-list").stdout)
+            self.assertFalse(tw.HashedList(j["salt"], j["hashes"], j["pre"])(noise.lower()))
+            self.assertTrue(all(len(p) == 3 for p in j["pre"]))  # 4096 buckets: the prefix is not named
+        # no home path in the list: it would give the cloud thread a guessable user name
+        home = root / "home" / "quixuser"
+        home.mkdir(parents=True)
+        r = subprocess.run([sys.executable, str(TW), "-C", str(self.proj), "guard", "--hash-list"], cwd=self.proj,
+                           env={**os.environ, "HOME": str(home)}, capture_output=True, text=True)
+        j = json.loads(r.stdout)
+        self.assertFalse(tw.HashedList(j["salt"], j["hashes"], j["pre"])(str(home).lower().encode()))
+
+    def test_t25_install_keeps_absolute_paths_out_of_commits(self):
+        inst = Path(__file__).resolve().parent / "install.py"
+        cfg = Path(self._tmp.name) / "cfg"
+        run = lambda: subprocess.run([sys.executable, str(inst), "--apply", "--link", "--no-allow", "--config-dir",
+                                      str(cfg), "--project", str(self.proj), "--pre-push"],
+                                     capture_output=True, text=True)
+        r = run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((self.proj / ".claude" / "settings.json").exists())
+        self.assertTrue((self.proj / ".claude" / "settings.local.json").exists())
+        self.assertIn(".claude/settings.local.json", (self.proj / ".git" / "info" / "exclude").read_text())
+        self.assertNotIn("settings", self.git("status", "--porcelain").stdout)
+        # a tracked hooks folder would carry the hook (absolute paths) into a commit: refused
+        (self.proj / ".git" / "hooks" / "pre-push").unlink()
+        self.git("config", "core.hooksPath", ".githooks")
+        r = run()
+        self.assertIn("refused", r.stdout)
+        self.assertFalse((self.proj / ".githooks" / "pre-push").exists())
+        # another tool's hook: the printed lines save stdin once
+        self.git("config", "--unset", "core.hooksPath")
+        (self.proj / ".git" / "hooks" / "pre-push").write_text("#!/bin/sh\ngit lfs pre-push \"$@\"\n")
+        out = run().stdout
+        self.assertIn("input=$(cat)", out)
+        self.assertIn("--stdin-owned || exit 1", out)  # the saved input is the guard's alone: up-to-date pushes pass
+
     def test_round5_star_globs_keep_their_stars(self):
         pm = self.proj / ".teamwork" / "PRIVATE.md"
         pm.write_text("- quixbar\npath: *.pem\n- path: notes_*\n- path: `*.key`\n**path: dump_*.md**\n")
@@ -1063,11 +1232,47 @@ class LeasesGitReview(LeasesGit):
         self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
         self.git("merge", "-q", "--squash", "tw/proj/ui")
         commit_at("T1: zorblax (#12)", "2030-01-01T12:00:00Z")
-        self.assertIn("T2", json.loads(self.tw("ready").stdout)["ready"])
+        # T25 / T11-b: diverged copies both hold (work on either side is never dropped), so the stale pushed WIP
+        # still holds after the amended copy landed, until it is pushed over, deleted or pruned
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["blocked_by_lease"])
         self.git("branch", "-q", "-D", "tw/proj/ui")  # the host deleted the branch: only the stale origin copy left
         self.assertIn("T2", json.loads(self.tw("ready").stdout)["blocked_by_lease"])  # unsure: held ...
         self.git("update-ref", "-d", "refs/remotes/origin/tw/proj/ui")  # ... until `git fetch --prune`
         self.assertIn("T2", json.loads(self.tw("ready").stdout)["ready"])
+
+    def test_t25_past_owners_branch_still_holds(self):
+        """T11-a: a task handed to another thread keeps the lease of what the earlier owner left unmerged."""
+        self.tw("thread", "add", "db")
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared/config.py")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.ui_branch_changes_shared()
+        self.tw("task", "set", "T1", "--owner", "db")  # db has no branch yet; ui's work is still unmerged
+        r = json.loads(self.tw("ready").stdout)
+        self.assertEqual(r["blocked_by_lease"]["T2"][0]["paths"], ["shared/config.py"])
+
+    def test_t25_diverged_copies_both_hold(self):
+        """T11-b: local and origin diverged with different work on each side: both sides count, not only the newer."""
+        def commit_at(msg, when):
+            self.git("add", "-A")
+            subprocess.run(["git", "-C", str(self.proj), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "commit", "-qm", msg], check=True, capture_output=True,
+                           env={**os.environ, "GIT_COMMITTER_DATE": when, "GIT_AUTHOR_DATE": when})
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "zorb/quixbar.py")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "zorb").mkdir()
+        (self.proj / "zorb" / "quixbar.py").write_text("q = 1\n")
+        commit_at("T1: pushed from the other seat", "2030-01-01T10:00:00Z")
+        self.git("update-ref", "refs/remotes/origin/tw/proj/ui", "HEAD")
+        self.git("reset", "-q", "--hard", "main")
+        (self.proj / "zorb").mkdir(exist_ok=True)
+        (self.proj / "zorb" / "lanjing.py").write_text("l = 1\n")
+        commit_at("T1: newer local work", "2030-01-01T11:00:00Z")
+        self.git("checkout", "-q", "main")
+        r = json.loads(self.tw("ready").stdout)
+        self.assertIn("T2", r["blocked_by_lease"], r)  # the older origin copy's file still holds
 
     def test_round14_unpushed_work_after_older_copy_squashed(self):
         def commit_at(msg, when):
@@ -1756,6 +1961,38 @@ class Rebuild(LeasesGit):
         out = json.loads(run("rebuild", "--project", "quixbar-zorblax", "--sessions", str(ss)).stdout)
         self.assertTrue(any("none with a teamwork tag" in n for n in out["notes"]))
 
+    def test_t25_rebuild_stays_in_its_project(self):
+        """T13-a: the initials are not this project's label once it has its own short name, and a session another
+        lead created is not one of this project's threads."""
+        sub = Path(self._tmp.name) / "qzb"
+        sub.mkdir()
+        run = lambda *x: subprocess.run([sys.executable, str(TW), "-C", str(sub), *x], cwd=sub,
+                                        capture_output=True, text=True)
+        self.assertEqual(run("init", "quixbar-zorblax", "--short", "ZB").returncode, 0)
+        run("lead", "--session", "L1")
+        ss = sub / "s.json"
+        row = lambda i, t, n, parent=None: {"id": i, "tags": [f"teamwork:{t}", f"teamwork-thread:{n}"],
+                                            "created_at": "2020-01-01T00:00:00Z",
+                                            **({"parent_session_id": parent} if parent else {})}
+        ss.write_text(json.dumps([row("S1", "ZB", "ui", "L1"), row("S7", "QZ", "api"),  # QZ: another project
+                                  row("S8", "ZB", "db", "L9")]))  # right tag, but another lead made it
+        r = run("rebuild", "--sessions", str(ss))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["threads"], ["ui"], out)
+        self.assertTrue(any("S8" in n and "never led" in n for n in out["notes"]), out["notes"])
+        # a project still on its default initials (QZ): a QZ session is ours only with a second sign
+        sub2 = Path(self._tmp.name) / "qzd"
+        sub2.mkdir()
+        run2 = lambda *x: subprocess.run([sys.executable, str(TW), "-C", str(sub2), *x], cwd=sub2,
+                                         capture_output=True, text=True)
+        self.assertEqual(run2("init", "quixbar-zorblax").returncode, 0)
+        run2("lead", "--session", "L1")
+        ss.write_text(json.dumps([row("S7", "QZ", "api"), row("S3", "QZ", "ui", "L1")]))
+        out = json.loads(run2("rebuild", "--sessions", str(ss)).stdout)
+        self.assertEqual(out["threads"], ["ui"], out)
+        self.assertTrue(any("S7" in n and "initials" in n for n in out["notes"]), out["notes"])
+
     def test_round_t13_pages_corrupt_state_old_short(self):
         sub = Path(self._tmp.name) / "zq"
         sub.mkdir()
@@ -1931,6 +2168,45 @@ class ReviewRounds(TwCase):
     def raw(self, *args):
         return self.tw(*args, ok=False, walk=False)
 
+    def test_t25_done_checks_final_pass_remaining_gate_stale_followups(self):
+        ok = lambda *x: self.assertEqual(self.raw(*x).returncode, 0, x)
+        no = lambda *x: self.assertNotEqual(self.raw(*x).returncode, 0, x)
+        rv = ("task", "set", "T1", "--reviewer", "ui/subagent")
+        # T23-b: pass with remaining findings needs 2+ rounds, green checks and no blocking finding
+        no(*rv, "--review", "pass", "--remaining", "Quixbar edge", "--checks", "pass", "--no-blocking")  # round 1
+        ok(*rv, "--review", "fail")
+        ok("task", "set", "T1", "--status", "review")
+        no(*rv, "--review", "pass", "--remaining", "Quixbar edge", "--no-blocking")  # checks not green
+        no(*rv, "--review", "pass", "--remaining", "Quixbar edge", "--checks", "pass")  # blocking not ruled out
+        ok(*rv, "--review", "pass", "--remaining", "Quixbar edge", "--checks", "pass", "--no-blocking")
+        ok("task", "followups", "T1", "--apply")
+        self.assertIn("T1-f1", self.state()["tasks"])
+        # T23-c: the verdict is voided by rework: its follow-up is marked, shown, and the mark survives rebuild
+        r = self.raw("task", "set", "T1", "--status", "working")
+        self.assertIn("T1-f1", r.stderr)
+        self.assertEqual(self.state()["tasks"]["T1-f1"]["parent_verdict_voided"], "rework after review")
+        self.assertIn("T1-f1 (verdict voided)", self.raw("task", "reviews", "T1").stdout)
+        reb = json.loads((self.dir / ".teamwork" / "state.json").read_text())
+        self.raw("rebuild", "--apply")
+        self.assertEqual(self.state()["tasks"]["T1-f1"].get("parent_verdict_voided"), "rework after review")
+        self.assertEqual(set(self.state()["tasks"]), set(reb["tasks"]))
+        # T23-c: a new verdict recorded straight over a pass also voids it (and keeps it in past_reviews) ...
+        ok("task", "set", "T1", "--status", "review", "--checks", "pass")
+        ok(*rv, "--review", "pass", "--rounds", "3", "--remaining", "Quixbar edge", "--checks", "pass", "--no-blocking")
+        self.assertNotIn("parent_verdict_voided", self.state()["tasks"]["T1-f1"])  # same finding again: mark cleared
+        ok(*rv, "--review", "fail")
+        k = self.state()["tasks"]
+        self.assertIn("replaced", k["T1-f1"]["parent_verdict_voided"])
+        self.assertEqual(k["T1"]["past_reviews"][-1]["result"], "pass")
+        # T23-a: once done, checks are final (a regression is new work), so a capped/pass verdict cannot be voided
+        ok("task", "set", "T1", "--status", "review", "--checks", "pass")
+        ok(*rv, "--review", "pass")
+        ok("task", "set", "T1", "--status", "done")
+        no("task", "set", "T1", "--checks", "fail")
+        no("task", "set", "T1", "--checks", "none")
+        ok("task", "set", "T1", "--checks", "pass")  # unchanged: fine
+        self.assertEqual(self.state()["tasks"]["T1"]["review"]["result"], "pass")
+
     def test_capped_only_at_the_limit_with_green_checks(self):
         ok = lambda *x: self.assertEqual(self.raw(*x).returncode, 0, x)
         no = lambda *x: self.assertNotEqual(self.raw(*x).returncode, 0, x)
@@ -2053,7 +2329,8 @@ class ReviewRounds(TwCase):
         self.assertEqual(self.state()["tasks"]["T1"]["checks"], "none")
         ok("task", "set", "T1", "--status", "review", "--checks", "pass")
         # the 'two rounds, nothing new' pass keeps its open important findings as follow-ups
-        ok("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--rounds", "4", "--remaining", "Zorblax edge")
+        ok("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--rounds", "4", "--remaining", "Zorblax edge",
+           "--no-blocking")
         out = json.loads(self.tw("task", "followups", "T1", "--apply").stdout)
         self.assertEqual([t["id"] for t in out["tasks"]], ["T1-f1"])
         self.assertIn("pass", self.tw("task", "reviews", "T1").stdout)
@@ -2078,6 +2355,119 @@ class ReviewRounds(TwCase):
         self.assertIn("rounds: N", p)
         self.tw("prefs", "--set", "review_max_rounds=0")
         self.assertIn("does not apply", self.tw("worker-prompt", "ui").stdout)
+
+
+class FewerPrompts(TwCase):
+    """T27: install.py pre-approves scratch folders and always asks for irreversible repo actions; the protocol
+    tells every session how not to cause prompts."""
+
+    def install(self, *extra):
+        inst = Path(__file__).resolve().parent / "install.py"
+        return subprocess.run([sys.executable, str(inst), "--link", "--config-dir", str(self.dir / "cfg"), *extra],
+                              capture_output=True, text=True, env={**os.environ, "TMPDIR": str(self.dir / "tmpd")})
+
+    def test_install_dry_run_then_apply(self):
+        (self.dir / "tmpd").mkdir()
+        cfg = self.dir / "cfg"
+        cfg.mkdir()
+        (cfg / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"],
+                                                                      "ask": ["Bash(rm -rf:*)"]}}))
+        dry = self.install()
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        for want in ("additionalDirectories: adding /tmp", str(self.dir / "tmpd"), "ask: adding Bash(gh repo delete:*)",
+                     "Bash(gh repo edit *--visibility*)", "would write"):
+            self.assertIn(want, dry.stdout)
+        self.assertNotIn("additionalDirectories", (cfg / "settings.json").read_text())  # dry run writes nothing
+        proj = self.dir / "zorblax"
+        proj.mkdir()
+        self.assertEqual(self.install("--apply", "--project", str(proj)).returncode, 0)
+        perms = json.loads((cfg / "settings.json").read_text())["permissions"]
+        self.assertIn("/tmp", perms["additionalDirectories"])
+        self.assertIn(str((self.dir / "tmpd").resolve()), perms["additionalDirectories"])
+        self.assertIn(str(proj.resolve().parent / "zorblax-worktrees"), perms["additionalDirectories"])
+        self.assertEqual(perms["ask"][0], "Bash(rm -rf:*)")  # the user's own rules stay, first
+        self.assertIn("Bash(gh api *-X DELETE*)", perms["ask"])
+        self.assertIn("Bash(git *)", perms["allow"])
+        self.assertTrue(any(r.startswith("Bash(python3 ") and r.endswith('/scripts/tw.py" *)') for r in perms["allow"]))
+        again = self.install("--apply", "--project", str(proj)).stdout
+        self.assertIn("ask: nothing to add", again)
+        self.assertEqual(json.loads((cfg / "settings.json").read_text())["permissions"], perms)  # idempotent
+
+    @staticmethod
+    def rule_hits(rules, cmd):
+        """Rough model of Claude Code's Bash rules: `X:*` is a prefix match, otherwise `*` matches anything."""
+        import fnmatch
+        hits = []
+        for r in rules:
+            body = r[len("Bash("):-1]
+            if body.endswith(":*") and cmd.startswith(body[:-2]) or fnmatch.fnmatchcase(cmd, body):
+                hits.append(r)
+        return hits
+
+    def test_ask_rules_catch_the_users_decisions(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import install
+        for cmd in ("gh repo delete quixbar/zorblax --yes", "gh repo archive quixbar/zorblax",
+                    "gh repo rename zorb -R quixbar/zorblax", "gh repo edit quixbar/zorblax --visibility public",
+                    "gh repo edit --visibility=private", "gh api -X DELETE repos/quixbar/zorblax",
+                    "gh api repos/quixbar/zorblax -X DELETE", "gh api --method=DELETE repos/quixbar/zorblax",
+                    "gh api repos/quixbar/zorblax --method DELETE", "gh api -XDELETE repos/quixbar/zorblax",
+                    "gh api -X PATCH repos/quixbar/zorblax -f visibility=public",
+                    "gh api repos/quixbar/zorblax -F private=false", "gh api -X PATCH repos/q/z -f default_branch=dev",
+                    "gh api -X=DELETE repos/q/z", "gh repo edit quixbar/zorblax --default-branch dev"):
+            self.assertTrue(self.rule_hits(install.ASK, cmd), cmd)
+        # no git push rules (the host blocks force-push and deletion of main): a thread's routine pushes never ask
+        for cmd in ("git push -u origin tw/zorblax/core", "git push --force-with-lease origin tw/zorblax/core",
+                    "git push --force origin tw/zorblax/core", "git -C /tmp/zorblax push -f origin tw/zorblax/core",
+                    "git push origin main", "gh repo view quixbar/zorblax", "gh api repos/quixbar/zorblax",
+                    "git push --follow-tags origin main", "git push origin --delete tw/zorblax/core",
+                    'git commit -m "T9: push --force after rebase"', "gh pr list"):
+            self.assertFalse(self.rule_hits(install.ASK, cmd), cmd)
+        self.assertFalse([r for r in install.ASK if "push" in r])
+        self.assertIn("Block force pushes", install.HOST_PROTECTION)
+
+    def test_no_allow_and_malformed_settings(self):
+        (self.dir / "tmpd").mkdir()
+        cfg = self.dir / "cfg"
+        cfg.mkdir()
+        r = self.install("--apply", "--no-allow")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        perms = json.loads((cfg / "settings.json").read_text())["permissions"]
+        self.assertEqual(set(perms), {"ask"})  # only the safety net
+        for bad in (json.dumps({"permissions": []}), json.dumps({"permissions": {"ask": "Bash(rm:*)"}}), "{zorblax"):
+            (cfg / "settings.json").write_text(bad)
+            r = self.install("--apply")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("fix the file by hand", r.stdout + r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertEqual((cfg / "settings.json").read_text(), bad)  # left as it was
+
+    def test_odd_tmpdir_never_adds_root_or_home(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import install
+        for odd in ("//", "/", str(Path.home()), "zorblax/rel"):
+            old = os.environ.get("TMPDIR")
+            os.environ["TMPDIR"] = odd
+            try:
+                notes = []
+                dirs = install.temp_dirs(notes)
+            finally:
+                os.environ.pop("TMPDIR") if old is None else os.environ.__setitem__("TMPDIR", old)
+            for d in dirs:
+                self.assertNotEqual(Path(d).resolve(), Path("/"), odd)
+                self.assertNotEqual(Path(d).resolve(), Path.home().resolve(), odd)
+            self.assertTrue(notes, odd)
+
+    def test_protocol_and_skill_say_how(self):
+        self.tw("thread", "add", "ui")
+        p = self.tw("worker-prompt", "ui").stdout
+        for want in ("Do not make the user click", "/tmp", "Edit or Write tool", "git -C",
+                     "only the user's own words"):
+            self.assertIn(want, p)
+        skill = (Path(__file__).resolve().parent.parent / "SKILL.md").read_text()
+        for want in ("Keep prompts rare", "The user's own decisions", "force-pushing the base branch",
+                     "visibility", "Bash(sleep *)", "send_later"):
+            self.assertIn(want, skill)
 
 
 class Preconditions(TwCase):

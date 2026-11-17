@@ -204,9 +204,18 @@ review notes on core's branch have the details.
 
 Reviewed at core branch commit 4aabb32, `scripts/install.py` (rules in `ASK` and `_push_rules`).
 
+**Standing decision (lead, 2026-11-17).** The local `git push` ask rules were removed: the user does
+not want to confirm routine force pushes to their own branch. `main` is protected by a GitHub
+ruleset on `~DEFAULT_BRANCH` instead, which covers any base branch name. Every item about the local
+`git push` ask rules is marked **No longer applies** for this reason, now and in future reviews.
+Scope: this covers only the `git push` rules; other ask rules (e.g. `gh api`, R27-4) still apply.
+
 - R27-1 `git *push*` matches the whole command text, so a commit message containing `push`, `-f`, `:main` or `+main` is caught and prompts once more. Suggestion: narrow the rule to commands starting with `git push` or `git -C * push`.
+  **No longer applies (2026-11-17):** the `git push` ask rules were removed; see the standing decision above.
 - R27-2 Combined short options are not caught: `git push -fu origin main`, `git push -uf origin main`.
+  **No longer applies (2026-11-17):** the `git push` ask rules were removed; `main` is protected by the GitHub ruleset.
 - R27-3 The ask rules only know `main` and `master`; a project whose base branch has another name is not protected. Suggestion: generate the rules from the project's base branch.
+  **No longer applies (2026-11-17):** the `git push` ask rules were removed; the ruleset targets `~DEFAULT_BRANCH`, so any base branch name is covered.
 - R27-4 `gh api -X delete` (lower case), and changing visibility through `--input body.json`, are not caught. This is a limit of text matching; setup.md could say so.
 - R27-5 A `TMPDIR` that points into a subfolder of the home directory (e.g. `~/Documents/x`) is added to `additionalDirectories` as is.
 - R27-6 A malformed settings.json is only detected after step 1 has copied the skill, leaving a half-installed state. Re-running works, but the check could move first.

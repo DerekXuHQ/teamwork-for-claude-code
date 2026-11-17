@@ -27,7 +27,7 @@ Goal: redesign the order list page so status, total and the next action fit abov
 Context: spec at docs/spec.md §3; design notes in .teamwork/MEMORY.md; the api thread owns /api/orders.
 Done when: the page renders with seeded data at phone and desktop widths, screenshots saved to docs/shots/, tests pass.
 Constraints: do not change API contracts (api owns them; hand off if you need a field). Work on tw/shop/ui.
-Report: ACK now, DONE or BLOCKED when finished. End every turn with the tw-status block.
+Report: ACK now, DONE or BLOCKED when finished (DONE with the review verdict, `rounds: N`, remaining and deferred findings). End every turn with the tw-status block.
 ```
 
 ## FOLLOWUP: more work in an area the thread already owns
@@ -66,9 +66,27 @@ Send to every active thread after adding, removing or re-scoping a thread. Body 
 The user decided: keep refunds in the orders table with a `kind` column. Recorded in MEMORY.md.
 ```
 
+## NEED-THREAD: a thread asks for a new thread
+
+Threads never create sessions. When a thread finds work that needs its own seat (a new area, or more than it can carry), it sends this to the lead. Fixed body fields, so the lead can turn it into `TW thread add` and `TW task add`:
+
+```
+[tw:shop] NEED-THREAD ui -> lead T3
+name: search
+kind: rc
+why: the order list needs full-text search; it is its own area with its own index and tests.
+takes over: the search half of T3
+owns: api/search/**, web/search/**
+```
+
+Cloud threads cannot message the lead: they write the same fields, separated by `;`, on the `need_thread:` line of their STATUS block, and the lead picks it up when it sweeps (SKILL.md step 5); the line goes back to `-` once they see the answer. rc threads send the message and leave that line `-`. The lead records each request once with `TW ask ... --need-thread <name>`, which refuses repeats.
+
+`kind: cloud` only with a reason on the same line: the thread never touches the project folder and never needs to message rc threads. The lead decides. It may give the work to an existing thread instead, or propose the new thread to the user first if `propose_before_start` is true. Either way it answers with `ANSWER` and, if it creates the thread, a `ROSTER`.
+
 ## Rules for writing tasks
 
 - One task, one owner, one "done when" the thread can check itself.
 - Put file paths, branch names and the other owners it depends on in the message; do not assume the thread remembers the board.
 - Cloud threads: say which repo and branch; they cannot see the project folder, so paste or commit anything they need.
+- Write the brief in the conversation language; the thread writes its subagents' briefs in it too.
 - Never put secrets in a message.

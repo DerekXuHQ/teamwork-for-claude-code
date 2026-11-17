@@ -176,6 +176,8 @@ def language_rule(st):
         "- Reply in the language you were asked in. The lead writes to threads, threads answer the lead and talk to "
         "each other in the current conversation language.\n"
         "- If the user talks to a thread directly in another language, that thread answers the user in that language.\n"
+        "- The same language runs all the way down: the task brief a thread gives its subagents and the reports they "
+        "return are in the current conversation language too.\n"
         "- When the user switches language, the lead runs `tw.py prefs --set language=<code>` and broadcasts a "
         "FOLLOWUP to every thread; the newest one wins.\n"
         f"- Message headers keep their fixed English keywords (`[tw:{tag(st)}] TASK lead -> <thread> T2`); "
@@ -355,8 +357,9 @@ def render_tasks(st, only_owner=None):
         review = f"{rv['result']} ({rv.get('reviewer') or '-'})" if rv else "-"
         if k.get("checks"):
             review += f", checks {k['checks']}"
-        reqs = ",".join(r + {"closed": "✓", "dropped": "✗"}.get(q["status"], "") for r, q in st.get("requests", {}).items()
-                        if tid in (q.get("tasks") or [])) or "-"
+        reqs = ",".join([r + {"closed": "✓", "dropped": "✗"}.get(q["status"], "")
+                         for r, q in st.get("requests", {}).items() if tid in (q.get("tasks") or [])]
+                        + [f"({r})" for r in k.get("from_requests") or []]) or "-"  # (R1): follow-up, not holding it
         rows.append(
             f"| {tid} | {k['title']} | {k.get('owner') or '-'} | {deps} | {k['status']} | {k.get('accept') or '-'} "
             f"| {review} | {reqs} |"
@@ -367,6 +370,82 @@ def render_tasks(st, only_owner=None):
         "| id | task | owner | deps | status | done when | review | req |\n|---|---|---|---|---|---|---|---|\n"
         + "\n".join(rows)
     )
+
+
+def _cell(x):
+    return str(x).replace("|", "\\|").replace("\n", " ")
+
+
+def render_reviews(st, only=None):
+    """Per task: verdict, rounds used of the limit (as it was when recorded), reviewer, findings left, follow-ups."""
+    cap = review_max(st)
+    rows = []
+    for tid, k in st["tasks"].items():
+        if only and tid != only:
+            continue
+        rv = k.get("review") or {}
+        n = int(k.get("review_rounds") or 0)
+        if not rv and not n and not k.get("past_reviews"):
+            continue
+        fu = [t for t, x in st["tasks"].items() if x.get("followup_of") == tid]
+        left = "; ".join(rv.get("remaining") or []) or "-"
+        rows.append("| " + " | ".join(_cell(x) for x in (
+            tid, k.get("owner") or "-", k["status"], rv.get("result") or "-", f"{n}/{rv.get('cap', cap) or '-'}",
+            rv.get("reviewer") or "-", k.get("checks") or "-", left, ",".join(fu) or "-")) + " |")
+    if not rows:
+        return "(no reviews recorded)"
+    return ("| task | owner | status | verdict | rounds | reviewer | checks | remaining | follow-ups |\n"
+            "|---|---|---|---|---|---|---|---|---|\n" + "\n".join(rows))
+
+
+def task_followups(d, st, a):
+    """One follow-up task per important finding left at a capped review; dry run unless --apply."""
+    if a.id not in st["tasks"]:
+        sys.exit(f"unknown task {a.id}")
+    k = st["tasks"][a.id]
+    rv = k.get("review") or {}
+    if rv.get("result") not in PASSING or not rv.get("remaining"):
+        sys.exit(f"{a.id} has no passing or capped review with remaining findings (`task set {a.id} --review "
+                 "pass|capped --remaining ...` first)")
+    done = {x.get("followup_item") for t, x in st["tasks"].items() if x.get("followup_of") == a.id}
+    reqs = [r for r, q in st.get("requests", {}).items() if a.id in (q.get("tasks") or [])]
+    plan, n = [], 0
+    for item in rv["remaining"]:
+        if item in done:
+            continue
+        n += 1
+        while True:
+            tid = f"{a.id}-f{n}"
+            if tid not in st["tasks"]:
+                break
+            n += 1
+        plan.append((tid, item))
+    out = []
+    for tid, item in plan:
+        out.append({"id": tid, "owner": k.get("owner"), "accept": f"fixed, with a test that fails before the fix: {item}",
+                    "followup_of": a.id, "requests": reqs})
+        if a.apply:
+            st["tasks"][tid] = {
+                "title": f"follow-up of {a.id}: {item}"[:120],
+                "owner": k.get("owner"),
+                "deps": [a.id],  # starts from the merged parent, not from unmerged code
+                "accept": out[-1]["accept"],
+                "touches": list(k.get("touches") or []),
+                "topics": list(k.get("topics") or []),
+                "status": "approved" if st["plan_approved"] else "planned",
+                "notes": "",
+                "created": now(),
+                "followup_of": a.id,
+                "followup_item": item,
+                "from_requests": reqs,  # for trace; not linked, so the original request is not held back
+            }
+    if a.apply and plan:
+        save(d, st, {"ev": "task-followups", "task": a.id, "added": [t for t, _ in plan],
+                     "snap_more_tasks": {t: st["tasks"][t] for t, _ in plan}})
+    print(json.dumps({"from": a.id, "apply": bool(a.apply), "tasks": out,
+                      "next": ("show them to the user with the plan; dispatch like any task" if a.apply and plan
+                               else "re-run with --apply to add them" if plan else "nothing new to add")},
+                     ensure_ascii=False, indent=2))
 
 
 def render_groups(st):
@@ -476,6 +555,7 @@ def cmd_init(a):
             "checkin_minutes": 10,
             "short_name": short,  # in titles [X], headers [tw:X], tags teamwork:X
             "require_review": True,  # task done needs an independent review pass (task set --review)
+            "review_max_rounds": REVIEW_MAX_DEFAULT,  # at this many review rounds: no blocking + checks pass -> capped
             "stuck_minutes": STUCK_DEFAULT,  # working thread silent this long -> "possibly stuck"; 0 = off
             "language": "",  # conversation language code (zh, en, ...); empty = follow the user's latest message
             "thread_permission_mode": "",  # create_session permission_mode; empty = the lead's own mode
@@ -511,9 +591,16 @@ def cmd_lead(a):
     d = need(find_dir())
     st = load(d)
     old = st["lead"].get("session_id")
+    if a.session is not None:
+        a.session = a.session.strip()
     if a.session and old and old != a.session and not a.force:
         sys.exit(f"project {st['project']} already has lead {old}. One lead per project: check that session with "
                  "get_session; if it is archived or the user says to take over, re-run with --force.")
+    if a.session is not None:
+        a.session = a.session.strip()
+    if a.session and not_a_session(a.session, st):
+        sys.exit(not_a_session(a.session, st).split(": a thread is")[0] + ": the lead is the user's own Remote "
+                 "Control session; pass its id from get_session")
     if a.session:
         holder = next((n for n, t in st["threads"].items() if t.get("session_id") == a.session
                        and t.get("status") != "archived"), None)
@@ -566,10 +653,48 @@ def _session_taken(st, sid, me):
                  if n != me and t.get("session_id") == sid and t.get("status") != "archived"), None)
 
 
+SUBAGENT_ID_RE = r"(?i)a[0-9a-f]{8,}|(agent|subagent|task|toolu|reviewer|helper)([-_:].*|\d*)"
+
+
+def not_a_session(sid, st=None):
+    """Why sid cannot be a thread's session (an Agent-tool subagent id or name, not a create_session id), or None.
+    A heuristic: real ids (session_..., cse_...) pass; subagent-shaped ids and thread or role names do not."""
+    sid = (sid or "").strip()
+    names = {"lead", "all", "user", "explore", "plan", "general-purpose", "worker", "explorer"} | {n.lower() for n in ((st or {}).get("threads") or {})}
+    if sid and (re.fullmatch(SUBAGENT_ID_RE, sid) or sid.lower() in names):
+        what = "is a thread or role name" if sid.lower() in names else "looks like a subagent id"
+        return (f"{sid} {what}, not a session id: a thread is a remote session made with create_session (its id "
+                "starts with session_). Subagents are helpers inside one session and never hold a seat. If "
+                "create_session is not available, stop and tell the user; do not fall back to a subagent")
+    return None
+
+
 def cmd_thread(a):
     d = need(find_dir())
     st = load(d)
     name = a.name
+    if a.session is not None:
+        a.session = a.session.strip()
+    if a.session and not_a_session(a.session, {"threads": dict(st["threads"], **{name: {}})}):
+        sys.exit(not_a_session(a.session, {"threads": dict(st["threads"], **{name: {}})}))
+    if a.action == "add" and a.cloud_reason is not None and (a.kind or "rc") != "cloud":
+        sys.exit("--cloud-reason goes with --kind cloud; an rc thread needs no reason")
+    if a.action == "add" and (a.kind or "rc") == "cloud" and not (a.cloud_reason or "").strip():
+        sys.exit("a cloud thread needs --cloud-reason \"<why>\": rc is the default. Use cloud only when the thread never "
+                 "touches the project folder AND never needs to message rc threads (a cloud thread cannot message rc "
+                 "sessions, and once its trust card is approved rc sessions, the lead included, can no longer message "
+                 "it or read its event log). If rc seats are full, ask "
+                 "the user instead of switching to cloud")
+    if a.action != "add" and (a.kind is not None or a.cloud_reason is not None):
+        t0 = st["threads"].get(name) or {}
+        if a.action != "set" or not t0 or t0.get("session_id") or t0.get("sessions") or t0.get("status") != "planned":
+            sys.exit("--kind and --cloud-reason change only while the thread is planned and has never had a session "
+                     "(the user editing the plan); after that its kind is fixed: add a new thread")
+        kind = a.kind or t0["kind"]
+        if kind == "cloud" and not (a.cloud_reason or t0.get("cloud_reason") if a.kind is None else a.cloud_reason or "").strip():
+            sys.exit("a cloud thread needs --cloud-reason \"<why>\" (see thread add)")
+        if kind == "rc" and a.cloud_reason is not None:
+            sys.exit("--cloud-reason goes with --kind cloud; an rc thread needs no reason")
     if a.session and a.action in ("add", "set", "reseat"):
         other = _session_taken(st, a.session, name)
         if other:
@@ -595,6 +720,7 @@ def cmd_thread(a):
             )
         if name in ("lead", "all") or name in st["threads"]:
             sys.exit(f"thread name {name} is taken")
+        a.kind = a.kind or "rc"
         st["threads"][name] = {
             "kind": a.kind,
             "focus": a.focus or "",
@@ -609,6 +735,8 @@ def cmd_thread(a):
         }
         if a.session:
             _close_archived(st, a.session, name, now())
+        if a.kind == "cloud":
+            st["threads"][name]["cloud_reason"] = a.cloud_reason.strip()
         if a.kind == "rc":
             st["threads"][name]["worktree"] = str(worktree_path(st, name))
         st["threads"][name]["title"] = title_for(st, name)
@@ -646,6 +774,14 @@ def cmd_thread(a):
     if name not in st["threads"]:
         sys.exit(f"unknown thread {name}; known: {', '.join(st['threads']) or '-'}")
     t = st["threads"][name]
+    if a.kind is not None or a.cloud_reason is not None:  # planned seat, checked above: the user edited the plan
+        t["kind"] = a.kind or t["kind"]
+        if t["kind"] == "cloud":
+            t["cloud_reason"] = (a.cloud_reason or t.get("cloud_reason") or "").strip()
+            t.pop("worktree", None)
+        else:
+            t.pop("cloud_reason", None)
+            t["worktree"] = str(worktree_path(st, name))
     roster_before = (t.get("session_id"), t.get("owns"), t["status"] == "archived")
     if a.action == "reseat":
         if not a.session:
@@ -708,6 +844,15 @@ def cmd_thread(a):
 def cmd_task(a):
     d = need(find_dir())
     st = load(d)
+    if a.action == "reviews":
+        if a.id != "-" and a.id not in st["tasks"]:
+            sys.exit(f"unknown task {a.id}")
+        print(render_reviews(st, None if a.id == "-" else a.id))
+        return
+    if a.id == "-":
+        sys.exit(f"task {a.action} needs a task id")
+    if a.action == "followups":
+        return task_followups(d, st, a)
     if a.action == "add":
         if a.id in st["tasks"]:
             sys.exit(f"task {a.id} exists")
@@ -731,8 +876,12 @@ def cmd_task(a):
         k = st["tasks"][a.id]
         cur = k["status"]
         said = (a.user_said or "").strip()
-        void = lambda why: k.get("review") and k.setdefault("past_reviews", []).append({**k.pop("review"),
-                                                                                         "voided": why})
+        def void(why, restart=False):
+            if k.get("review"):
+                k.setdefault("past_reviews", []).append({**k.pop("review"), "voided": why})
+            if restart and k.get("review_rounds"):  # a new criterion or a new owner: the round count starts over
+                k.setdefault("past_reviews", []).append({"rounds_reset": k.pop("review_rounds"), "why": why,
+                                                         "at": now()})
         # 0. the move itself must be legal before anything is changed
         if a.status and a.status != cur:
             if a.status not in TASK_STATUSES:
@@ -749,13 +898,19 @@ def cmd_task(a):
                 sys.exit(f"unknown owner {a.owner}")
             if (a.owner or None) != k.get("owner"):
                 rv = k.get("review") or {}
-                if rv.get("result") == "pass" and not reviewer_independent(rv.get("reviewer") or "", a.owner or ""):
+                if rv.get("result") in PASSING and not reviewer_independent(rv.get("reviewer") or "", a.owner or ""):
                     void("its reviewer became the owner")
+                if (k.get("review") or {}).get("result") == "capped":  # capped stood on the old owner's rounds
+                    void("owner changed: capped stood on the old owner's rounds")
+                    print(f"{a.id}: capped verdict voided by the owner change; review again", file=sys.stderr)
+                if k.get("review_rounds"):  # the rounds were the old owner's: a new owner starts over
+                    k.setdefault("past_reviews", []).append({"rounds_reset": k.pop("review_rounds"),
+                                                             "why": "owner changed", "at": now()})
                 if k.get("owner") and k["owner"] not in k.setdefault("past_owners", []):
                     k["past_owners"].append(k["owner"])  # wrote part of the work: never its reviewer
                 k["owner"] = a.owner or None
         if a.accept is not None and a.accept != k.get("accept"):
-            void("'done when' changed")  # the verdict was against the old criterion
+            void("'done when' changed", restart=True)  # the verdict was against the old criterion
             k["accept"] = a.accept
         old_deps = list(k.get("deps") or [])
         if a.deps is not None:
@@ -771,9 +926,15 @@ def cmd_task(a):
         if a.checks:
             if k.get("checks") == "fail" and a.checks == "none":
                 sys.exit(f"{a.id}: checks failed; only `--checks pass` clears that")
+            if a.checks != "pass" and (k.get("review") or {}).get("result") == "capped":
+                void("checks no longer passing")  # capped stood on green checks
             k["checks"] = a.checks
         owner = k.get("owner") or ""
         # 2. a review verdict, only on work that is in review, by someone independent of the owner
+        if a.rounds is not None and not a.review:
+            sys.exit("--rounds goes with --review (the number of review rounds the thread reported)")
+        if a.rounds is not None and not 1 <= a.rounds <= 99:
+            sys.exit("--rounds: 1 to 99")
         if a.review:
             if not (a.reviewer or "").strip():
                 sys.exit("--review needs --reviewer (a fresh subagent of the owner, a review thread, ...)")
@@ -788,10 +949,41 @@ def cmd_task(a):
             if not reviewer_independent(a.reviewer, owner):
                 sys.exit(f"{a.reviewer} owns {a.id}: the reviewer must be someone without its context "
                          f"(e.g. {owner}/subagent, a fresh subagent the owner starts)")
+            prev = int(k.get("review_rounds") or 0)
+            if a.rounds is not None and a.rounds < max(prev, 1):
+                sys.exit(f"{a.id}: {prev} review rounds are already recorded; --rounds only goes up "
+                         "(the thread's own count, from its DONE)")
+            rounds = a.rounds if a.rounds is not None else prev + 1
+            remaining = list(dict.fromkeys(x.strip() for x in re.split(r"\s*;\s*|\n", a.remaining or "") if x.strip()))
+            if a.remaining is not None and a.review not in PASSING:
+                sys.exit("--remaining goes with --review pass or capped (important findings left for follow-up tasks)")
+            if a.no_blocking and a.review != "capped":
+                sys.exit("--no-blocking goes with --review capped")
+            if a.review == "capped":
+                cap = review_max(st)
+                if not cap or rounds < cap:
+                    sys.exit(f"{a.id}: review round {rounds} of {cap or 'unlimited'}; `capped` is only for the last "
+                             "allowed round (prefs review_max_rounds). Pass the thread's own round count from its DONE "
+                             "with --rounds N; otherwise fix blocking and important findings and review again")
+                if k.get("checks") != "pass":
+                    sys.exit(f"{a.id}: capped needs the checks green: record `--checks pass` (in the same call is fine)")
+                if not a.no_blocking:
+                    sys.exit(f"{a.id}: capped needs --no-blocking: the last round left no blocking finding "
+                             "(a blocking one is a fail)")
+                if not remaining:
+                    sys.exit(f"{a.id}: capped needs --remaining \"<finding>; <finding>\" (the important findings left "
+                             "for follow-up tasks); with none left, record pass")
+            k["review_rounds"] = rounds
             k["review"] = {"result": a.review, "reviewer": a.reviewer.strip(), "note": a.review_note or "",
-                           "at": now()}
+                           "round": rounds, "cap": review_max(st), "at": now(),
+                           **({"remaining": remaining} if remaining else {})}
+            if a.review == "capped":
+                print(f"{a.id}: capped at round {rounds}; open its follow-ups with `tw.py task followups {a.id} --apply`",
+                      file=sys.stderr)
             if a.review == "fail" and not a.status:
                 k["status"] = "working"
+                if k.get("checks") == "pass":
+                    k["checks"] = "none"  # the fix changes the code: run the checks again
                 print(f"{a.id} back to working: send its owner a FOLLOWUP with the review findings", file=sys.stderr)
         # 3. preconditions of the status move, against the edited task
         if a.status and a.status != k["status"]:
@@ -816,13 +1008,15 @@ def cmd_task(a):
                     sys.exit(f"{a.id} has no owner: set it before marking done")
                 if st["prefs"].get("require_review", True) and not a.skip_review:
                     rv = k.get("review") or {}
-                    if rv.get("result") != "pass":
+                    if rv.get("result") not in PASSING:
                         sys.exit(f"{a.id}: no passing review yet. Have an independent reviewer check the diff against "
                                  f"'done when', then `task set {a.id} --review pass --reviewer <who>` "
                                  "(or --skip-review \"<reason>\" --user-said \"<their words>\")")
                     if not all(reviewer_independent(rv.get("reviewer") or "", o)
                                for o in [owner] + list(k.get("past_owners") or [])):
                         sys.exit(f"{a.id}: its reviewer {rv.get('reviewer')} owns it; get another review")
+                    if rv.get("result") == "capped" and k.get("checks") != "pass":
+                        sys.exit(f"{a.id}: capped at the round limit, which needs `--checks pass`")
                 if k.get("checks") == "fail":
                     sys.exit(f"{a.id}: checks failed; fix them and record `--checks pass` first (skipping review "
                              "does not skip checks)")
@@ -832,6 +1026,8 @@ def cmd_task(a):
                 sys.exit(f"{a.id} has no 'done when': set --accept first (a review needs something to check against)")
             if k["status"] == "review" and a.status == "working":
                 void("rework after review")  # the old verdict no longer counts
+                if k.get("checks") == "pass" and a.checks is None:
+                    k["checks"] = "none"  # green checks were for the old code
             k["status"] = a.status
             if a.status in ("review", "done"):
                 for r in deliver_ready(st):
@@ -1242,6 +1438,15 @@ def norm_topics(s):
     return list(dict.fromkeys(re.sub(r"[\s_]+", "-", x.strip().lower()) for x in csv(s) if x.strip()))
 
 
+REVIEW_MAX_DEFAULT = 3
+PASSING = ("pass", "capped")  # capped: the round limit was reached with no blocking finding and checks passing
+
+
+def review_max(st):
+    v = st.get("prefs", {}).get("review_max_rounds", REVIEW_MAX_DEFAULT)
+    return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 99 else REVIEW_MAX_DEFAULT
+
+
 def accept_gate(st, tid):
     """Why a task in review is not yet acceptable (None if it is): the same bar as `task set --status done`."""
     k = st["tasks"][tid]
@@ -1256,8 +1461,10 @@ def accept_gate(st, tid):
         return "has no owner"
     if not st["prefs"].get("require_review", True):
         return None
-    if rv.get("result") != "pass":
+    if rv.get("result") not in PASSING:
         return "has no passing independent review yet"
+    if rv.get("result") == "capped" and k.get("checks") != "pass":
+        return "was capped at the round limit, which needs checks passing"
     if not all(reviewer_independent(rv.get("reviewer") or "", o) for o in [k["owner"]] + list(k.get("past_owners") or [])):
         return f"was reviewed by its own owner ({rv.get('reviewer')})"
     return None
@@ -1390,8 +1597,15 @@ def cmd_ask(a):
     else:
         if not a.text:
             sys.exit('usage: ask "<question>" --from <thread>   or   ask --answer N ["<answer>"]')
+        nt = (a.need_thread or "").strip().lower() or None
+        if nt:
+            for i, q in enumerate(st["questions"], 1):
+                if q.get("need_thread") == nt and q.get("from") == a.frm:
+                    sys.exit(f"{a.frm}'s request for a {nt} thread is already question {i}"
+                             + (" (answered)" if q.get("answered") else "") + ": skip it (a STATUS line repeats "
+                             "until the thread sees your ANSWER)")
         st["questions"].append(
-            {"from": a.frm, "text": a.text, "t": now(), "answered": False}
+            {"from": a.frm, "text": a.text, "t": now(), "answered": False, **({"need_thread": nt} if nt else {})}
         )
         save(d, st, {"ev": "question", "from": a.frm, "text": a.text})
     print(render_board(st))
@@ -1451,6 +1665,7 @@ def cmd_open(a):
 def cmd_prefs(a):
     d = need(find_dir())
     st = load(d)
+    old_cap = review_max(st)
     for kv in a.set or []:
         k, _, v = kv.partition("=")
         if k == "require_review":
@@ -1467,6 +1682,13 @@ def cmd_prefs(a):
             st["prefs"][k] = v
         if k == "thread_permission_mode" and v and v not in PERMISSION_MODES:
             sys.exit(f"thread_permission_mode: one of {', '.join(PERMISSION_MODES)}, or empty for the lead's own mode")
+        if k == "review_max_rounds":
+            if not re.fullmatch(r"[0-9]{1,2}", v):
+                sys.exit("review_max_rounds: a whole number of review rounds, 0-99 (default 3; 0 = no limit)")
+            if 0 < int(v) < old_cap or (old_cap == 0 and int(v) > 0):
+                if not (a.user_said or "").strip():
+                    sys.exit("a lower review round limit lets work merge with fewer reviews: that is the user's "
+                             "decision, add --user-said \"<their words>\"")
         if k == "short_name" and v and not re.fullmatch(SHORT_RE, v):
             sys.exit("short_name: letters/digits/hyphen, max 6 chars (e.g. TFCC)")
     retitled = {}
@@ -1526,6 +1748,8 @@ def cmd_worker_prompt(a):
         "REPORT_CHANNEL": channel,
         "FOLDER": st.get("repo", {}).get("path") or "-",
         "LANGUAGE": language_rule(st),
+        "REVIEW_MAX": (f"**{review_max(st)}** rounds" if review_max(st) else "**none** (no round limit; "
+                       "the 'at the limit' rule does not apply)"),
         "GUARD": (f"run `python3 \"{SKILL_DIR / 'scripts' / 'tw.py'}\" -C \"{st.get('repo', {}).get('path') or '.'}\" "
                   "guard --repo .` in your worktree before every push; it must print `guard: ok`"
                   if t["kind"] == "rc" else
@@ -2263,7 +2487,10 @@ def trace_data(d, st, r):
         tasks.append(item)
     return {"request": r, **{k: q.get(k) for k in ("text", "status", "where", "followup", "created", "updated",
                                                    "reported_at", "closed_at", "closed_reason", "closed_note")},
-            "tasks": tasks, "other_branch_work": other_work, "events": events, "warnings": warnings}
+            "tasks": tasks, "other_branch_work": other_work, "events": events, "warnings": warnings,
+            "followups": [{"task": t, "title": x.get("title"), "status": x.get("status"), "owner": x.get("owner"),
+                           "followup_of": x.get("followup_of")}
+                          for t, x in st["tasks"].items() if r in (x.get("from_requests") or [])]}
 
 
 def cmd_trace(a):
@@ -2303,6 +2530,8 @@ def cmd_trace(a):
                 for h in k["session_history"]))
         for c in k["commits"]:
             out.append(f"      {c}")
+    for f in t.get("followups") or []:
+        out.append(f"  - {f['task']} [{f['status']}] follow-up of {f['followup_of']} (does not hold {r}): {f['title']}")
     for br, cs in t["other_branch_work"].items():
         out.append(f"  {L('t_other')} {br}:")
         out += [f"      {c}" for c in cs]
@@ -2519,6 +2748,8 @@ def _replay(st, e, project, notes, d):
             st["tasks"][tk] = e["snap_task"]
         if e.get("snap_tasks"):
             st["tasks"] = e["snap_tasks"]
+        if isinstance(e.get("snap_more_tasks"), dict):  # tasks an event added besides its own (follow-ups)
+            st["tasks"].update(e["snap_more_tasks"])
         if e.get("snap_roster_version") is not None:
             st["roster_version"] = e["snap_roster_version"]
         r = e.get("req")
@@ -2883,7 +3114,8 @@ def main():
     x = s.add_parser("thread", help="add, update or reseat a thread (a seat that outlives its sessions)")
     x.add_argument("action", choices=["add", "set", "reseat"])
     x.add_argument("name")
-    x.add_argument("--kind", choices=["rc", "cloud"], default="rc")
+    x.add_argument("--kind", choices=["rc", "cloud"], help="add only; default rc")
+    x.add_argument("--cloud-reason", help="required with --kind cloud: why it never needs the folder or rc threads")
     x.add_argument("--focus")
     x.add_argument("--owns")
     x.add_argument("--session")
@@ -2898,8 +3130,9 @@ def main():
     x.set_defaults(f=cmd_thread)
 
     x = s.add_parser("task", help="add or update a plan task")
-    x.add_argument("action", choices=["add", "set"])
-    x.add_argument("id")
+    x.add_argument("action", choices=["add", "set", "followups", "reviews"],
+                   help="followups <id> [--apply]: one task per finding left at a capped review; reviews -: the table")
+    x.add_argument("id", nargs="?", default="-")
     x.add_argument("--title")
     x.add_argument("--owner")
     x.add_argument("--deps")
@@ -2909,7 +3142,14 @@ def main():
     x.add_argument("--touches", help="comma list of paths/globs the task will change (file lease), e.g. 'web/**,api/x.py'")
     x.add_argument("--status")
     x.add_argument("--notes")
-    x.add_argument("--review", choices=["pass", "fail"], help="independent review result against 'done when'")
+    x.add_argument("--review", choices=["pass", "fail", "capped"],
+                   help="independent review result against 'done when'; capped = last allowed round "
+                        "(prefs review_max_rounds), no blocking finding, checks pass, --remaining for follow-ups")
+    x.add_argument("--rounds", type=int, metavar="N",
+                   help="with --review: review rounds the thread ran (from its DONE); only goes up. Default: +1")
+    x.add_argument("--no-blocking", action="store_true", help="with --review capped: the last round found nothing blocking")
+    x.add_argument("--remaining", metavar="FINDINGS", help="with --review capped: important findings left, ';'-separated")
+    x.add_argument("--apply", action="store_true", help="followups: add the tasks (default: dry run)")
     x.add_argument("--reviewer", help="who reviewed (not the owner): lead-subagent, review thread name, user")
     x.add_argument("--review-note")
     x.add_argument("--checks", choices=["pass", "fail", "none"], help="tests / checks result on the branch")
@@ -2930,6 +3170,8 @@ def main():
     x = s.add_parser("ask", help="record a question waiting on the user, or --answer N")
     x.add_argument("text", nargs="?", default="")
     x.add_argument("--from", dest="frm", default="lead")
+    x.add_argument("--need-thread", metavar="NAME", help="a thread's NEED-THREAD (message or STATUS need_thread line): "
+                   "recorded once per (thread, name); a repeat is refused so it is not handled twice")
     x.add_argument("--answer", type=int, metavar="N", help="mark question N (as numbered on the board, from 1) "
                    "answered; the answer text is optional")
     x.set_defaults(f=cmd_ask)

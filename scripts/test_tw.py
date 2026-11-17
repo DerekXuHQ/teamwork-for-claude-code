@@ -203,7 +203,8 @@ class ThreadStart(unittest.TestCase):
         self.assertNotEqual(self.tw("prefs", "--set", "thread_permission_mode=yolo", ok=False).returncode, 0)
 
     def test_cloud_thread_has_no_worktree(self):
-        out = json.loads(self.tw("thread", "add", "docs", "--kind", "cloud").stdout)
+        out = json.loads(self.tw("thread", "add", "docs", "--kind", "cloud",
+                                  "--cloud-reason", "Quixbar research only, no files, no rc messages").stdout)
         self.assertNotIn("worktree", out)
         self.assertNotEqual(self.tw("worktree", "docs", ok=False).returncode, 0)
         self.assertIn("container's checkout", self.tw("worker-prompt", "docs").stdout)
@@ -1712,7 +1713,7 @@ class Rebuild(LeasesGit):
                                         capture_output=True, text=True)
         self.assertEqual(run("init", "quixbar-zorblax").returncode, 0)
         run("lead", "--session", "L1")
-        run("thread", "add", "ui", "--kind", "cloud", "--session", "S1")
+        run("thread", "add", "ui", "--kind", "cloud", "--session", "S1", "--cloud-reason", "web research")
         run("req", "add", "blue whale star")
         run("prefs", "--set", "language=en")
         tw = sub / ".teamwork"
@@ -1833,6 +1834,250 @@ class Rebuild(LeasesGit):
         self.assertIn("refused", r.stdout + r.stderr)
         self.assertEqual(json.loads((tw_dir / "state.json").read_text())["tasks"], after["tasks"])
         self.tw("rebuild", "--apply", "--force")
+
+
+class ThreadsAreSessions(TwCase):
+    """T24: a thread is a create_session session, rc by default; cloud needs a reason; one language all the way down."""
+
+    def raw(self, *args):
+        return self.tw(*args, ok=False, walk=False)
+
+    def test_subagent_ids_never_hold_a_seat(self):
+        for sid in ("a0aeaf22707df6481", "agent-zorblax", "subagent:quixbar", "toolu_01Quixbar", "task_7"):
+            r = self.raw("thread", "add", "ui", "--session", sid)
+            self.assertNotEqual(r.returncode, 0, sid)
+            self.assertIn("create_session", r.stderr)
+            self.assertNotIn("ui", self.state()["threads"])
+        self.tw("thread", "add", "ui")
+        for act in ("set", "reseat"):
+            self.assertNotEqual(self.raw("thread", act, "ui", "--session", "a1b2c3d4e5f6a7b8").returncode, 0, act)
+        self.assertNotEqual(self.raw("lead", "--session", "agent-lead").returncode, 0)
+        # subagents addressed by name: a thread or role name, or a short agent id, is not a session
+        for sid in ("ui", "UI", "zorb", "lead", "reviewer", "agent123", "a0aeaf22707", "Explore", "general-purpose"):
+            self.assertNotEqual(self.raw("thread", "add", "zorb", "--session", sid).returncode, 0, sid)
+        self.assertNotIn("zorb", self.state()["threads"])
+        self.assertNotEqual(self.raw("lead", "--session", "ui").returncode, 0)
+        self.assertEqual(self.raw("thread", "set", "ui", "--session", "  session_01Zorblax ").returncode, 0)
+        self.assertEqual(self.state()["threads"]["ui"]["session_id"], "session_01Zorblax")  # stored stripped
+        self.assertEqual(self.raw("thread", "add", "qa", "--session", "cse_01Quixbar").returncode, 0)
+
+    def test_rc_by_default_cloud_needs_reason(self):
+        self.assertEqual(self.state()["threads"].get("x"), None)
+        self.tw("thread", "add", "ui")
+        self.assertEqual(self.state()["threads"]["ui"]["kind"], "rc")
+        for extra in ((), ("--cloud-reason", "   ")):
+            r = self.raw("thread", "add", "docs", "--kind", "cloud", *extra)
+            self.assertNotEqual(r.returncode, 0, extra)
+            self.assertIn("cannot message rc sessions", r.stderr)
+        self.assertNotIn("docs", self.state()["threads"])
+        self.tw("thread", "add", "docs", "--kind", "cloud", "--cloud-reason", "Quixbar market notes, no files")
+        self.assertEqual(self.state()["threads"]["docs"]["cloud_reason"], "Quixbar market notes, no files")
+        # while the user edits the plan (planned, never had a session) the kind can change, with the same rules
+        self.assertNotEqual(self.raw("thread", "set", "ui", "--kind", "cloud").returncode, 0)
+        self.assertNotEqual(self.raw("thread", "set", "ui", "--kind", "cloud", "--cloud-reason", " ").returncode, 0)
+        self.assertEqual(self.raw("thread", "set", "ui", "--kind", "cloud", "--cloud-reason", "Quixbar notes").returncode, 0)
+        t = self.state()["threads"]["ui"]
+        self.assertEqual((t["kind"], t["cloud_reason"], t.get("worktree")), ("cloud", "Quixbar notes", None))
+        self.assertNotEqual(self.raw("thread", "set", "ui", "--kind", "rc", "--cloud-reason", "x").returncode, 0)
+        self.assertEqual(self.raw("thread", "set", "ui", "--kind", "rc").returncode, 0)
+        t = self.state()["threads"]["ui"]
+        self.assertEqual(t["kind"], "rc")
+        self.assertNotIn("cloud_reason", t)
+        self.assertTrue(t.get("worktree"))
+        # once it has had a session the kind is fixed
+        self.tw("thread", "set", "ui", "--session", "session_01Zorblax", "--status", "working")
+        self.assertNotEqual(self.raw("thread", "set", "ui", "--kind", "cloud", "--cloud-reason", "x").returncode, 0)
+        self.assertNotEqual(self.raw("thread", "set", "ui", "--cloud-reason", "").returncode, 0)
+        self.assertNotEqual(self.raw("thread", "set", "ui", "--kind", "rc").returncode, 0)
+        # a NEED-THREAD is recorded once per (thread, name); a repeated STATUS line is refused
+        self.tw("ask", "Zorblax search needs its own seat", "--from", "docs", "--need-thread", "search")
+        r = self.raw("ask", "Zorblax search needs its own seat", "--from", "docs", "--need-thread", "Search")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already question 1", r.stderr)
+        self.tw("ask", "--answer", "1", "given to ui")
+        self.assertIn("(answered)", self.raw("ask", "again", "--from", "docs", "--need-thread", "search").stderr)
+        self.tw("ask", "Quixbar index seat", "--from", "ui", "--need-thread", "search")  # another asker is new
+        self.assertNotEqual(self.raw("thread", "add", "web", "--kind", "rc", "--cloud-reason", "Quixbar").returncode, 0)
+        # a cloud thread asks for a new thread in its STATUS block, never by messaging the lead
+        cp = self.tw("worker-prompt", "docs").stdout
+        self.assertIn("need_thread:", cp.split("<tw-status>")[1])
+        self.assertIn("cannot message the lead", cp)
+        self.assertEqual(self.state()["threads"]["ui"]["kind"], "rc")
+
+    def test_threads_cannot_start_sessions_and_language_reaches_subagents(self):
+        self.tw("thread", "add", "ui")
+        out = json.loads(self.tw("thread", "add", "api").stdout)
+        tools = out["create_session"]["extra_allowed_tools"]
+        for bad in ("create_session", "interrupt_session", "archive_session"):
+            self.assertFalse(any(bad in t for t in tools), bad)
+        self.tw("prefs", "--set", "language=zh")
+        prompt = self.tw("worker-prompt", "ui").stdout
+        self.assertIn("subagents", prompt.split("## Team roster")[0])  # in the language rule itself
+        self.assertIn("NEED-THREAD", prompt)
+        self.assertIn("subagent -> you -> lead -> user", prompt)
+
+
+class ReviewRounds(TwCase):
+    """T23: review_max_rounds; capped verdict at the limit; one-command follow-ups; rounds in the REVIEW table."""
+
+    def setUp(self):
+        super().setUp()
+        self.tw("thread", "add", "ui")
+        self.tw("task", "add", "T1", "--owner", "ui", "--accept", "Zorblax renders", "--touches", "web/**")
+        self.tw("plan", "approve", "--user-said", "ok")
+        for st in ("dispatched", "working", "review"):
+            self.tw("task", "set", "T1", "--status", st)
+
+    def raw(self, *args):
+        return self.tw(*args, ok=False, walk=False)
+
+    def test_capped_only_at_the_limit_with_green_checks(self):
+        ok = lambda *x: self.assertEqual(self.raw(*x).returncode, 0, x)
+        no = lambda *x: self.assertNotEqual(self.raw(*x).returncode, 0, x)
+        cap = ("task", "set", "T1", "--review", "capped", "--reviewer", "ui/subagent")
+        self.tw("req", "add", "Zorblax page", "--tasks", "T1")
+        no(*cap, "--no-blocking", "--checks", "pass", "--remaining", "Quixbar edge")  # round 1 of 3
+        no("task", "set", "T1", "--review", "fail", "--reviewer", "ui/subagent", "--remaining", "x")  # pass/capped only
+        ok("task", "set", "T1", "--review", "fail", "--reviewer", "ui/subagent")  # round 1 -> working
+        ok("task", "set", "T1", "--status", "review")
+        ok("task", "set", "T1", "--review", "fail", "--reviewer", "ui/subagent")  # round 2
+        ok("task", "set", "T1", "--status", "review")
+        self.assertEqual(self.state()["tasks"]["T1"]["review_rounds"], 2)
+        no(*cap, "--no-blocking", "--remaining", "Quixbar edge")  # checks not recorded
+        ok("task", "set", "T1", "--checks", "fail")
+        no(*cap, "--no-blocking", "--remaining", "Quixbar edge")  # checks failing
+        no(*cap, "--checks", "pass", "--remaining", "Quixbar edge")  # blocking not ruled out
+        no(*cap, "--checks", "pass", "--no-blocking")  # nothing remaining: that is a pass
+        no(*cap, "--checks", "pass", "--no-blocking", "--remaining", " ; ")
+        no("task", "set", "T1", "--review", "capped", "--reviewer", "ui", "--checks", "pass", "--no-blocking",
+           "--remaining", "x")  # still the owner rule
+        self.assertEqual(self.state()["tasks"]["T1"]["review_rounds"], 2)  # refused attempts are not rounds
+        ok(*cap, "--checks", "pass", "--no-blocking", "--remaining", "Quixbar edge case; 蓝鲸星 input")
+        k = self.state()["tasks"]["T1"]
+        self.assertEqual((k["review_rounds"], k["review"]["round"]), (3, 3))
+        self.assertEqual(k["review"]["remaining"], ["Quixbar edge case", "蓝鲸星 input"])
+        ok("req", "set", "R1", "--status", "reported")
+        ok("task", "set", "T1", "--status", "done")  # capped counts as a pass
+        ok("req", "close", "R1", "--user-said", "fine")
+
+    def test_followups_one_command_and_reviews_table(self):
+        for bad in ("three", "²", "٣", "-1", "100", " 3", ""):
+            self.assertNotEqual(self.raw("prefs", "--set", f"review_max_rounds={bad}").returncode, 0, bad)
+        self.assertNotEqual(self.raw("prefs", "--set", "review_max_rounds=1").returncode, 0)  # lower: user's call
+        self.tw("prefs", "--set", "review_max_rounds=1", "--user-said", "one round is enough for Zorblax")
+        self.assertNotEqual(self.raw("task", "followups", "T1").returncode, 0)  # nothing capped yet
+        self.tw("req", "add", "Zorblax page", "--tasks", "T1")
+        self.tw("task", "set", "T1", "--review", "capped", "--reviewer", "rev", "--checks", "pass", "--no-blocking",
+                "--remaining", "Quixbar edge case; 蓝鲸星 input; Quixbar edge case")  # duplicate dropped
+        dry = json.loads(self.tw("task", "followups", "T1").stdout)
+        self.assertEqual([t["id"] for t in dry["tasks"]], ["T1-f1", "T1-f2"])
+        self.assertNotIn("T1-f1", self.state()["tasks"])  # dry run by default
+        self.tw("task", "followups", "T1", "--apply")
+        st = self.state()
+        f1 = st["tasks"]["T1-f1"]
+        self.assertEqual((f1["owner"], f1["followup_of"], f1["from_requests"]), ("ui", "T1", ["R1"]))
+        self.assertIn("Quixbar edge case", f1["accept"])
+        self.assertEqual(f1["touches"], ["web/**"])
+        self.assertEqual(f1["deps"], ["T1"])  # starts from the merged parent
+        self.assertNotIn("T1-f1", self.tw("ready").stdout)
+        self.assertIn("(R1)", self.tw("board").stdout)  # weak link on the board
+        tr = json.loads(self.tw("trace", "R1", "--json").stdout)
+        self.assertEqual([f["task"] for f in tr["followups"]], ["T1-f1", "T1-f2"])
+        self.assertIn("does not hold R1", self.tw("trace", "R1").stdout)
+        self.assertEqual(st["requests"]["R1"]["status"], "delivered")  # follow-ups do not hold the request open
+        again = json.loads(self.tw("task", "followups", "T1", "--apply").stdout)
+        self.assertEqual(again["tasks"], [])  # idempotent
+        table = self.tw("task", "reviews").stdout
+        row = next(l for l in table.splitlines() if l.startswith("| T1 |"))
+        self.assertEqual(self.tw("task", "reviews", "T1-f1").stdout.strip(), "(no reviews recorded)")
+        self.assertIn("capped", row)
+        self.assertIn("1/1", row)
+        self.assertIn("T1-f1,T1-f2", row)
+        # the log replays the follow-ups (rebuild after a lost state.json)
+        (self.dir / ".teamwork" / "state.json").unlink()
+        self.tw("rebuild")
+        rb = json.loads((self.dir / ".teamwork" / "state.json.rebuilt").read_text())
+        self.assertEqual(rb["tasks"]["T1-f2"]["followup_of"], "T1")
+        self.assertEqual(rb["tasks"]["T1"]["review"]["result"], "capped")
+
+    def test_rounds_come_from_the_thread_and_restart(self):
+        ok = lambda *x: self.assertEqual(self.raw(*x).returncode, 0, x)
+        no = lambda *x: self.assertNotEqual(self.raw(*x).returncode, 0, x)
+        cap = ("task", "set", "T1", "--review", "capped", "--reviewer", "ui/subagent", "--checks", "pass",
+               "--no-blocking", "--remaining", "Quixbar | edge")
+        for bad in (("task", "add", "--title", "Zorblax"), ("task", "set", "--status", "working"),
+                    ("task", "followups"), ("task", "set", "T1", "--rounds", "2"),
+                    ("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--no-blocking"),
+                    ("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--rounds", "0")):
+            no(*bad)
+        self.assertNotIn("-", self.state()["tasks"])
+        # the thread ran 3 rounds and reports capped: the lead records it once, with the thread's count
+        ok(*cap, "--rounds", "3")
+        self.assertEqual(self.state()["tasks"]["T1"]["review_rounds"], 3)
+        self.assertIn("Quixbar \\| edge", self.tw("task", "reviews").stdout)  # table stays intact
+        no("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--rounds", "2")  # only goes up
+        # checks leave green: capped no longer stands
+        ok("task", "set", "T1", "--checks", "none")
+        self.assertNotEqual((self.state()["tasks"]["T1"].get("review") or {}).get("result"), "capped")
+        no("task", "set", "T1", "--status", "done")
+        ok(*cap)  # round 4 >= 3
+        # a new 'done when' restarts the count: capped needs a full set of rounds again
+        ok("task", "set", "T1", "--accept", "Zorblax renders in Quixbar mode")
+        self.assertNotIn("review_rounds", self.state()["tasks"]["T1"])
+        no(*cap)
+        ok(*cap, "--rounds", "3")
+        # so does a new owner
+        self.tw("thread", "add", "api")
+        ok("task", "set", "T1", "--owner", "api")
+        self.assertNotIn("review_rounds", self.state()["tasks"]["T1"])
+        self.assertIsNone(self.state()["tasks"]["T1"].get("review"))
+        no("task", "set", "T1", "--review", "capped", "--reviewer", "rev", "--checks", "pass", "--no-blocking",
+           "--remaining", "x")
+
+    def test_round2_owner_change_rework_and_pass_with_remaining(self):
+        ok = lambda *x: self.assertEqual(self.raw(*x).returncode, 0, x)
+        no = lambda *x: self.assertNotEqual(self.raw(*x).returncode, 0, x)
+        self.tw("thread", "add", "api")
+        # a plain pass survives an owner change (only the round count restarts)
+        ok("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--checks", "pass", "--rounds", "2")
+        ok("task", "set", "T1", "--owner", "api")
+        k = self.state()["tasks"]["T1"]
+        self.assertEqual((k["review"]["result"], k.get("review_rounds")), ("pass", None))
+        # rework after review: the green check is for the old code
+        ok("task", "set", "T1", "--review", "fail", "--reviewer", "rev", "--rounds", "3")
+        self.assertEqual(self.state()["tasks"]["T1"]["checks"], "none")
+        ok("task", "set", "T1", "--status", "review")
+        no("task", "set", "T1", "--review", "capped", "--reviewer", "rev", "--no-blocking", "--remaining", "Quixbar")
+        ok("task", "set", "T1", "--checks", "pass")
+        ok("task", "set", "T1", "--status", "working")
+        self.assertEqual(self.state()["tasks"]["T1"]["checks"], "none")
+        ok("task", "set", "T1", "--status", "review", "--checks", "pass")
+        # the 'two rounds, nothing new' pass keeps its open important findings as follow-ups
+        ok("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--rounds", "4", "--remaining", "Zorblax edge")
+        out = json.loads(self.tw("task", "followups", "T1", "--apply").stdout)
+        self.assertEqual([t["id"] for t in out["tasks"]], ["T1-f1"])
+        self.assertIn("pass", self.tw("task", "reviews", "T1").stdout)
+        self.assertNotEqual(self.raw("task", "reviews", "T9").returncode, 0)
+        # the limit shown is the one the verdict was recorded under
+        ok("task", "add", "T2", "--owner", "ui", "--accept", "Quixbar works")
+        for st in ("dispatched", "working", "review"):
+            ok("task", "set", "T2", "--status", st)
+        ok("task", "set", "T2", "--review", "capped", "--reviewer", "rev", "--rounds", "3", "--checks", "pass",
+           "--no-blocking", "--remaining", "蓝鲸星")
+        self.tw("prefs", "--set", "review_max_rounds=9")
+        self.assertIn("3/3", next(l for l in self.tw("task", "reviews").stdout.splitlines() if l.startswith("| T2 |")))
+        # a capped verdict does not survive an owner change
+        ok("task", "set", "T2", "--owner", "api")
+        self.assertIsNone(self.state()["tasks"]["T2"].get("review"))
+
+    def test_worker_prompt_states_the_limit(self):
+        self.tw("prefs", "--set", "review_max_rounds=4")
+        p = self.tw("worker-prompt", "ui").stdout
+        self.assertIn("**4** rounds", p)
+        self.assertIn("capped", p)
+        self.assertIn("rounds: N", p)
+        self.tw("prefs", "--set", "review_max_rounds=0")
+        self.assertIn("does not apply", self.tw("worker-prompt", "ui").stdout)
 
 
 class Preconditions(TwCase):

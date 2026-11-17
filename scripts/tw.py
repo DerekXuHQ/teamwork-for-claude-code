@@ -14,6 +14,7 @@ Stdlib only. `tw.py <command> -h` for details.
 
 import argparse
 import datetime as dt
+import functools
 import json
 import os
 import re
@@ -69,8 +70,12 @@ LABELS = {
         "overview": "Overview", "questions": "Waiting on the user", "roster": "Roster", "plan": "Plan",
         "requests": "Your requests (not closed)", "unreported": "Delivered, not yet reported to the user",
         "req_open": "open", "req_dispatched": "dispatched", "req_delivered": "delivered (report it!)",
-        "req_reported": "reported", "req_closed": "closed", "followup": "follow-up",
+        "req_reported": "reported", "req_closed": "closed", "req_proposed": "proposed (waiting for a yes)",
+        "req_dropped": "dropped", "followup": "follow-up",
         "no_threads": "(no threads yet)",
+        "t_created": "created", "t_updated": "updated", "t_reported": "reported", "t_closed": "closed",
+        "t_where": "where", "t_thread": "thread", "t_session": "session", "t_branch": "branch", "t_log": "log",
+        "t_other": "other unmerged work on", "t_no_tasks": "no tasks linked",
     },
     "zh": {
         "planned": "建议中（还没有会话）", "starting": "已创建，第一轮还没结束",
@@ -81,8 +86,12 @@ LABELS = {
         "overview": "总览", "questions": "等你回答", "roster": "成员", "plan": "计划",
         "requests": "你提的事（未关闭）", "unreported": "已交付、还没回报给用户",
         "req_open": "待办", "req_dispatched": "已派", "req_delivered": "已交付（待回报！）",
-        "req_reported": "已回报", "req_closed": "已关闭", "followup": "回访",
+        "req_reported": "已回报", "req_closed": "已关闭", "req_proposed": "已提议（等你同意）",
+        "req_dropped": "已放弃", "followup": "回访",
         "no_threads": "（还没有线程）",
+        "t_created": "创建", "t_updated": "更新", "t_reported": "回报", "t_closed": "关闭",
+        "t_where": "落到哪里", "t_thread": "线程", "t_session": "会话", "t_branch": "分支", "t_log": "日志",
+        "t_other": "分支上其他未合并的工作", "t_no_tasks": "没有关联任务",
     },
 }
 
@@ -92,10 +101,20 @@ def lab(st, key, **kw):
     return LABELS.get(code, LABELS["en"]).get(key, LABELS["en"][key]).format(**kw)
 
 
-REQ_STATUSES = ["open", "dispatched", "delivered", "reported", "closed"]
+REQ_STATUSES = ["open", "proposed", "dispatched", "delivered", "reported", "closed", "dropped"]
+REQ_END = ("closed", "dropped")
+# Request moves the lead may make with `req set` (framework A9). closed/dropped only via close/drop (user action).
+REQ_MOVES = {"open": {"proposed", "dispatched", "reported"}, "proposed": {"dispatched"},
+             "dispatched": {"delivered"}, "delivered": {"reported"}, "reported": {"dispatched"}}
+REQ_NEEDS_USER = {("proposed", "dispatched"), ("reported", "dispatched")}  # user said yes / asked for changes
+# Task moves (framework A9). done needs review first and passes the review gate.
+TASK_MOVES = {"planned": {"approved", "dropped"}, "approved": {"dispatched", "dropped"},
+              "dispatched": {"working", "recalled"}, "working": {"blocked", "review", "recalled"},
+              "blocked": {"working", "recalled"}, "review": {"working", "done"},
+              "recalled": {"dispatched", "dropped"}, "done": set(), "dropped": set()}
 # Accepted when importing a markdown ledger (status column in either language).
 REQ_STATUS_ALIASES = {"待办": "open", "已派": "dispatched", "已交付": "delivered", "已回报": "reported",
-                      "已关闭": "closed", **{x: x for x in REQ_STATUSES}}
+                      "已关闭": "closed", "已提议": "proposed", "已放弃": "dropped", **{x: x for x in REQ_STATUSES}}
 
 
 def unreported(st):
@@ -103,15 +122,15 @@ def unreported(st):
 
 
 def render_requests(st):
-    reqs = [(r, q) for r, q in st.get("requests", {}).items() if q["status"] != "closed"]
+    reqs = [(r, q) for r, q in st.get("requests", {}).items() if q["status"] not in REQ_END]
     if not reqs:
         return None
-    order = {"delivered": 0, "open": 1, "dispatched": 2, "reported": 3}
+    order = {"delivered": 0, "proposed": 1, "open": 2, "dispatched": 3, "reported": 4}
     reqs.sort(key=lambda x: (order.get(x[1]["status"], 9), int(x[0][1:]) if x[0][1:].isdigit() else 0))
     out = []
     for r, q in reqs:
         line = f"- **{r}** [{lab(st, 'req_' + q['status'])}] {q['text']}"
-        extra = [", ".join(q.get("tasks", [])), q.get("where") or ""]
+        extra = [", ".join(q.get("tasks") or []), q.get("where") or ""]
         extra = " · ".join(x for x in extra if x)
         if extra:
             line += f" — {extra}"
@@ -199,13 +218,41 @@ def log(d, event):
 
 
 def save(d, st, event=None):
+    touched = st.pop("_touched", [])
     st["updated"] = now()
     tmp = d / "state.json.tmp"
     tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(d / "state.json")
     (d / "BOARD.md").write_text(render_board(st), encoding="utf-8")
     if event:
-        log(d, event)
+        more = {n: st["threads"][n] for n in touched if n in st["threads"] and n != event.get("thread")}
+        log(d, {**event, **snapshots(st, event), **({"snap_more_threads": more} if more else {})})
+
+
+def snapshots(st, ev):
+    """Copies of what this event changed, so `rebuild` can restore state.json from log.jsonl alone."""
+    snap = {}
+    if ev.get("task") in st.get("tasks", {}):
+        snap["snap_task"] = st["tasks"][ev["task"]]
+        linked = {r: q for r, q in st.get("requests", {}).items() if ev["task"] in (q.get("tasks") or [])}
+        if linked:  # task done can move requests to delivered
+            snap["snap_reqs"] = linked
+    if ev.get("thread") in st.get("threads", {}):
+        snap["snap_thread"] = st["threads"][ev["thread"]]
+    if ev.get("req") in st.get("requests", {}):
+        snap["snap_req"] = st["requests"][ev["req"]]
+    if ev.get("ev") == "req-import":
+        snap["snap_reqs"] = {r: st["requests"][r] for r in ev.get("ids", []) if r in st.get("requests", {})}
+    if ev.get("ev") in ("init", "lead", "prefs"):
+        snap["snap_meta"] = {k: st.get(k) for k in ("project", "goal", "created", "repo", "envs", "lead", "prefs")}
+    if ev.get("ev") in ("question", "answered"):
+        snap["snap_questions"] = st.get("questions", [])
+    if ev.get("ev", "").startswith("plan-"):
+        snap["snap_plan_approved"] = st.get("plan_approved")
+        snap["snap_tasks"] = st.get("tasks", {})  # approve/reopen changes every task's status
+    if "roster_version" in st:
+        snap["snap_roster_version"] = st["roster_version"]
+    return snap
 
 
 def read_file(d, name):
@@ -293,7 +340,7 @@ def render_roster(st, for_thread=None):
         me = "   <- YOU" if name == for_thread else ""
         owns = ", ".join(t.get("owns", [])) or "-"
         lines.append(
-            f"- {name} | {t['kind']} | session_id={t.get('session_id') or '(pending)'} | owns: {owns} | status={t['status']}{me}"
+            f"- {name} | {t['kind']} | session_id={t.get('session_id') or '(pending)'} | owns: {owns}{me}"
         )
     return "\n".join(lines)
 
@@ -308,14 +355,16 @@ def render_tasks(st, only_owner=None):
         review = f"{rv['result']} ({rv.get('reviewer') or '-'})" if rv else "-"
         if k.get("checks"):
             review += f", checks {k['checks']}"
+        reqs = ",".join(r + {"closed": "✓", "dropped": "✗"}.get(q["status"], "") for r, q in st.get("requests", {}).items()
+                        if tid in (q.get("tasks") or [])) or "-"
         rows.append(
             f"| {tid} | {k['title']} | {k.get('owner') or '-'} | {deps} | {k['status']} | {k.get('accept') or '-'} "
-            f"| {review} |"
+            f"| {review} | {reqs} |"
         )
     if not rows:
         return "(no tasks)"
     return (
-        "| id | task | owner | deps | status | done when | review |\n|---|---|---|---|---|---|---|\n"
+        "| id | task | owner | deps | status | done when | review | req |\n|---|---|---|---|---|---|---|---|\n"
         + "\n".join(rows)
     )
 
@@ -374,13 +423,25 @@ def render_board(st):
     ]
     if open_q:
         out += ["", f"## {lab(st, 'questions')}", ""] + [
-            f"- [{i}] ({q['from']}) {q['text']}" for i, q in open_q
+            f"- [{i + 1}] ({q['from']}) {q['text']}" for i, q in open_q
         ]
     out += ["", f"## {lab(st, 'roster')}", "", render_roster(st), "", f"## {lab(st, 'plan')}", "", render_tasks(st)]
     return "\n".join(out) + "\n"
 
 
 # ------------------------------------------------------------------ commands
+
+
+def detect_base(folder):
+    """The repo's default branch: origin/HEAD, else the current branch, else main."""
+    g = lambda *x: subprocess.run(["git", "-C", str(folder), *x], capture_output=True, text=True)
+    r = g("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    if r.returncode == 0 and r.stdout.strip().startswith("origin/"):
+        return r.stdout.strip()[len("origin/"):]
+    r = g("symbolic-ref", "--quiet", "--short", "HEAD")
+    if r.returncode == 0 and r.stdout.strip() and not r.stdout.strip().startswith("tw/"):
+        return r.stdout.strip()
+    return "main"
 
 
 def cmd_init(a):
@@ -401,7 +462,7 @@ def cmd_init(a):
         "repo": {
             "url": a.repo_url,
             "path": str(Path(a.path).resolve()),
-            "base": a.base,
+            "base": a.base or detect_base(Path(a.path)),
         },
         "threads": {},
         "tasks": {},
@@ -416,8 +477,8 @@ def cmd_init(a):
             "short_name": short,  # in titles [X], headers [tw:X], tags teamwork:X
             "require_review": True,  # task done needs an independent review pass (task set --review)
             "stuck_minutes": STUCK_DEFAULT,  # working thread silent this long -> "possibly stuck"; 0 = off
-            "language": "",
-            "thread_permission_mode": "",  # create_session permission_mode; empty = the lead's own mode  # conversation language code (zh, en, ...); empty = follow the user's latest message
+            "language": "",  # conversation language code (zh, en, ...); empty = follow the user's latest message
+            "thread_permission_mode": "",  # create_session permission_mode; empty = the lead's own mode
         },
     }
     if not (d / "INSTRUCTIONS.md").exists():
@@ -435,8 +496,13 @@ def cmd_init(a):
             encoding="utf-8",
         )
     gi = d / ".gitignore"
-    if not gi.exists():
-        gi.write_text("state.json.tmp\n", encoding="utf-8")
+    need_ig = ["state.json.tmp", "state.json.rebuilt", "state.json.bak-*", "PRIVATE.md", "private/"]
+    have = gi.read_text(encoding="utf-8").splitlines() if gi.exists() else []
+    if any(x not in have for x in need_ig):
+        gi.write_text("\n".join(have + [x for x in need_ig if x not in have]) + "\n", encoding="utf-8")
+    if not (d / "PRIVATE.md").exists():
+        (d / "PRIVATE.md").write_text(PRIVATE_HELP, encoding="utf-8")
+    (d / "private").mkdir(exist_ok=True)
     save(d, st, {"ev": "init", "project": a.project})
     print(f"initialised {d}")
 
@@ -449,6 +515,13 @@ def cmd_lead(a):
         sys.exit(f"project {st['project']} already has lead {old}. One lead per project: check that session with "
                  "get_session; if it is archived or the user says to take over, re-run with --force.")
     if a.session:
+        holder = next((n for n, t in st["threads"].items() if t.get("session_id") == a.session
+                       and t.get("status") != "archived"), None)
+        if holder:
+            sys.exit(f"session {a.session} holds the {holder} seat; the lead needs its own session")
+        if a.session != old:
+            bump_roster(st)  # the roster names the lead: every thread needs the new id
+            _close_archived(st, a.session, "the lead", now())
         st["lead"]["session_id"] = a.session
     if a.rc_env:
         st["envs"]["rc"] = a.rc_env
@@ -456,6 +529,8 @@ def cmd_lead(a):
         st["envs"]["cloud"] = a.cloud_env
     if a.repo_url:
         st["repo"]["url"] = a.repo_url
+    if a.base:
+        st["repo"]["base"] = a.base
     save(d, st, {"ev": "lead", "session": a.session, "envs": st["envs"]})
     print(
         json.dumps(
@@ -465,16 +540,60 @@ def cmd_lead(a):
     )
 
 
+def _after(a, b):
+    """ISO time a is later than b (offsets compared properly; missing a = never)."""
+    from datetime import datetime
+    try:
+        return bool(a) and (not b or datetime.fromisoformat(a) > datetime.fromisoformat(b))
+    except (TypeError, ValueError):
+        return (a or "") > (b or "")
+
+
+def _close_archived(st, sid, me, ts):
+    """An archived seat that still lists this session: its stint is over (the session moved to `me`)."""
+    for n2, t2 in st["threads"].items():
+        if n2 != me and t2.get("status") == "archived" and t2.get("session_id") == sid:
+            for h in t2.get("sessions", []):
+                if h.get("session_id") == sid and not h.get("to"):
+                    end = ts if not h.get("from") or _after(ts, h["from"]) else now()  # never before its start
+                    h["to"], h["reason"] = end, f"session moved to {me}"
+                    st.setdefault("_touched", []).append(n2)  # save() logs its snapshot too (rebuild sees it)
+
+
+def _session_taken(st, sid, me):
+    """Another live seat already holds this session: two seats would share one inbox."""
+    return next((n for n, t in st["threads"].items()
+                 if n != me and t.get("session_id") == sid and t.get("status") != "archived"), None)
+
+
 def cmd_thread(a):
     d = need(find_dir())
     st = load(d)
     name = a.name
+    if a.session and a.action in ("add", "set", "reseat"):
+        other = _session_taken(st, a.session, name)
+        if other:
+            sys.exit(f"session {a.session} already holds the {other} seat; one session holds one seat")
+        if a.session == (st.get("lead") or {}).get("session_id"):
+            sys.exit(f"session {a.session} is the lead; a thread needs its own session")
+    if a.action in ("set", "reseat") and name in st["threads"] and a.status \
+            and (not a.session or a.session == st["threads"][name].get("session_id")) \
+            and st["threads"][name]["status"] == "archived" and a.status != "archived":
+        sid0 = st["threads"][name].get("session_id")
+        hist0 = st["threads"][name].get("sessions") or []
+        closed = sid0 and any(h.get("session_id") == sid0 for h in hist0) and \
+            not any(h.get("session_id") == sid0 and not h.get("to") for h in hist0)
+        other = _session_taken(st, sid0, name) or \
+            ("the lead" if sid0 and sid0 == (st.get("lead") or {}).get("session_id") else None) or \
+            ("another seat or the lead (its stint here has ended)" if closed else None)
+        if other:  # reviving an archived seat whose session has moved on to another seat or the lead
+            sys.exit(f"{name}'s session now belongs to {other}: reseat {name} with a new --session instead")
     if a.action == "add":
         if not re.fullmatch(NAME_RE, name):
             sys.exit(
                 "thread name: lowercase letters/digits/hyphen, max 24 chars (e.g. ui, api, research-2)"
             )
-        if name == "lead" or name in st["threads"]:
+        if name in ("lead", "all") or name in st["threads"]:
             sys.exit(f"thread name {name} is taken")
         st["threads"][name] = {
             "kind": a.kind,
@@ -486,10 +605,14 @@ def cmd_thread(a):
             "created": now(),
             "last_seen": None,
             "summary": a.summary or "",
+            "sessions": [{"session_id": a.session, "from": now()}] if a.session else [],
         }
+        if a.session:
+            _close_archived(st, a.session, name, now())
         if a.kind == "rc":
             st["threads"][name]["worktree"] = str(worktree_path(st, name))
         st["threads"][name]["title"] = title_for(st, name)
+        bump_roster(st, name)
         save(
             d,
             st,
@@ -511,11 +634,44 @@ def cmd_thread(a):
             out["warning"] = title_warning(t["title"])
         print(json.dumps(out, ensure_ascii=False))
         return
+    if a.action == "set" and a.roster_sent and name == "all":
+        if any(getattr(a, x, None) for x in ("status", "summary", "owns", "focus", "session", "from_status")):
+            sys.exit("`thread set all --roster-sent` takes no other options; set threads one by one")
+        for n in roster_stale(st):
+            st["threads"][n]["roster_seen"] = st.get("roster_version", 0)
+        save(d, st, {"ev": "roster-sent", "to": "all", "version": st.get("roster_version", 0),
+                     "snap_threads": st["threads"]})
+        print(json.dumps({"roster_version": st.get("roster_version", 0), "not_sent": roster_stale(st)}))
+        return
     if name not in st["threads"]:
         sys.exit(f"unknown thread {name}; known: {', '.join(st['threads']) or '-'}")
     t = st["threads"][name]
-    if a.session:
+    roster_before = (t.get("session_id"), t.get("owns"), t["status"] == "archived")
+    if a.action == "reseat":
+        if not a.session:
+            sys.exit("reseat needs --session <new session id> (create the new session first)")
+        if a.session == t.get("session_id"):
+            sys.exit(f"{a.session} already holds the {name} seat")
+        if a.status and a.status not in ("starting", "working", "waiting", "idle"):
+            sys.exit("reseat --status must be starting, working, waiting or idle (a new live session)")
+    reason = a.reason or ("reseated" if a.action == "reseat" else "session changed")
+    prev_session = t.get("session_id")
+    if a.session and a.session != t.get("session_id"):
+        hist = t.setdefault("sessions", [])
+        ts = now()  # one instant: the old stint ends exactly when the new one starts
+        if t.get("session_id") and not any(h.get("session_id") == t["session_id"] for h in hist):
+            hist.append({"session_id": t["session_id"], "from": t.get("created")})
+        for h in hist:
+            if h.get("session_id") == t.get("session_id") and not h.get("to"):
+                h["to"] = ts
+                h["reason"] = reason
+        hist.append({"session_id": a.session, "from": ts})
         t["session_id"] = a.session
+        _close_archived(st, a.session, name, ts)
+        if a.action == "reseat":
+            if not a.status:
+                t["status"] = "starting"
+            t["last_status_at"] = ts  # the new session gets a fresh stuck timer (same instant: not a report)
     if a.status:
         if a.status not in THREAD_STATUSES:
             sys.exit(f"status must be one of {list(THREAD_STATUSES)}")
@@ -529,15 +685,21 @@ def cmd_thread(a):
     if a.focus is not None:
         t["focus"] = a.focus
         t["title"] = title_for(st, name)
+    if (t.get("session_id"), t.get("owns"), t["status"] == "archived") != roster_before:
+        bump_roster(st)  # peers need a new ROSTER; t itself learns it with the same broadcast
+    if a.roster_sent:
+        t["roster_seen"] = st.get("roster_version", 0)
     t["last_seen"] = now()
     save(
         d,
         st,
         {
-            "ev": "thread-set",
+            "ev": "thread-reseat" if a.action == "reseat" else "thread-set",
             "thread": name,
             "status": t["status"],
             "summary": t["summary"],
+            **({"session": t["session_id"], "prev_session": prev_session, "reason": reason}
+               if t.get("session_id") != prev_session else {}),
         },
     )
     print(json.dumps({name: t}, ensure_ascii=False, indent=2))
@@ -556,6 +718,8 @@ def cmd_task(a):
             "owner": a.owner,
             "deps": csv(a.deps),
             "accept": a.accept or "",
+            "touches": check_touches(a.touches),
+            "topics": norm_topics(a.topics),
             "status": "approved" if st["plan_approved"] else "planned",
             "notes": "",
             "created": now(),
@@ -565,47 +729,117 @@ def cmd_task(a):
         if a.id not in st["tasks"]:
             sys.exit(f"unknown task {a.id}")
         k = st["tasks"][a.id]
-        if a.checks:
-            k["checks"] = a.checks
-        if a.review:
-            if not a.reviewer:
-                sys.exit("--review needs --reviewer (a lead subagent, a review thread, ...)")
-            if a.reviewer == k.get("owner"):
-                sys.exit(f"{a.reviewer} owns {a.id}: the reviewer must be someone without its context")
-            k["review"] = {"result": a.review, "reviewer": a.reviewer, "note": a.review_note or "", "at": now()}
-            if a.review == "fail" and not a.status:
-                k["status"] = "working"
-                print(f"{a.id} back to working: send its owner a FOLLOWUP with the review findings", file=sys.stderr)
-        if a.status:
+        cur = k["status"]
+        said = (a.user_said or "").strip()
+        void = lambda why: k.get("review") and k.setdefault("past_reviews", []).append({**k.pop("review"),
+                                                                                         "voided": why})
+        # 0. the move itself must be legal before anything is changed
+        if a.status and a.status != cur:
             if a.status not in TASK_STATUSES:
                 sys.exit(f"status must be one of {TASK_STATUSES}")
-            if a.status == "done" and st["prefs"].get("require_review") and not a.skip_review:
-                rv = k.get("review") or {}
-                if rv.get("result") != "pass":
-                    sys.exit(f"{a.id}: no passing review yet. Have an independent reviewer check the diff against "
-                             f"'done when', then `task set {a.id} --review pass --reviewer <who>` "
-                             "(or --skip-review \"<reason>\")")
-                if k.get("checks") == "fail" and a.checks != "pass":
-                    sys.exit(f"{a.id}: checks failed; fix them and record `--checks pass` first")
-            if a.skip_review:
-                k["review"] = {"result": "skipped", "note": a.skip_review, "at": now()}
-            k["status"] = a.status
-            if a.status == "done":
-                for r in deliver_ready(st):
-                    print(f"request {r} delivered (all its tasks are done): report it to the user, then "
-                          f"`tw.py req set {r} --status reported`", file=sys.stderr)
+            allowed = TASK_MOVES.get(cur, set())
+            if a.status not in allowed:
+                sys.exit(f"{a.id} is {cur}: it can move to {', '.join(sorted(allowed)) or 'nothing (it has ended)'}"
+                         + (" (done only from review)" if a.status == "done" else ""))
+        if cur in ("done", "dropped") and any(x is not None for x in (a.owner, a.accept, a.deps)):
+            sys.exit(f"{a.id} has ended ({cur}): its owner, 'done when' and deps are final")
+        # 1. field edits first, so every check below sees the task as it will be stored
         if a.owner is not None:
             if a.owner and a.owner not in st["threads"]:
                 sys.exit(f"unknown owner {a.owner}")
-            k["owner"] = a.owner or None
-        if a.title:
-            k["title"] = a.title
-        if a.accept is not None:
+            if (a.owner or None) != k.get("owner"):
+                rv = k.get("review") or {}
+                if rv.get("result") == "pass" and not reviewer_independent(rv.get("reviewer") or "", a.owner or ""):
+                    void("its reviewer became the owner")
+                if k.get("owner") and k["owner"] not in k.setdefault("past_owners", []):
+                    k["past_owners"].append(k["owner"])  # wrote part of the work: never its reviewer
+                k["owner"] = a.owner or None
+        if a.accept is not None and a.accept != k.get("accept"):
+            void("'done when' changed")  # the verdict was against the old criterion
             k["accept"] = a.accept
+        old_deps = list(k.get("deps") or [])
         if a.deps is not None:
             k["deps"] = csv(a.deps)
+        if a.title:
+            k["title"] = a.title
+        if a.touches is not None:
+            k["touches"] = check_touches(a.touches)
+        if a.topics is not None:
+            k["topics"] = norm_topics(a.topics)
         if a.notes is not None:
             k["notes"] = a.notes
+        if a.checks:
+            if k.get("checks") == "fail" and a.checks == "none":
+                sys.exit(f"{a.id}: checks failed; only `--checks pass` clears that")
+            k["checks"] = a.checks
+        owner = k.get("owner") or ""
+        # 2. a review verdict, only on work that is in review, by someone independent of the owner
+        if a.review:
+            if not (a.reviewer or "").strip():
+                sys.exit("--review needs --reviewer (a fresh subagent of the owner, a review thread, ...)")
+            if cur != "review":
+                sys.exit(f"{a.id} is {cur}: record a review only while it is in review "
+                         f"(`task set {a.id} --status review` once the work is there)")
+            if not owner:
+                sys.exit(f"{a.id} has no owner: an independent review needs to know whose work it is")
+            past = next((o for o in k.get("past_owners") or [] if not reviewer_independent(a.reviewer, o)), None)
+            if past:
+                sys.exit(f"{a.reviewer} owned {a.id} before and wrote part of it: get a reviewer without its context")
+            if not reviewer_independent(a.reviewer, owner):
+                sys.exit(f"{a.reviewer} owns {a.id}: the reviewer must be someone without its context "
+                         f"(e.g. {owner}/subagent, a fresh subagent the owner starts)")
+            k["review"] = {"result": a.review, "reviewer": a.reviewer.strip(), "note": a.review_note or "",
+                           "at": now()}
+            if a.review == "fail" and not a.status:
+                k["status"] = "working"
+                print(f"{a.id} back to working: send its owner a FOLLOWUP with the review findings", file=sys.stderr)
+        # 3. preconditions of the status move, against the edited task
+        if a.status and a.status != k["status"]:
+            if a.status == "approved" and not st.get("plan_approved"):
+                sys.exit(f"{a.id}: tasks are approved with the plan: `plan approve --user-said ...` once the user agrees")
+            if a.status == "dispatched":
+                deps = list(dict.fromkeys(old_deps + (k.get("deps") or [])))  # clearing deps here skips nothing
+                open_deps = [x for x in deps if st["tasks"].get(x, {}).get("status") != "done"]
+                if open_deps:
+                    sys.exit(f"{a.id} waits for {', '.join(open_deps)} (deps not done)")
+                if not st.get("plan_approved"):
+                    sys.exit(f"{a.id}: the plan is reopened; `plan approve` again before dispatching")
+                if not owner:
+                    sys.exit(f"{a.id} has no owner: `task set {a.id} --owner <thread>` first")
+            if a.status == "dropped" and not said:
+                sys.exit(f"dropping {a.id} is the user's decision: add --user-said \"<their words>\"")
+            if a.skip_review and (not said or not a.skip_review.strip()):
+                sys.exit("--skip-review \"<reason>\" needs --user-said \"<the user's words>\": skipping review is "
+                         "their call")
+            if a.status == "done":
+                if not owner:
+                    sys.exit(f"{a.id} has no owner: set it before marking done")
+                if st["prefs"].get("require_review", True) and not a.skip_review:
+                    rv = k.get("review") or {}
+                    if rv.get("result") != "pass":
+                        sys.exit(f"{a.id}: no passing review yet. Have an independent reviewer check the diff against "
+                                 f"'done when', then `task set {a.id} --review pass --reviewer <who>` "
+                                 "(or --skip-review \"<reason>\" --user-said \"<their words>\")")
+                    if not all(reviewer_independent(rv.get("reviewer") or "", o)
+                               for o in [owner] + list(k.get("past_owners") or [])):
+                        sys.exit(f"{a.id}: its reviewer {rv.get('reviewer')} owns it; get another review")
+                if k.get("checks") == "fail":
+                    sys.exit(f"{a.id}: checks failed; fix them and record `--checks pass` first (skipping review "
+                             "does not skip checks)")
+                if a.skip_review:
+                    k["review"] = {"result": "skipped", "note": a.skip_review.strip(), "user_said": said, "at": now()}
+            if a.status == "done" and not a.skip_review and not str(k.get("accept") or "").strip():
+                sys.exit(f"{a.id} has no 'done when': set --accept first (a review needs something to check against)")
+            if k["status"] == "review" and a.status == "working":
+                void("rework after review")  # the old verdict no longer counts
+            k["status"] = a.status
+            if a.status in ("review", "done"):
+                for r in deliver_ready(st):
+                    print(f"request {r} delivered (all its tasks are in review or done): report it to the user, then "
+                          f"`tw.py req set {r} --status reported`", file=sys.stderr)
+        if k["status"] not in ("review", "done"):
+            for r in undeliver(st):
+                print(f"request {r} back to dispatched: {a.id} is {k['status']} again", file=sys.stderr)
         save(
             d,
             st,
@@ -614,6 +848,7 @@ def cmd_task(a):
                 "task": a.id,
                 "status": k["status"],
                 "owner": k["owner"],
+                **({"user_said": said} if said else {}),
             },
         )
     print(render_tasks(st))
@@ -623,6 +858,9 @@ def cmd_plan(a):
     d = need(find_dir())
     st = load(d)
     if a.action == "approve":
+        if not (a.user_said or "").strip():
+            sys.exit("approving the plan is the user's decision: `plan approve --user-said \"<their words>\"`")
+        st.setdefault("plan_user_said", []).append({"t": now(), "text": a.user_said.strip()})
         st["plan_approved"] = True
         for k in st["tasks"].values():
             if k["status"] == "planned":
@@ -632,6 +870,430 @@ def cmd_plan(a):
         st["plan_approved"] = False
         save(d, st, {"ev": "plan-reopened"})
     print(render_board(st))
+
+
+LEASE_ACTIVE = ("dispatched", "working", "blocked", "review")
+
+
+def _norm_path(x):
+    """'./web//a/../b/' -> 'web/b/' (trailing slash kept: it marks a folder); '.' or '/' -> '**' (everything)."""
+    import posixpath
+    x = x.strip().replace("\\", "/")
+    if not x:
+        return ""
+    folder = x.endswith("/")
+    x = posixpath.normpath(x.lstrip("/") or ".")
+    if x in (".", ""):
+        return "**"
+    return x + "/" if folder and not x.endswith("/") else x
+
+
+_GLOB = "*?["
+_GLOB_TOK = re.compile(r"\*|\?|\[!?\]?[^\]]*\]")  # glob tokens as fnmatch reads them ('[' alone is literal)
+
+
+def _expand_braces(p, limit=64):
+    """'web/{a,b}.py' -> ['web/a.py', 'web/b.py'] (nested groups too). Past `limit` names the pattern is widened:
+    the folder part from the first brace on becomes '**' (a superset across folders, so still conservative)."""
+    def count(x, depth=0):
+        m = re.search(r"\{([^{}]*,[^{}]*)\}", x)
+        if not m or depth > 12:
+            return 1 if not m else limit + 1
+        n = 0
+        for alt in m.group(1).split(","):
+            n += count(x[:m.start()] + alt + x[m.end():], depth + 1)
+            if n > limit:
+                return n
+        return n
+    if count(p) > limit:
+        head = p[:p.index("{")]
+        return [head[:head.rfind("/") + 1] + "**"]
+    m = re.search(r"\{([^{}]*,[^{}]*)\}", p)
+    if not m:
+        return [p]
+    out = []
+    for alt in m.group(1).split(","):
+        out += _expand_braces(p[:m.start()] + alt + p[m.end():], limit)
+    return out
+
+
+def _seg_meet(x, y):
+    """Can one path segment match both glob segments? Exact for literals; for two wildcards a conservative check
+    on their literal head and tail (may say yes when unsure, never no when they can meet)."""
+    import fnmatch
+    if x == y:
+        return True
+    gx, gy = any(c in x for c in _GLOB), any(c in y for c in _GLOB)
+    if not gx and not gy:
+        return False
+    if not gx:
+        return fnmatch.fnmatchcase(x, y)
+    if not gy:
+        return fnmatch.fnmatchcase(y, x)
+    mx, my = list(_GLOB_TOK.finditer(x)), list(_GLOB_TOK.finditer(y))
+    if not mx or not my:  # only an unclosed '[': fnmatch reads it literally
+        return fnmatch.fnmatchcase(x, y) if not mx else fnmatch.fnmatchcase(y, x) if not my else x == y
+    hx, hy = x[:mx[0].start()], y[:my[0].start()]
+    tx, ty = x[mx[-1].end():], y[my[-1].end():]
+    return (hx.startswith(hy) or hy.startswith(hx)) and (tx.endswith(ty) or ty.endswith(tx))
+
+
+def _globs_meet(a, b):
+    """Is there a path that matches both segment lists? '**' matches zero or more segments."""
+    from functools import lru_cache
+    A, B = tuple(a), tuple(b)
+
+    @lru_cache(maxsize=None)
+    def go(i, j):
+        if i == len(A) and j == len(B):
+            return True
+        if i < len(A) and A[i] == "**":
+            return go(i + 1, j) or (j < len(B) and go(i, j + 1)) or (j < len(B) and B[j] == "**" and go(i + 1, j + 1))
+        if j < len(B) and B[j] == "**":
+            return go(i, j + 1) or (i < len(A) and go(i + 1, j))
+        if i == len(A) or j == len(B):
+            return False
+        return _seg_meet(A[i], B[j]) and go(i + 1, j + 1)
+
+    return go(0, 0)
+
+
+@functools.lru_cache(maxsize=4096)
+def _lease_forms_cached(p):
+    return tuple(tuple(x) for x in _lease_forms_raw(p))
+
+
+def _lease_forms(p):
+    return _lease_forms_cached(p)
+
+
+def _lease_forms_raw(p):
+    """Segment lists a lease covers: a folder ('web/', or a literal 'web' that may be one) covers all below it;
+    a glob without '/' ('*.py') matches in any folder.
+    Case-folded: on a case-insensitive disk Web/App.py and web/app.py are one file."""
+    out = []
+    for q in _expand_braces(_norm_path(p).lower()):
+        folder = q.endswith("/")
+        segs = [x for x in q.strip("/").split("/") if x]
+        if not segs:
+            continue
+        out.append(segs + ["**"] if folder else segs)
+        if len(segs) == 1 and any(c in segs[0] for c in _GLOB) and segs[0] != "**":
+            out.append(["**"] + out[-1])  # '*.py' means .py files in any folder, as in .gitignore
+            if not folder:
+                out.append(["**"] + segs + ["**"])  # ... or a folder of that name at any depth
+        if not folder and segs[-1] != "**":
+            out.append(segs + ["**"])  # 'web' or 'web/*' may name a folder: cover what is below it
+    return out
+
+
+def _split_touches(s):
+    """'web/{a,b}.js, api/x.py' -> ['web/{a,b}.js', 'api/x.py']: commas inside {...} belong to the brace."""
+    out, cur, depth = [], "", 0
+    for ch in s or "":
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+            continue
+        depth += (ch == "{") - (ch == "}" and depth > 0)
+        cur += ch
+    out.append(cur)
+    return [x.strip() for x in out if x.strip()]
+
+
+def check_touches(s):
+    depth = 0
+    for ch in s or "":
+        depth += (ch == "{") - (ch == "}")
+        if depth < 0:
+            break
+    if depth != 0:
+        sys.exit(f"--touches has unbalanced braces: {s}")
+    out = _split_touches(s)
+    bad = [x for x in out for y in _expand_braces(x) if _norm_path(y).startswith("../") or _norm_path(y) == ".."]
+    if bad:
+        sys.exit(f"--touches must stay inside the repo: {', '.join(bad)}")
+    return out
+
+
+class RealFile(str):
+    """A file name from git (a real file, never a folder, never a glob: '*', '[', '\\' and braces are literal)."""
+
+
+def _file_segs(f):
+    return tuple(x for x in f.lower().split("/") if x)
+
+
+@functools.lru_cache(maxsize=65536)
+def _lit_meet(f, g):
+    """Does the literal path f (segments) match the glob g (segments, '**' spans folders)?"""
+    import fnmatch
+    if not g:
+        return not f
+    if g[0] == "**":
+        return any(_lit_meet(f[i:], g[1:]) for i in range(len(f) + 1))
+    return bool(f) and (f[0] == g[0] or fnmatch.fnmatchcase(f[0], g[0])) and _lit_meet(f[1:], g[1:])  # 'app/[id]/' is
+    # also a literal folder name (Next.js, SvelteKit), as git pathspecs read it
+
+
+def paths_overlap(a, b):
+    """True if some file could match both path globs (or a glob and a real path). Conservative when unsure."""
+    if isinstance(a, RealFile) or isinstance(b, RealFile):
+        f, other = (a, b) if isinstance(a, RealFile) else (b, a)
+        if isinstance(other, RealFile):
+            return _file_segs(f) == _file_segs(other)
+        fs = _file_segs(f)
+        raw = _file_segs(_norm_path(other))  # the lease read literally too: a real file named '{a,b}.py'
+        return any(_lit_meet(fs, g) for g in {raw, raw + ("**",)} | {tuple(g) for g in _lease_forms(other)})
+    return any(_globs_meet(x, y) for x in _lease_forms(a) for y in _lease_forms(b))
+
+
+def _base_ref(st, git):
+    """origin/<base> or <base>, whichever is newer (a stale origin would count merged work as unmerged)."""
+    base = st.get("repo", {}).get("base") or "main"
+    have = [b for b in (f"origin/{base}", base)
+            if git("rev-parse", "--verify", "--quiet", b + "^{commit}").returncode == 0]
+    if len(have) == 2 and git("merge-base", "--is-ancestor", have[0], have[1]).returncode == 0:
+        return have[1]  # local base has everything origin has, and maybe more (merged but not pushed yet)
+    return have[0] if have else None
+
+
+_GIT_CACHE = {}
+
+
+def _git_cached(repo):
+    """git runner for one repo; identical read-only calls within one tw.py run are answered from memory."""
+    def git(*x):
+        key = (repo, x)
+        if key not in _GIT_CACHE:
+            try:
+                _GIT_CACHE[key] = subprocess.run(["git", "-c", "core.quotePath=false", "-C", repo, *x],
+                                                 capture_output=True, text=True)
+            except OSError as e:  # no git program: same as "not a git repo" (declared paths only)
+                _GIT_CACHE[key] = subprocess.CompletedProcess(x, 127, "", str(e))
+        return _GIT_CACHE[key]
+    return git
+
+
+def _z(out):
+    """NUL-separated git name list (-z): names with quotes, tabs, newlines or backslashes stay whole."""
+    return [n for n in out.split("\x00") if n]
+
+
+_ID_RX = lambda tid: re.compile(rf"(^|[^A-Za-z0-9_]){re.escape(tid)}(?![0-9A-Za-z_]|[.-][0-9A-Za-z])")
+
+
+def _landed_files(git, base, br, files, tids):
+    """The subset of a done branch's files that has reached the base, by any kind of merge:
+    - merging the branch into the base would change nothing at all (git merge-tree, git >= 2.38): all of them;
+    - the base has the same content now (plain squash/rebase);
+    - a base commit since the fork changed that file and names the task id in its subject (squash or rebase that the
+      base edited again later; SKILL step 7 keeps the id in the subject). Reverts and mere mentions do not count."""
+    mt = git("merge-tree", "--write-tree", base, br)
+    bt = git("rev-parse", f"{base}^{{tree}}")
+    if mt.returncode == 0 and mt.stdout.split() and bt.stdout.strip() == mt.stdout.split()[0]:
+        return set(files)
+    same = set(files) - set(_z(git("diff", "-z", "--relative", "--name-only", "--no-renames", base, br, "--").stdout))
+    tids = [tids] if isinstance(tids, str) else list(tids or [])
+    if tids:
+        fork = git("merge-base", base, br).stdout.strip()
+        if fork:
+            rxs = [_ID_RX(t) for t in tids]
+            log = git("log", "-z", "--relative", "--no-renames", "--name-only", "--format=%x01%H %s",
+                      f"{fork}..{base}").stdout
+            for chunk in log.split("\x01")[1:]:
+                subj, _, names = chunk.partition("\x00")
+                sha, _, subj = subj.partition(" ")
+                head = re.match(r"\s*(?:\[([^\]]+)\]|\w+\(([^)]+)\)|([^\s:]+))", subj)
+                lead = head and next((g for g in head.groups() if g), "")
+                if lead and (any(rx.fullmatch(lead.strip()) for rx in rxs) or lead.strip() in tids):
+                    todo = (set(files) - same) & set(_z(names[1:] if names.startswith("\n") else names))
+                    if not todo:
+                        continue
+                    at_c, at_br = _blobs_at(git, sha, todo), _blobs_at(git, br, todo)
+                    mt = git("merge-tree", "--write-tree", f"{sha}^", br)  # the branch merged onto the squash's parent
+                    at_m = _blobs_at(git, mt.stdout.split()[0], todo) if mt.returncode == 0 and mt.stdout.split() \
+                        else {}
+                    for f in todo:
+                        # landed if the commit has the branch's content, or merging the branch where the squash was
+                        # made gives exactly what it committed (the base's own edits to other lines folded in).
+                        # Anything the branch changed beyond it (later work, an unpushed or amended fix) stays held.
+                        if at_c.get(f) and (at_c[f] == at_br.get(f) or at_c[f] == at_m.get(f)):
+                            same.add(f)
+    return same
+
+
+def _blobs_at(git, rev, files):
+    """{file: blob id} at rev for the given project-relative files (one git call)."""
+    out = {}
+    for e in git("ls-tree", "-r", "-z", rev, "--", *[f"./{f}" for f in sorted(files)]).stdout.split("\x00"):
+        meta, _, path = e.partition("\t")
+        if path and len(meta.split()) == 3:
+            out[path] = meta.split()[2]
+    return out
+
+
+def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None):
+    """tid: a task id or a list of them whose squash commits count as landed (see _landed_files)."""
+    """Files changed on the owner's branch vs base ([] when not a git repo or no branch). Problems go to warnings.
+    unmerged_only: leave out files that have already landed on the base (done or recalled tasks)."""
+    owner = st["threads"].get(k.get("owner") or "")
+    repo = st.get("repo", {}).get("path")
+    if not owner or not repo:
+        return []
+    git = _git_cached(repo)
+    if git("rev-parse", "--git-dir").returncode != 0:
+        return []
+    base = _base_ref(st, git)
+    if base is None:
+        if warnings is not None:
+            warnings.append(f"base branch {st.get('repo', {}).get('base') or 'main'} not found: real branch diffs "
+                            "are not checked (fix repo.base)")
+        return []
+    files = []
+    refs = [b for b in (owner["branch"], f"origin/{owner['branch']}")
+            if git("rev-parse", "--verify", "--quiet", b).returncode == 0]
+    if len(refs) == 2:  # one is behind the other (pushed WIP, or a stale local copy): only the newer one counts
+        if git("merge-base", "--is-ancestor", refs[0], refs[1]).returncode == 0:
+            refs = [refs[1]]
+        elif git("merge-base", "--is-ancestor", refs[1], refs[0]).returncode == 0:
+            refs = [refs[0]]
+        else:  # diverged (rebased, amended, force-pushed): the copy with the newer commit is the current one
+            t = [git("log", "-1", "--format=%ct", r).stdout.strip() for r in refs]
+            if all(x.isdigit() for x in t) and t[0] != t[1]:
+                refs = [refs[0] if int(t[0]) > int(t[1]) else refs[1]]
+    for br in refs:
+        if True:
+            r = git("diff", "-z", "--relative", "--name-only", "--no-renames", f"{base}...{br}")  # a rename holds old and new
+            if r.returncode != 0 and warnings is not None:
+                warnings.append(f"git diff {base}...{br} failed: {r.stderr.strip()[:120]}")
+            got = [RealFile(f) for f in _z(r.stdout)]
+            if unmerged_only and got:
+                gone = _landed_files(git, base, br, got, tid)
+                got = [f for f in got if f not in gone]
+            files += got
+    return [RealFile(f) for f in sorted(set(files))]
+
+
+def _held_paths(st, warnings=None):
+    """{task: paths} held by active tasks (declared + real diff) and by done/recalled tasks (unlanded diff)."""
+    held = {}
+    for t, k in st["tasks"].items():
+        # one branch per thread: what the owner's earlier tasks already landed (merge or squash with their id)
+        # is not this task's to hold
+        landed_ids = [x for x, kx in st["tasks"].items() if kx.get("owner") and kx.get("owner") == k.get("owner")
+                      and kx.get("status") == "done"]
+        if k["status"] in LEASE_ACTIVE:
+            held[t] = (k.get("touches") or []) + branch_changes(st, k, warnings, unmerged_only=True, tid=landed_ids)
+        elif k["status"] in ("done", "recalled"):
+            changed = branch_changes(st, k, warnings, unmerged_only=True, tid=landed_ids)
+            if changed:
+                held[t] = changed
+    if warnings is not None:
+        warnings[:] = list(dict.fromkeys(warnings))
+    return held
+
+
+def plan_ready(st, ready, warnings=None):
+    """One pass over the ready tasks in order. A task is held back if its paths overlap what is held (active,
+    unlanded, or an earlier task offered in this pass) or it shares a topic with an active task or an earlier
+    offered one, always of another owner. Only offered tasks hold paths and topics, so the result is consistent:
+    no two offered tasks collide, and nothing held back blocks anyone.
+    Returns (offered, blocked_by_lease, blocked_by_topic)."""
+    held = _held_paths(st, warnings)
+    topics = [(t, k) for t, k in st["tasks"].items() if k["status"] in LEASE_ACTIVE]
+    offered, by_lease, by_topic = [], {}, {}
+    for t in ready:
+        k = st["tasks"][t]
+        owner = k.get("owner")
+        mine = k.get("touches") or []
+        for other, paths in held.items():
+            if owner and st["tasks"][other].get("owner") == owner:
+                continue  # same thread works sequentially on its own branch
+            clash = sorted({p for p in paths for m in mine if paths_overlap(m, p)})
+            if clash:
+                by_lease.setdefault(t, []).append({"with": other, "owner": st["tasks"][other].get("owner"),
+                                                   "status": st["tasks"][other]["status"], "paths": clash})
+        mt = set(k.get("topics") or [])
+        for other, ko in topics:
+            if owner and ko.get("owner") == owner:
+                continue
+            shared = sorted(mt & set(ko.get("topics") or []))
+            if shared:
+                by_topic.setdefault(t, []).append({"with": other, "owner": ko.get("owner"), "topics": shared})
+        if t in by_lease:
+            by_topic.pop(t, None)  # report one reason: the lease
+        elif t not in by_topic:
+            offered.append(t)
+            if mine:
+                held[t] = mine
+            if mt:
+                topics.append((t, k))
+    return offered, by_lease, by_topic
+
+
+def lease_conflicts(st, ready, warnings=None):
+    """blocked_by_lease part of plan_ready (kept for callers that only need leases)."""
+    return plan_ready(st, ready, warnings)[1]
+
+
+def norm_topics(s):
+    """'Request Ledger, request_ledger , mechanism' -> ['request-ledger', 'mechanism']"""
+    return list(dict.fromkeys(re.sub(r"[\s_]+", "-", x.strip().lower()) for x in csv(s) if x.strip()))
+
+
+def accept_gate(st, tid):
+    """Why a task in review is not yet acceptable (None if it is): the same bar as `task set --status done`."""
+    k = st["tasks"][tid]
+    if k.get("checks") == "fail":
+        return "has failing checks"
+    rv = k.get("review") or {}
+    if rv.get("result") == "skipped":  # the user's words, recorded with the skip
+        return None
+    if not str(k.get("accept") or "").strip():
+        return "has no 'done when' to check against"
+    if not k.get("owner"):
+        return "has no owner"
+    if not st["prefs"].get("require_review", True):
+        return None
+    if rv.get("result") != "pass":
+        return "has no passing independent review yet"
+    if not all(reviewer_independent(rv.get("reviewer") or "", o) for o in [k["owner"]] + list(k.get("past_owners") or [])):
+        return f"was reviewed by its own owner ({rv.get('reviewer')})"
+    return None
+
+
+def reviewer_independent(reviewer, owner):
+    """The owner itself (any spelling: 'UI', './ui/', 'ui thread') is not independent; 'ui/subagent' is."""
+    rv, ow = norm_reviewer(reviewer), (owner or "").strip().lower()
+    if not ow:
+        return True
+    if rv == ow:
+        return False
+    if "/" in rv:
+        return True
+    tok = lambda x: [w for w in re.split(r"[^a-z0-9]+", x) if w]
+    rt, ot = tok(rv), tok(ow)  # 'ui-thread', 'the ui', 'research-2:self' = the owner (its words as one run)
+    return not ot or not any(rt[i:i + len(ot)] == ot for i in range(len(rt) - len(ot) + 1))
+
+
+def norm_reviewer(x):
+    import posixpath
+    return posixpath.normpath(x.strip().lower() or ".").strip("/")
+
+
+def roster_stale(st):
+    """Live threads that have not been sent the newest ROSTER."""
+    v = st.get("roster_version", 0)
+    return [n for n, t in st["threads"].items()
+            if t.get("session_id") and t["status"] not in ("planned", "resolved", "archived")
+            and t.get("roster_seen", 0) < v]
+
+
+def bump_roster(st, name=None):
+    st["roster_version"] = st.get("roster_version", 0) + 1
+    if name:  # a thread created now gets the current roster in its worker prompt
+        st["threads"][name]["roster_seen"] = st["roster_version"]
 
 
 def cmd_ready(a):
@@ -646,10 +1308,18 @@ def cmd_ready(a):
         for t, k in st["tasks"].items()
         if k["status"] == "approved" and set(k.get("deps", [])) <= done
     ]
+    lease_warnings = []
+    ready, blocked, by_topic = plan_ready(st, ready, lease_warnings)
     print(
         json.dumps(
             {
                 "ready": ready,
+                "blocked_by_lease": blocked,
+                "lease_warnings": lease_warnings,
+                "blocked_by_topic": {t: v + [{"why": "same topic as an active task of another thread: merge into one "
+                                              "thread in order, or make it wait (deps)"}] for t, v in by_topic.items()},
+                "roster_not_sent": roster_stale(st),
+                "no_touches": [t for t in ready if not st["tasks"][t].get("touches")],
                 "busy_threads": busy,
                 "max_parallel": st["prefs"].get("max_parallel", 0) or "unlimited",
                 "slots": (max(0, st["prefs"]["max_parallel"] - busy) if st["prefs"].get("max_parallel") else "unlimited"),
@@ -706,9 +1376,20 @@ def cmd_ask(a):
     d = need(find_dir())
     st = load(d)
     if a.answer is not None:
-        st["questions"][a.answer]["answered"] = True
-        save(d, st, {"ev": "answered", "q": a.answer})
+        n = a.answer
+        if not 1 <= n <= len(st["questions"]):
+            sys.exit(f"no question {n}; questions are numbered 1..{len(st['questions'])} (see the board)")
+        q = st["questions"][n - 1]
+        if q.get("answered"):
+            sys.exit(f"question {n} is already answered" + (f": {q['answer']}" if q.get("answer") else "")
+                     + "; ask a new question if the user changed their mind")
+        q["answered"] = True
+        if a.text:
+            q["answer"] = a.text
+        save(d, st, {"ev": "answered", "n": n})
     else:
+        if not a.text:
+            sys.exit('usage: ask "<question>" --from <thread>   or   ask --answer N ["<answer>"]')
         st["questions"].append(
             {"from": a.frm, "text": a.text, "t": now(), "answered": False}
         )
@@ -757,6 +1438,7 @@ def cmd_open(a):
                     "last_seen": t.get("last_seen"),
                     "last_status_at": t.get("last_status_at"),
                     "stuck_minutes": stuck.get(n),
+                    "roster_sent": t.get("roster_seen", 0) >= st.get("roster_version", 0),
                 }
                 for n, t in st["threads"].items()
                 if t["status"] not in ("planned", "resolved", "archived")
@@ -771,6 +1453,11 @@ def cmd_prefs(a):
     st = load(d)
     for kv in a.set or []:
         k, _, v = kv.partition("=")
+        if k == "require_review":
+            if v.lower() not in ("1", "0", "true", "false", "yes", "no", "on", "off"):
+                sys.exit("require_review must be true or false")
+            if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
+                sys.exit("turning the review gate off is the user's decision: add --user-said \"<their words>\"")
         cur = st["prefs"].get(k)
         if isinstance(cur, bool) or v.lower() in ("true", "false", "yes", "no", "on", "off"):
             st["prefs"][k] = v.lower() in ("1", "true", "yes", "on")
@@ -789,8 +1476,11 @@ def cmd_prefs(a):
             if t.get("title") != new:
                 t["title"] = new
                 retitled[n] = new
+    if a.set and (a.user_said or "").strip():
+        st.setdefault("prefs_user_said", []).append({"t": now(), "set": a.set, "text": a.user_said.strip()})
     if a.set:
-        save(d, st, {"ev": "prefs", "set": a.set})
+        save(d, st, {"ev": "prefs", "set": a.set, **({"user_said": a.user_said.strip()}
+                                                     if (a.user_said or "").strip() else {})})
     if retitled:
         print(json.dumps({"retitled": retitled, "tags": f"teamwork:{tag(st)}",
                           "note": "update each session with set_session_title / set_session_tags"},
@@ -836,6 +1526,11 @@ def cmd_worker_prompt(a):
         "REPORT_CHANNEL": channel,
         "FOLDER": st.get("repo", {}).get("path") or "-",
         "LANGUAGE": language_rule(st),
+        "GUARD": (f"run `python3 \"{SKILL_DIR / 'scripts' / 'tw.py'}\" -C \"{st.get('repo', {}).get('path') or '.'}\" "
+                  "guard --repo .` in your worktree before every push; it must print `guard: ok`"
+                  if t["kind"] == "rc" else
+                  "you cannot see the private list, so never write names of the user's own products, people, "
+                  "accounts or machines into files, commits or branch names; the lead scans your branch before merging"),
         "WORKTREE": (f"`{t.get('worktree') or worktree_path(st, a.thread)}` (the lead creates it; if it is missing, "
                      f"create it yourself with exactly: `{worktree_cmd(st, a.thread)}`)")
         if t["kind"] == "rc" else "your container's checkout of the repo (cloud thread)",
@@ -895,9 +1590,23 @@ def deliver_ready(st):
     moved = []
     for r, q in st.get("requests", {}).items():
         ts = q.get("tasks") or []
-        if q["status"] in ("open", "dispatched") and ts and all(
-                st["tasks"].get(t, {}).get("status") == "done" for t in ts):
+        if q["status"] == "dispatched" and ts and all(
+                st["tasks"].get(t, {}).get("status") in ("review", "done") for t in ts):
             q["status"] = "delivered"
+            q["updated"] = now()
+            moved.append(r)
+    return moved
+
+
+def undeliver(st):
+    """A delivered or reported request whose task went back to work (review fail, rework) is dispatched again:
+    what was delivered or told to the user is no longer the result (report the new one when it comes back)."""
+    moved = []
+    for r, q in st.get("requests", {}).items():
+        ts = q.get("tasks") or []
+        if q["status"] in ("delivered", "reported") and not all(
+                st["tasks"].get(t, {}).get("status") in ("review", "done") for t in ts):
+            q["status"] = "dispatched"
             q["updated"] = now()
             moved.append(r)
     return moved
@@ -923,17 +1632,34 @@ def check_tasks(st, ids):
         sys.exit(f"unknown task(s) {', '.join(bad)}; add them with `task add` first")
 
 
-def set_req_status(st, r, q, new, by_import=False):
+def set_req_status(st, r, q, new, by_import=False, user_said=None):
+    """The only place a request's status changes (besides close/drop): checks framework A9 preconditions."""
     if new not in REQ_STATUSES:
         sys.exit(f"status must be one of {REQ_STATUSES}")
     if by_import:
         q["status"] = new
         return
-    if new == "closed":
-        sys.exit("use `req close R --confirmed` (user confirmed) or `--declined` (user said not to do it)")
-    if new == "reported" and q["status"] not in ("delivered", "reported"):
-        sys.exit(f"{r} is {q['status']}: only a delivered request can be reported (deliver first)")
+    cur = q["status"]
+    if new == cur:
+        return
+    if new in REQ_END:
+        sys.exit(f"only the user ends a request: `req close {r} --user-said \"<their words>\"` (accepted) or "
+                 f"`req drop {r} --user-said \"<their words>\"` (not to do it)")
+    if new not in REQ_MOVES.get(cur, set()):
+        allowed = ", ".join(sorted(REQ_MOVES.get(cur, set()))) or "nothing (it has ended)"
+        sys.exit(f"{r} is {cur}: it can move to {allowed}")
+    user_said = (user_said or "").strip() or None
+    if (cur, new) in REQ_NEEDS_USER and not user_said:
+        sys.exit(f"{r} {cur} -> {new} is the user's decision: add --user-said \"<their words>\"")
+    if new == "delivered":
+        ts = q.get("tasks") or []
+        not_ready = [t for t in ts if st["tasks"].get(t, {}).get("status") not in ("review", "done")]
+        if not ts or not_ready:
+            sys.exit(f"{r} is delivered only when every linked task is in review or done"
+                     + (f" (not yet: {', '.join(not_ready)})" if not_ready else " (no tasks linked)"))
     q["status"] = new
+    if user_said:
+        q.setdefault("user_said", []).append({"t": now(), "to": new, "text": user_said})
     if new == "reported":
         q["reported_at"] = now()
 
@@ -943,7 +1669,7 @@ def cmd_req(a):
     st = load(d)
     reqs = st.setdefault("requests", {})
     if a.action == "list":
-        rows = {r: q for r, q in reqs.items() if a.all or q["status"] != "closed"}
+        rows = {r: q for r, q in reqs.items() if a.all or q["status"] not in REQ_END}
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return
     if a.action == "import":
@@ -962,6 +1688,7 @@ def cmd_req(a):
         reqs[r] = q
         if tasks:
             q["status"] = "dispatched"
+            deliver_ready(st)  # linked to work that is already in review or done
         save(d, st, {"ev": "req-add", "req": r, "text": q["text"], "tasks": tasks})
         print(json.dumps({r: q}, ensure_ascii=False))
         return
@@ -977,24 +1704,50 @@ def cmd_req(a):
             sys.exit("usage: req link R<n> T1 [T2 ...]")
         check_tasks(st, tasks)
         q["tasks"] = list(dict.fromkeys(q.get("tasks", []) + tasks))
+        if q["status"] in REQ_END:
+            sys.exit(f"{r} has ended ({q['status']}); register a new request instead")
+        if q["status"] == "reported":
+            # more work on something already reported: the user reopens it (reported -> dispatched)
+            set_req_status(st, r, q, "dispatched", user_said=a.user_said)
         if q["status"] == "open":
-            q["status"] = "dispatched"
+            q["status"] = "dispatched"  # proposed stays proposed until the user says yes
+        undeliver(st)  # a new task still in progress
         deliver_ready(st)
     elif a.action == "set":
+        if q["status"] in REQ_END:
+            sys.exit(f"{r} has ended ({q['status']}); register a new request instead of editing it")
         if a.status:
-            set_req_status(st, r, q, a.status)
+            set_req_status(st, r, q, a.status, user_said=a.user_said)
+        if a.status == "dispatched" and not q.get("tasks"):
+            sys.exit(f"{r} has no tasks: link the work first (`req link {r} T<n>`), which dispatches it")
         for k in ("where", "followup", "text"):
             v = getattr(a, k)
             if v is not None:
                 q[k] = v
-    elif a.action == "close":
-        if a.confirmed == a.declined:
-            sys.exit("say why: --confirmed (the user confirmed it is done) or --declined (the user said not to do it)")
-        if a.confirmed and q["status"] != "reported":
+    elif a.action in ("close", "drop"):
+        drop = a.action == "drop" or a.declined
+        a.user_said = (a.user_said or "").strip()
+        if not a.user_said:
+            sys.exit(f"only the user ends a request: add --user-said \"<the user's words>\" "
+                     f"({'not to do it' if drop else 'accepting the result'})")
+        if q["status"] in REQ_END:
+            sys.exit(f"{r} has already ended ({q['status']})")
+        if not drop and q["status"] != "reported":
             sys.exit(f"{r} is {q['status']}: report it to the user first (`req set {r} --status reported`), "
-                     "then close it when they confirm")
-        q["status"] = "closed"
-        q["closed_reason"] = "confirmed" if a.confirmed else "declined"
+                     "then close it when they accept")
+        if not drop:
+            for t in q.get("tasks") or []:
+                why = accept_gate(st, t) if st["tasks"].get(t, {}).get("status") == "review" else None
+                if why:
+                    sys.exit(f"{r}: {t} {why}; the user accepts only checked work")
+        back = [t for t in q.get("tasks") or [] if st["tasks"].get(t, {}).get("status") not in ("review", "done")]
+        if not drop and back:
+            sys.exit(f"{r} was reported, but {', '.join(back)} went back to work since: report the new result "
+                     "first (the user accepted an old one)")
+        q["status"] = "dropped" if drop else "closed"
+        q["closed_reason"] = "dropped" if drop else "accepted"
+        q["closed_at"] = now()
+        q.setdefault("user_said", []).append({"t": now(), "to": q["status"], "text": a.user_said})
         if a.note:
             q["closed_note"] = a.note
     q["updated"] = now()
@@ -1045,8 +1798,11 @@ def cmd_req_import(a, d, st):
         q = {"text": get("text"), "status": "open", "tasks": tasks, "where": where,
              "followup": clean(get("followup")), "created": now(), "updated": now(), "imported": True}
         set_req_status(st, r, q, status, by_import=True)
-        if status == "closed":
-            q["closed_reason"] = "imported"
+        if status in REQ_END:
+            q["closed_reason"] = "imported (ended in the old ledger; no user words recorded here)"
+        if q["status"] == "delivered" and tasks and not all(
+                st["tasks"].get(t, {}).get("status") in ("review", "done") for t in tasks):
+            q["status"] = "dispatched"  # linked work is not finished (an old row without tasks keeps its status)
         out[r] = q
     if a.dry_run:
         print(json.dumps({"would_import": out, "skipped_existing": skipped}, ensure_ascii=False, indent=2))
@@ -1054,6 +1810,965 @@ def cmd_req_import(a, d, st):
     reqs.update(out)
     save(d, st, {"ev": "req-import", "file": a.args[0], "ids": list(out), "skipped": skipped})
     print(json.dumps({"imported": list(out), "skipped_existing": skipped}, ensure_ascii=False))
+
+
+# ------------------------------------------------------------------ privacy guard
+
+PRIVATE_HELP = """# Private words and paths: never in commits, branches, messages to public places.
+# This file lives in .teamwork/ and is never committed. One entry per line, case-insensitive.
+#   some-private-product        a word or phrase (substring match)
+#   path: secrets/**            a path glob that must never be committed
+# Private notes and files go in .teamwork/private/ (ignored, never committed).
+"""
+
+
+def _clean_entry(ln):
+    ln = ln.strip()
+    m = re.fullmatch(r"<!--\s*(.*?)\s*-->", ln)
+    if m:
+        ln = m.group(1)  # <!-- X --> still means X
+    ln = re.sub(r"^(>\s*)+", "", ln)  # quotes
+    ln = re.sub(r"^([-*+]|\d+[.)])\s+", "", ln)  # list bullets and numbering
+    ln = re.sub(r"^\[[ xX]?\]\s*", "", ln)  # task-list boxes: - [ ] X, - [x] X
+    ln = ln.replace("~~", "")  # strikethrough
+    if ln.startswith("#"):
+        return ""
+    ln = re.sub(r"\s+#.*$", "", ln)  # inline comment
+    m = re.fullmatch(r"(\*\*|__)?\s*path:\s*(.*)", ln.strip(), re.I | re.S)
+    if m:
+        g = m.group(2).strip()  # a path glob keeps its * and _ ; only bold around the whole rule, quotes, backticks go
+        if m.group(1) and g.endswith(m.group(1)):
+            g = g[: -len(m.group(1))].strip()
+        while len(g) > 1 and g[0] == g[-1] and g[0] in "`\"'":
+            g = g[1:-1].strip()
+        return "path:" + g
+    ln = ln.strip().strip("*_`\"'").strip()  # markdown emphasis / quotes
+    return ln
+
+
+def _entry_terms(ln):
+    """One cleaned line -> its terms. The whole line always counts; so do its comma/、/；-separated parts and the
+    head of 'X - note', 'X — note', 'X: note', 'X（note）' (extra terms only make the guard stricter)."""
+    out = [ln]
+    parts = [p.strip().strip("*_`\"'").strip() for p in re.split(r"\s*[,，、;；/|]\s*", ln)]
+    if len(parts) > 1:
+        out += parts
+    for p in list(out):
+        kv = re.split(r"[:：]\s*", p, maxsplit=1)
+        if len(kv) == 2:
+            out += [x.strip().strip("*_`\"'").strip() for x in kv]  # 'Client: X' -> both sides
+        head = re.split(r"\s+[-–—]\s+|\s*[（(]", p, maxsplit=1)[0].strip().strip("*_`\"'").strip()
+        if head and head != p:
+            out.append(head)
+    return [t for t in dict.fromkeys(out) if len(t) >= 2 or (t and ord(t[0]) > 0x2E7F)]  # 1 char only if CJK
+
+
+def load_private(d, extra=None):
+    """(terms, path globs, files found). Missing files are reported by the caller (fail closed).
+    Accepts plain lines, bullets, numbering, task boxes, **bold**, '# comments', comma lists, 'X - note' and
+    markdown tables (first cell of each row; the header row and the --- row are skipped)."""
+    terms, paths, found = [], [], []
+    for f in [d / "PRIVATE.md"] + [Path(x).expanduser() for x in (extra or [])]:
+        if not f.exists():
+            continue
+        found.append(f)
+        raw_b = f.read_bytes()
+        try:
+            if raw_b[:2] in (b"\xff\xfe", b"\xfe\xff"):
+                txt = raw_b.decode("utf-16")
+            else:
+                txt = raw_b.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            sys.exit(f"{f.name}: not UTF-8 or UTF-16 text; save it as UTF-8 (the guard fails closed)")
+        lines = txt.splitlines()
+        for i, raw in enumerate(lines):
+            s = raw.strip()
+            if s.startswith("|"):
+                cells = [c.strip() for c in s.strip("|").split("|")]
+                if all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+                    continue  # | --- | --- |
+                nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+                if nxt.startswith("|") and re.fullmatch(r"[|\s:\-]+", nxt):
+                    continue  # header row
+                s = cells[0] if cells else ""
+            ln = _clean_entry(s)
+            if not ln:
+                continue
+            if ln.lower().startswith("path:"):
+                g = ln[5:].strip()
+                if g:
+                    paths.append(g)
+            else:
+                terms += _entry_terms(ln)
+    return list(dict.fromkeys(terms)), list(dict.fromkeys(paths)), found
+
+
+def mask(term):
+    return "*" * 5  # never reveal the word, its first letter or its length
+
+
+class _Masker:
+    def __init__(self, terms):
+        self.res = [re.compile(re.escape(t), re.I) for t in sorted(terms, key=len, reverse=True)]
+
+    def __call__(self, text):
+        for r in self.res:
+            text = r.sub("*****", text)
+        return text
+
+
+_GUARD_ENCODINGS = ("utf-8", "utf-16-le", "utf-16-be", "gb18030", "big5", "shift_jis", "cp1252", "latin-1")
+
+
+def _needles(terms):
+    """Byte patterns for every term in every encoding a file may use, matched against data.lower()."""
+    import unicodedata
+    out = set()
+    for t in terms:
+        forms = {unicodedata.normalize(f, t) for f in ("NFC", "NFD")}
+        for v in {x for f in forms for x in (f, f.lower(), f.upper(), f.title())}:
+            for enc in _GUARD_ENCODINGS:
+                try:
+                    out.add(v.encode(enc).lower())
+                except (UnicodeEncodeError, LookupError):
+                    continue
+    return sorted((n for n in out if n), key=len)
+
+
+def _bytes_has(data, needles, depth=0):
+    """True if raw bytes hold any needle (case-insensitive for ASCII; other cases via the variants above).
+    Zip-based files (docx, xlsx, pptx, odt, jar, zip) and gzip are opened and their contents checked too."""
+    if isinstance(needles, str):
+        needles = _needles([needles])
+    low = data.lower()
+    if any(n in low for n in needles):
+        return True
+    if depth >= 2:
+        return False
+    import io
+    if data[:4] == b"PK\x03\x04":
+        import zipfile
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                for info in z.infolist()[:2000]:
+                    if _bytes_has(info.filename.encode("utf-8", "replace"), needles, depth + 1):
+                        return True
+                    if info.file_size <= 64 * 1024 * 1024 and _bytes_has(z.read(info), needles, depth + 1):
+                        return True
+        except Exception:
+            return False
+    elif data[:2] == b"\x1f\x8b":
+        import gzip
+        try:
+            return _bytes_has(gzip.decompress(data)[:256 * 1024 * 1024], needles, depth + 1)
+        except Exception:
+            return False
+    return False
+
+
+def _path_rule_hit(name, g):
+    """gitignore-like and case-insensitive: 'secrets/*', '/secrets/', 'Notes.md' (any folder), '**/x'."""
+    import fnmatch
+    n = name.lower().lstrip("/")
+    g = g.lower().strip()
+    anchored = g.startswith("/")
+    g = g.lstrip("/")
+    core = g.rstrip("/")
+    if not core:
+        return False
+    if fnmatch.fnmatchcase(n, core) or fnmatch.fnmatchcase(n, core + "/*") or n.startswith(core + "/"):
+        return True
+    if fnmatch.fnmatchcase(n, core.replace("**/", "")):
+        return True
+    if not anchored and "/" not in core:
+        return any(fnmatch.fnmatchcase(c, core) for c in n.split("/"))  # bare name: any folder level
+    if not anchored and core.startswith("**/"):
+        return any(fnmatch.fnmatchcase("/".join(n.split("/")[i:]), core[3:]) for i in range(len(n.split("/"))))
+    return False
+
+
+def guard_scan(repo, rng, ref, terms, paths, worktree=True, refnames=()):
+    """Hits [(where, what)] for the commits in rng (git rev args; messages, author/committer, diffs incl. binary
+    and merges, changed paths), tag objects, the tree of ref, ref names, and (worktree=True) every non-ignored
+    file in the checkout (names and bytes). Nothing private is printed: names are masked."""
+    rp = str(repo)
+
+    env = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}  # scan what is really sent, not local replacements
+
+    def git(*x, text=True, inp=None):
+        return subprocess.run(["git", "-c", "core.quotePath=false", "-C", rp, *x], capture_output=True, text=text,
+                              input=inp, env=env)
+
+    if git("rev-parse", "--git-dir").returncode != 0:
+        sys.exit(f"{repo} is not a git repository")
+    # literal parts of path rules are private too: never print them
+    rule_words = [w for g in paths for w in re.split(r"[*?\[\]{}/,]+", g) if len(w) >= 2]
+    m = _Masker(list(terms) + rule_words)
+    needles = _needles(terms)
+    hits = []
+
+    def name_hits(where, name, show=None):
+        shown = m(show if show is not None else name)
+        if _bytes_has(name.encode("utf-8", errors="replace"), needles):
+            hits.append((f"{where} {shown}", "private word in a name"))
+        for i, g in enumerate(paths, 1):
+            if _path_rule_hit(name, g):
+                hits.append((f"{where} {shown}", f"private path rule #{i}"))
+
+    for rn in refnames:
+        name_hits("ref name", rn)
+    if rng:
+        raw = git("log", "--encoding=UTF-8", "-p", "-m", "--text", "--no-textconv", "--no-ext-diff", "--no-renames",
+                  "--format=%x00commit %H%n%an <%ae>%n%cn <%ce>%n%B", *rng, text=False).stdout
+        for chunk in raw.split(b"\x00commit ")[1:]:
+            if _bytes_has(chunk, needles):
+                hits.append((f"history {chunk[:12].decode('ascii', 'replace')}", "private word"))
+        names = git("log", "-m", "--no-renames", "--name-only", "-z", "--format=", *rng, text=False).stdout
+        for n in {x.decode("utf-8", errors="replace").strip("\n") for x in names.split(b"\0")}:
+            if n:
+                name_hits("history path", n)
+    def scan_blobs(blobs, where):
+        if not blobs:
+            return
+        out = git("cat-file", "--batch", inp=b"".join(x.encode() + b"\n" for x, _ in blobs), text=False).stdout
+        pos = 0
+        for sha, pth in blobs:
+            nl = out.index(b"\n", pos)
+            head = out[pos:nl].split()
+            if len(head) != 3:  # "<sha> missing"
+                pos = nl + 1
+                continue
+            size = int(head[2])
+            data = out[nl + 1:nl + 1 + size]
+            pos = nl + 1 + size + 1
+            if _bytes_has(data, needles):
+                hits.append((f"{where}{m(pth)}", "private word"))
+
+    def scan_tree(tree, label):
+        ls = git("ls-tree", "-r", "-z", tree, text=False).stdout
+        blobs = []
+        for e in [x for x in ls.split(b"\0") if x]:
+            meta, _, path = e.partition(b"\t")
+            pth = path.decode("utf-8", errors="replace")
+            name_hits(f"tree {label}:", pth)
+            f = meta.split()
+            if len(f) == 3 and f[1] == b"blob":  # symlinks are blobs too: their target text is scanned
+                blobs.append((f[2].decode(), pth))
+        scan_blobs(blobs, f"tree {label}:")
+
+    if rng:  # every blob the pushed commits add, read whole: archives (docx, zip, gz) deep in a diff get opened
+        rawl = git("log", "-m", "--no-renames", "--raw", "--no-abbrev", "-z", "--format=", *rng, text=False).stdout
+        items, blobs = rawl.split(b"\0"), {}
+        for i, e in enumerate(items):
+            if e.lstrip(b"\n").startswith(b":") and i + 1 < len(items):
+                f = e.lstrip(b"\n").split()
+                if len(f) >= 5 and set(f[3]) != {ord("0")}:
+                    blobs.setdefault(f[3].decode(), items[i + 1].decode("utf-8", errors="replace"))
+        scan_blobs(list(blobs.items()), "history file ")
+
+    # every tag object on the way down (nested tags too), and whatever the chain ends at
+    ends = set()
+    for t in dict.fromkeys([ref] + [x for x in refnames if x.startswith("refs/tags/")]):
+        if not t:
+            continue
+        obj, seen = t, set()
+        while git("cat-file", "-t", obj).stdout.strip() == "tag" and obj not in seen:
+            seen.add(obj)
+            body = git("cat-file", "-p", obj, text=False).stdout
+            if _bytes_has(body, needles):
+                hits.append((f"tag {m(t)}", "private word in a tag message"))
+            mo = re.match(rb"object ([0-9a-f]{40,64})", body)
+            if not mo:
+                break
+            obj = mo.group(1).decode()
+        kind = git("cat-file", "-t", obj).stdout.strip()
+        end = git("rev-parse", "--verify", "--quiet", obj).stdout.strip() or obj
+        if end in ends:
+            continue
+        ends.add(end)
+        if kind == "blob":  # also a lightweight tag that names a blob directly
+            scan_blobs([(end, "(tagged blob)")], f"tag {m(t)} -> ")
+        elif kind == "tree":
+            scan_tree(end, f"{m(t)}^{{tree}}")
+    # the tree that is being pushed / merged, every blob in raw bytes
+    if ref and git("rev-parse", "--verify", "--quiet", ref + "^{commit}").returncode == 0:
+        scan_tree(ref + "^{commit}", m(ref))
+    if worktree:
+        out = git("ls-files", "-z", "--cached", "--others", "--exclude-standard", text=False).stdout
+        for n in [x.decode("utf-8", errors="replace") for x in out.split(b"\0") if x]:
+            name_hits("worktree", n)
+            if n.startswith(".teamwork/private/") or n == ".teamwork/PRIVATE.md":
+                hits.append(("worktree .teamwork/" + ("private/*****" if "/private/" in n else "PRIVATE.md"),
+                             "private folder is tracked or not ignored"))
+            fp = Path(rp) / n
+            try:
+                # a symlink is committed as its target path, so scan that text, never the file it points to
+                data = os.readlink(fp).encode("utf-8", "replace") if fp.is_symlink() else fp.read_bytes()
+            except OSError:
+                continue
+            if _bytes_has(data, needles):
+                hits.append((f"worktree {m(n)}", "private word"))
+    return list(dict.fromkeys(hits))
+
+
+def cmd_guard(a):
+    d = need(find_dir())
+    st = load(d)
+    terms, paths, found = load_private(d, a.private)
+    if not found:
+        sys.exit(f"guard: FAILED, no private list: create {d / 'PRIVATE.md'} (tw.py init does; it may stay empty "
+                 "if the user has nothing private)")
+    repo = Path(a.repo or os.getcwd()).resolve()
+    genv = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
+    git = lambda *x: subprocess.run(["git", "-C", str(repo), *x], capture_output=True, text=True, env=genv)
+    ok = lambda r: git("rev-parse", "--verify", "--quiet", r + "^{commit}").returncode == 0
+    jobs = []  # (rev args for the commits to scan, ref whose tree is scanned, ref names)
+    if a.pre_push:
+        # git pre-push: argv remote name; stdin <local ref> <local sha> <remote ref> <remote sha>
+        remote, advertised = a.remote, None
+        for ln in sys.stdin.read().splitlines():
+            parts = ln.split()
+            if len(parts) != 4 or set(parts[1]) == {"0"}:
+                continue  # deleting a remote branch sends nothing
+            local_ref, local_sha, remote_ref, remote_sha = parts
+            tip = git("rev-parse", "--verify", "--quiet", local_sha + "^{commit}").stdout.strip()
+            if not tip:
+                rng = None  # a tag on a blob or tree: guard_scan peels and scans it
+            elif not set(remote_sha) == {"0"} and ok(remote_sha):
+                rng = [f"{remote_sha}..{tip}"]
+            else:
+                # Branch new on this remote. Local remote-tracking refs can be stale (the remote URL changed),
+                # so exclude only commits the server itself advertises now; offline: scan everything.
+                if advertised is None:
+                    advertised = []
+                    if remote:
+                        pu = git("remote", "get-url", "--push", remote)  # pushurl / pushInsteadOf: where it goes
+                        r = git("ls-remote", pu.stdout.strip() if pu.returncode == 0 and pu.stdout.strip()
+                                else remote)
+                        advertised = [x.split()[0] for x in r.stdout.splitlines() if x.split()] \
+                            if r.returncode == 0 else []
+                    advertised = [x for x in dict.fromkeys(advertised) if ok(x)]
+                rng = [tip, "--not", *advertised] if advertised else [tip]
+            jobs.append((rng, local_sha, [local_ref, remote_ref]))
+    else:
+        ref = a.ref
+        if a.base:
+            if not ok(a.base):
+                sys.exit(f"base {a.base} not found (git fetch first, or pass --base)")
+            base = a.base
+        else:
+            b = st.get("repo", {}).get("base") or "main"
+            base = f"origin/{b}" if ok(f"origin/{b}") else b
+            if not ok(base):
+                sys.exit(f"base {base} not found (git fetch first, or pass --base)")
+        full = git("rev-parse", "--symbolic-full-name", ref).stdout.strip()
+        jobs.append(([f"{base}..{ref}"], ref, [x for x in dict.fromkeys((ref, full)) if x and x != "HEAD"]))
+    if not terms and not paths:
+        print(f"guard: ok (private list {found[0]} is empty)")
+        return
+    hits = []
+    for i, (rng, ref, names) in enumerate(jobs):
+        hits += guard_scan(repo, rng, ref, terms, paths, worktree=not a.pre_push and i == 0, refnames=names)
+    hits = list(dict.fromkeys(hits))
+    if hits:
+        print(f"guard: FAILED, {len(hits)} private hit(s). Remove them (history hits need the commits rewritten "
+              "before any push):")
+        for where, what in hits:
+            print(f"  {where}: {what}")
+        sys.exit(1)
+    print(f"guard: ok ({len(terms)} words, {len(paths)} paths checked)")
+
+
+def _read_log(d):
+    out = []
+    if (d / "log.jsonl").exists():
+        for ln in (d / "log.jsonl").read_bytes().decode("utf-8", errors="replace").split("\n"):
+            if not ln.strip():
+                continue
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(e, dict):
+                out.append(e)
+    return out
+
+
+def trace_data(d, st, r):
+    q = st["requests"][r]
+    repo = st.get("repo", {}).get("path")
+    git = (lambda *x: subprocess.run(["git", "-c", "core.quotePath=false", "-C", repo, *x],
+                                     capture_output=True, text=True)) if repo else None
+    is_git = bool(git) and git("rev-parse", "--git-dir").returncode == 0
+    base = _base_ref(st, git) if is_git else None
+    warnings = []
+    if is_git and base is None:
+        warnings.append(f"base branch {st.get('repo', {}).get('base') or 'main'} not found: commits on the base "
+                        "cannot be listed (fix repo.base)")
+    log_all = _read_log(d)
+    linked = q.get("tasks") or []
+    def ids_of(e):  # hand-edited logs may hold anything here
+        v = e.get("ids")
+        return csv(v) if isinstance(v, str) else [str(x) for x in v] if isinstance(v, list) else []
+    events = [e for e in log_all
+              if e.get("req") == r or e.get("task") in linked or r in ids_of(e)]
+    # T1 is not T10, T1.5, T1a, T1-2 or T1_x
+    idre_of = lambda tid: re.compile(rf"(^|[^A-Za-z0-9_]){re.escape(tid)}(?![0-9A-Za-z_]|[.-][0-9A-Za-z])")
+    any_linked = [idre_of(x) for x in linked]
+    since = [f"--since={st['created']}"] if st.get("created") else []
+    tasks, other_work, other_seen = [], {}, set()
+    for tid in linked:
+        k = st["tasks"].get(tid, {})
+        owners = []  # every thread that ever owned it, current one last
+        for e in log_all:
+            if e.get("task") == tid:
+                sn = e.get("snap_task") if isinstance(e.get("snap_task"), dict) else {}
+                o = sn.get("owner") or e.get("owner")
+                if isinstance(o, str) and o and o not in owners:
+                    owners.append(o)
+        if k.get("owner"):
+            owners = [o for o in owners if o != k["owner"]] + [k["owner"]]
+        th = st["threads"].get(k.get("owner") or "", {})
+        item = {"task": tid, "title": k.get("title"), "status": k.get("status"), "review": k.get("review"),
+                "checks": k.get("checks"), "touches": k.get("touches") or [], "owners": owners,
+                "thread": k.get("owner"), "thread_status": th.get("status"), "session_id": th.get("session_id"),
+                "sessions": [h.get("session_id") for h in th.get("sessions", [])],
+                "session_history": th.get("sessions", []),
+                "branch": th.get("branch"), "worktree": th.get("worktree"), "commits": []}
+        if is_git:
+            idre = idre_of(tid)
+            seen = set()
+            for o in owners:
+                br0 = (st["threads"].get(o) or {}).get("branch")
+                for br in ([br0, f"origin/{br0}"] if br0 else []):
+                    if not base or git("rev-parse", "--verify", "--quiet", br).returncode != 0:
+                        continue
+                    for x in git("log", "--format=%h %ad %s", "--date=short", f"{base}..{br}").stdout.splitlines():
+                        h = x.split(" ", 1)[0]
+                        if h in seen:
+                            continue
+                        seen.add(h)
+                        subj = x.split(" ", 2)[-1]
+                        if idre.search(subj):
+                            item["commits"].append(f"(unmerged {br}) {x}")
+                        elif o == k.get("owner") and k.get("status") not in ("done", "dropped", "recalled") \
+                                and not any(rx.search(subj) for rx in any_linked) and h not in other_seen:
+                            other_seen.add(h)  # listed once, under the first branch that has it
+                            other_work.setdefault(br, []).append(x)
+            if base:
+                for x in git("log", "--format=%h %ad %s", "--date=short", "-E", *since,
+                             f"--grep=(^|[^A-Za-z0-9]){re.escape(tid)}([^0-9]|$)", base).stdout.splitlines():
+                    if x.split(" ", 1)[0] not in seen and idre.search(x.split(" ", 2)[-1]):
+                        item["commits"].append(f"({base}) {x}")
+        tasks.append(item)
+    return {"request": r, **{k: q.get(k) for k in ("text", "status", "where", "followup", "created", "updated",
+                                                   "reported_at", "closed_at", "closed_reason", "closed_note")},
+            "tasks": tasks, "other_branch_work": other_work, "events": events, "warnings": warnings}
+
+
+def cmd_trace(a):
+    d = need(find_dir())
+    st = load(d)
+    r = a.request
+    if r not in st.get("requests", {}):
+        sys.exit(f"unknown request {r}; known: {', '.join(st.get('requests', {})) or '-'}")
+    t = trace_data(d, st, r)
+    if a.json:
+        print(json.dumps(t, ensure_ascii=False, indent=2))
+        return
+    L = lambda k: lab(st, k)
+    out = [f"{r} [{L('req_' + t['status'])}] {t['text']}",
+           f"  {L('t_created')} {t['created'] or '-'}  {L('t_reported')} {t['reported_at'] or '-'}"
+           + (f"  {L('t_closed')} {t['closed_at'] or '-'} ({t['closed_reason']})" if t["status"] in REQ_END else "")]
+    if t.get("closed_note"):
+        out.append(f"  {L('t_closed')}: {t['closed_note']}")
+    if t["where"]:
+        out.append(f"  {L('t_where')}: {t['where']}")
+    if t["followup"]:
+        out.append(f"  {L('followup')}: {t['followup']}")
+    for w in t["warnings"]:
+        out.append(f"  ! {w}")
+    if not t["tasks"]:
+        out.append(f"  ({L('t_no_tasks')}: `req link {r} T<n>`)")
+    for k in t["tasks"]:
+        rv = k["review"] or {}
+        out.append(f"  - {k['task']} [{k['status']}] {k['title']}"
+                   + (f"  review {rv.get('result')} ({rv.get('reviewer') or '-'})" if rv else ""))
+        out.append(f"      {L('t_thread')} {k['thread'] or '-'} [{k['thread_status'] or '-'}]"
+                   f"  {L('t_session')} {k['session_id'] or '-'}  {L('t_branch')} {k['branch'] or '-'}"
+                   + (f"  (owners: {' -> '.join(k['owners'])})" if len(k["owners"]) > 1 else ""))
+        if len(k.get("session_history") or []) > 1:
+            out.append("      sessions: " + " -> ".join(
+                f"{h.get('session_id')}" + (f" ({h['reason']})" if h.get("reason") else "")
+                for h in k["session_history"]))
+        for c in k["commits"]:
+            out.append(f"      {c}")
+    for br, cs in t["other_branch_work"].items():
+        out.append(f"  {L('t_other')} {br}:")
+        out += [f"      {c}" for c in cs]
+    if t["events"]:
+        out.append(f"  {L('t_log')}:")
+        for e in t["events"]:
+            out.append(f"    {e.get('t', '')} {e.get('ev')} " + " ".join(
+                f"{x}={e[x]}" for x in ("req", "task", "status", "owner") if e.get(x)))
+    print("\n".join(out))
+
+
+def cmd_handover(a):
+    """Handover brief for the next session of a seat: what the seat owns, open work, where the code is."""
+    d = need(find_dir())
+    st = load(d)
+    if a.thread not in st["threads"]:
+        sys.exit(f"unknown thread {a.thread}")
+    t = st["threads"][a.thread]
+    rank = {"working": 0, "dispatched": 1, "blocked": 2, "review": 3}
+    open_tasks = dict(sorted(((tid, k) for tid, k in st["tasks"].items()
+                              if k.get("owner") == a.thread and k["status"] not in ("done", "dropped")),
+                             key=lambda x: rank.get(x[1]["status"], 9)))
+    repo = st.get("repo", {}).get("path")
+    commits, commit_note = [], ""
+    base_name = st.get("repo", {}).get("base") or "main"
+    git = lambda *x: subprocess.run(["git", "-C", repo, *x], capture_output=True, text=True)
+    if not repo or not Path(repo).is_dir() or git("rev-parse", "--git-dir").returncode != 0:
+        commit_note = " unknown (no git repository at the project path)" if t["kind"] == "rc" else \
+            " see the branch on the remote"
+    else:
+        base = _base_ref(st, git)
+        if base is None:
+            commit_note = f" unknown (base branch {base_name} not found)"
+        else:
+            seen, heads = set(), {}
+            for br in (t["branch"], f"origin/{t['branch']}"):
+                h = git("rev-parse", "--verify", "--quiet", br)
+                if h.returncode != 0:
+                    continue
+                heads[br] = h.stdout.strip()
+                r = git("log", "--format=%h %s", f"{base}..{br}")
+                if r.returncode != 0:
+                    commit_note = f" unknown (git log failed on {br})"
+                for c in r.stdout.splitlines():
+                    if c.split(" ", 1)[0] not in seen:
+                        seen.add(c.split(" ", 1)[0])
+                        commits.append(f"{c}  [{br}]")
+            if len(set(heads.values())) > 1:
+                commit_note = (f" (local and origin differ: commits tagged only [{t['branch']}] are not pushed, "
+                               f"only [origin/{t['branch']}] not fetched)")
+    hist = t.get("sessions", [])
+    closed = [h for h in hist if h.get("to")]
+    cur = next((h for h in reversed(hist) if h.get("session_id") == t.get("session_id") and not h.get("to")), None)
+    reported = bool(cur) and _after(t.get("last_status_at"), cur.get("from"))
+    # The session leaving is the one holding the seat now: SKILL step 6 runs handover before reseat. No guessing;
+    # if the seat was already switched, name the old session with --leaving.
+    if a.leaving:
+        # prefer a finished stint of that session (A -> B -> A: --leaving A means the stint that ended)
+        hit = next((h for h in reversed(hist) if h.get("session_id") == a.leaving and h.get("to")), None) or \
+            next((h for h in reversed(hist) if h.get("session_id") == a.leaving), None)
+        if not hit:
+            sys.exit(f"{a.leaving} never held the {a.thread} seat; its sessions: "
+                     f"{', '.join(h.get('session_id') or '-' for h in hist) or '-'}")
+        leaving = {**hit, "reason": a.reason or (hit.get("reason") if hit.get("to") else None)}
+    else:
+        leaving = {"session_id": t.get("session_id"), "reason": a.reason} if t.get("session_id") else {}
+        if cur and not reported and closed:
+            print(f"note: {t.get('session_id')} has not reported since it took the seat. If you already reseated "
+                  f"{a.thread}, re-run with --leaving {closed[-1].get('session_id')}; otherwise this brief is right.",
+                  file=sys.stderr)
+    lines = [
+        f"[tw:{tag(st)}] TASK lead -> {a.thread} " + (next(iter(open_tasks), "-")),
+        (f"You take over the {a.thread} seat from an earlier session ({leaving['session_id']}, left: "
+         f"{leaving.get('reason') or '-'}). Its history is not in your context; this brief is what it left."
+         if leaving.get("session_id") else
+         f"You start the {a.thread} seat (no earlier session). This brief is what the board knows."),
+        f"- Owns: {', '.join(t.get('owns', [])) or '-'}",
+        f"- Branch: {t['branch']} (base {base_name})" + (f"; worktree {t['worktree']}" if t.get("worktree") else ""),
+        f"- Last summary: {t.get('summary') or '-'}",
+        "- Unmerged commits on the branch:" + (commit_note or ("" if commits else " none")),
+    ] + [f"    {c}" for c in commits] + ["- Open tasks:" + ("" if open_tasks else " none")] + [
+        f"    {tid} [{k['status']}] {k['title']} — done when: {k.get('accept') or '-'}" for tid, k in open_tasks.items()
+    ] + [
+        "- Last STATUS of the previous session (paste the last <tw-status> block from its transcript, "
+        "list_events kinds=[\"result\"] limit 100):",
+        "    <paste here>",
+        ("First: cd into the worktree (check out the branch there), read the commits above, " if t["kind"] == "rc" else
+         "First: fetch and check out the branch in your container, read the commits above, ")
+        + "then reply ACK with what you think is done and what is next. Do not redo committed work.",
+    ]
+    print("\n".join(lines))
+
+
+def _blank_state(project, folder):
+    return {"project": project, "goal": "", "created": None, "lead": {"session_id": None},
+            "envs": {"rc": None, "cloud": None}, "repo": {"url": None, "path": str(folder), "base": "main"},
+            "threads": {}, "tasks": {}, "plan_approved": False, "questions": [], "requests": {},
+            "prefs": {"max_parallel": 0, "propose_before_start": True, "update_detail": "brief", "checkin_minutes": 10,
+                      "require_review": True}}
+
+
+def _blank_thread(st, name, kind="rc"):
+    return {"kind": kind, "focus": "", "owns": [], "session_id": None, "status": "planned",
+            "branch": f"tw/{st['project']}/{name}", "created": None, "last_seen": None, "summary": "", "sessions": []}
+
+
+def _pref_value(v):
+    if v.lower() in ("true", "false", "yes", "no", "on", "off"):
+        return v.lower() in ("true", "yes", "on")
+    return int(v) if v.isdigit() else v
+
+
+def rebuild_state(d, project=None, sessions=None, short=None):
+    """Replay log.jsonl (snapshots win over sparse old fields), then add sessions and tw/<project>/* branches."""
+    st = None
+    notes = []
+    old_short = None
+    if (d / "state.json").exists():
+        try:
+            old = json.loads((d / "state.json").read_text(encoding="utf-8"))
+            project = project or old.get("project")
+            old_short = ((old.get("prefs") or {}).get("short_name") or "").strip() or None
+        except (OSError, ValueError, AttributeError):
+            pass
+    events = _read_log(d)
+    if not project:  # the log lost its head: take the name from any later event, so nothing before it is skipped
+        project = next((n for e in events for n in [(e.get("snap_meta") or {}).get("project") if isinstance(
+            e.get("snap_meta"), dict) else None, e.get("project")] if isinstance(n, str) and n), None)
+    if events and events[0].get("ev") != "init":
+        notes.append("log.jsonl does not start with init: its earliest events may be lost; check the result")
+    if (d / "log.jsonl").exists():
+        total = sum(1 for ln in (d / "log.jsonl").read_bytes().split(b"\n") if ln.strip())
+        if total > len(events):
+            notes.append(f"skipped {total - len(events)} unreadable log line(s)")
+    bad = 0
+    for e in events:
+        try:
+            st = _replay(st, e, project, notes, d)
+        except (AttributeError, TypeError, KeyError, ValueError):
+            bad += 1
+    if bad:
+        notes.append(f"skipped {bad} log event(s) with unexpected content")
+    if st is not None and not (st.get("prefs") or {}).get("short_name"):
+        st.setdefault("prefs", {})["short_name"] = short or old_short or default_short(st["project"])
+        if not (short or old_short):
+            notes.append(f"short name not in the log: using {st['prefs']['short_name']} "
+                         "(pass --short <name> if titles and tags used another)")
+    seen = set()  # every short name the project ever had: live sessions may still carry an earlier one
+    for e in events:
+        sm = e.get("snap_meta")
+        if isinstance(sm, dict) and isinstance(sm.get("prefs"), dict) and isinstance(sm["prefs"].get("short_name"), str):
+            seen.add(sm["prefs"]["short_name"])
+        for kv in (e.get("set") or []) if isinstance(e.get("set"), list) else []:
+            if isinstance(kv, str) and kv.startswith("short_name="):
+                seen.add(kv.partition("=")[2])
+    return _finish_rebuild(d, st, project, sessions, notes, short, sorted(x for x in seen if x))
+
+
+def _replay(st, e, project, notes, d):
+        ev = e.get("ev", "")
+        if not isinstance(ev, str):
+            raise TypeError("ev")
+        if st is None:
+            name = (e.get("snap_meta") or {}).get("project") or e.get("project") or project
+            if not name:
+                return st
+            st = _blank_state(name, d.parent)
+            st["created"] = e.get("t")
+        if e.get("snap_meta"):
+            for k, v in e["snap_meta"].items():
+                if v is not None:
+                    st[k] = v
+        if ev == "lead":
+            if e.get("session"):
+                st["lead"]["session_id"] = e["session"]
+            st["envs"].update({k: v for k, v in (e.get("envs") or {}).items() if v})
+        elif ev == "prefs" and not e.get("snap_meta"):
+            for kv in e.get("set") or []:
+                k, _, v = kv.partition("=")
+                st["prefs"][k] = _pref_value(v)
+        elif ev == "plan-approved":
+            st["plan_approved"] = True
+        elif ev == "plan-reopened":
+            st["plan_approved"] = False
+        th = e.get("thread")
+        if th and (ev.startswith("thread") or ev == "worktree"):
+            t = st["threads"].setdefault(th, _blank_thread(st, th, e.get("kind") or "rc"))
+            if ev == "thread-add":
+                t["created"] = e.get("t")
+                if e.get("session"):
+                    t["session_id"] = e["session"]
+                    t["status"] = "idle"
+            if e.get("status"):
+                t["status"] = e["status"]
+            if e.get("summary") is not None and ev == "thread-set":
+                t["summary"] = e["summary"]
+            if ev == "worktree":
+                t["worktree"] = e.get("path")
+        if e.get("snap_thread") and th:
+            st["threads"][th] = e["snap_thread"]
+        if isinstance(e.get("snap_threads"), dict):
+            st["threads"] = e["snap_threads"]
+        if isinstance(e.get("snap_more_threads"), dict):  # other seats the event changed (stints closed)
+            st["threads"].update(e["snap_more_threads"])
+        tk = e.get("task")
+        if tk and ev.startswith("task"):
+            k = st["tasks"].setdefault(tk, {"title": tk, "owner": None, "deps": [], "accept": "", "status": "planned",
+                                            "notes": "", "created": e.get("t")})
+            if e.get("owner") is not None:
+                k["owner"] = e["owner"]
+            if e.get("status"):
+                k["status"] = e["status"]
+        if e.get("snap_task") and tk:
+            st["tasks"][tk] = e["snap_task"]
+        if e.get("snap_tasks"):
+            st["tasks"] = e["snap_tasks"]
+        if e.get("snap_roster_version") is not None:
+            st["roster_version"] = e["snap_roster_version"]
+        r = e.get("req")
+        if r and ev.startswith("req"):
+            q = st["requests"].setdefault(r, {"text": e.get("text") or r, "status": "open", "tasks": [],
+                                              "where": "", "followup": "", "created": e.get("t")})
+            if e.get("tasks"):
+                q["tasks"] = e["tasks"]
+            if e.get("status"):
+                q["status"] = e["status"]
+        if e.get("snap_req") and r:
+            st["requests"][r] = e["snap_req"]
+        if e.get("snap_reqs"):
+            st["requests"].update(e["snap_reqs"])
+        elif ev == "req-import":
+            missing = [x for x in e.get("ids", []) if x not in st["requests"]]
+            if missing:
+                notes.append(f"req-import of {', '.join(missing)} has no content in the log (old format): "
+                             "re-import the source file after rebuild")
+        if e.get("snap_questions") is not None:
+            st["questions"] = e["snap_questions"]
+        elif ev == "question":
+            st["questions"].append({"from": e.get("from"), "text": e.get("text"), "answered": False})
+        elif ev == "answered":
+            i = e["n"] - 1 if isinstance(e.get("n"), int) else e.get("q")  # n: 1-based; q: old 0-based events
+            if isinstance(i, int) and 0 <= i < len(st["questions"]):
+                st["questions"][i]["answered"] = True
+        if e.get("snap_plan_approved") is not None:
+            st["plan_approved"] = e["snap_plan_approved"]
+        return st
+
+
+def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=()):
+    if st is None:
+        if not project:
+            sys.exit("log.jsonl has no project name: pass --project <name>")
+        st = _blank_state(project, d.parent)
+        st.setdefault("prefs", {})["short_name"] = short or default_short(project)
+        notes.append("no usable log: rebuilt from sessions and branches only")
+    # sessions from list_sessions (lead passes the JSON): tags teamwork:<short|project>, teamwork-thread:<name>
+    labels = {f"teamwork:{st['project']}", f"teamwork:{tag(st)}", f"teamwork:{default_short(st['project'])}"}
+    labels |= {f"teamwork:{x}" for x in ([short] if short else []) + list(earlier_shorts)}
+    other = {x for sess in sessions or [] for x in (sess.get("tags") or []) if isinstance(x, str)
+             and x.startswith("teamwork:")} - labels
+    if other and not any(set(sess.get("tags") or []) & labels for sess in sessions or []):
+        notes.append(f"no listed session carries {', '.join(sorted(labels))}; other project tags seen: "
+                     f"{', '.join(sorted(other)[:5])} (pass --short <name> if one is this project)")
+    found = {}
+    roster_changed = False
+    for sess in sessions or []:
+        tags = set(sess.get("tags") or [])
+        if not tags & labels or sess.get("archived") or sess.get("status") == "archived" \
+                or "archived" in str(sess.get("session_status") or "").lower():
+            continue
+        names = sorted({x.split(":", 1)[1] for x in tags if x.startswith("teamwork-thread:")})
+        if len(names) > 1:
+            notes.append(f"session {sess.get('id') or sess.get('session_id')} has several thread tags "
+                         f"({', '.join(n[:40] for n in names)}); ignored")
+            continue
+        name = names[0] if names else None
+        if name and not re.fullmatch(NAME_RE, name):
+            notes.append(f"ignored session tag with an invalid thread name: {name[:40]!r}")
+            continue
+        if name:
+            found.setdefault(name, []).append(sess)
+    for name, ss in found.items():
+        ss.sort(key=lambda x: x.get("created_at") or "")
+        sid_of = lambda x: x.get("id") or x.get("session_id")
+        prior = st["threads"].get(name) or {}
+        held, phist = prior.get("session_id"), prior.get("sessions") or []
+        lead_sid = (st.get("lead") or {}).get("session_id")
+        # never a session the lead or another live seat holds; prefer the current holder, then a session whose
+        # stint has not ended, then the newest
+        free = [x for x in ss if sid_of(x) != lead_sid and not _session_taken(st, sid_of(x), name)]
+        ended = {h.get("session_id") for h in phist if h.get("to")} - \
+            {h.get("session_id") for h in phist if not h.get("to")}
+        if not free:
+            notes.append(f"{name}: every listed session is held by the lead or another seat; seat left as it was")
+            continue
+        cur = next((x for x in free if sid_of(x) == held), None) or \
+            next((x for x in reversed(free) if sid_of(x) not in ended), None)
+        if cur is None:  # every listed session was retired from this seat (reseat): never bring one back
+            notes.append(f"{name}: every listed session already left this seat; seat left as it was "
+                         f"(reseat {name} --session <id> if one should take it again)")
+            continue
+        kind = "cloud" if cur.get("environment_kind") == "anthropic_cloud" else "rc"
+        t = st["threads"].setdefault(name, _blank_thread(st, name, kind))
+        hist = t.setdefault("sessions", [])
+        holder_from = next((h.get("from") for h in reversed(hist)
+                            if h.get("session_id") == sid_of(cur) and not h.get("to")), None) or cur.get("created_at")
+        for x in ss:
+            sid = sid_of(x)
+            if not sid or sid == sid_of(cur) or any(h.get("session_id") == sid for h in hist):
+                continue
+            if sid == lead_sid or _session_taken(st, sid, name):
+                continue  # held by the lead or another seat now: never a past stint of this one
+            if holder_from and x.get("created_at") and not _after(holder_from, x.get("created_at")):
+                notes.append(f"{name}: session {sid} is newer than the holder and was never seated; not added "
+                             f"(reseat {name} --session {sid} if it should take over)")
+                continue
+            # an older listed session of this seat: an ended stint, never a second open one
+            hist.append({"session_id": sid, "from": x.get("created_at"), "to": holder_from or now(),
+                         "reason": "earlier session (session list)"})
+        sid = cur.get("id") or cur.get("session_id")
+        if sid and t.get("session_id") != sid:
+            for h in hist:
+                if h.get("session_id") != sid and not h.get("to"):
+                    end = cur.get("created_at") or now()
+                    h["to"] = end if not h.get("from") or _after(end, h["from"]) else now()  # never before from
+                    h["reason"] = "replaced (session list)"
+            notes.append(f"{name}: session set to {sid} from the session list")
+            t["session_id"] = sid
+            _close_archived(st, sid, name, cur.get("created_at") or now())
+            st.pop("_touched", None)
+            if not any(h.get("session_id") == sid and not h.get("to") for h in hist):
+                hist.append({"session_id": sid, "from": cur.get("created_at") or now()})  # back to an earlier one
+            if t["status"] == "planned":
+                t["status"] = "idle"
+            roster_changed = True
+    # branches tw/<project>/<thread>, local or origin
+    repo = st.get("repo", {}).get("path") or str(d.parent)
+    r = subprocess.run(["git", "-C", repo, "for-each-ref", "--format=%(refname:short)",
+                        f"refs/heads/tw/{st['project']}/", f"refs/remotes/origin/tw/{st['project']}/"],
+                       capture_output=True, text=True)
+    for ref in (r.stdout.split() if r.returncode == 0 else []):
+        rest = ref.split(f"tw/{st['project']}/", 1)[-1]
+        if "/" in rest or not re.fullmatch(NAME_RE, rest):
+            notes.append(f"ignored branch {ref}: not tw/{st['project']}/<thread>")
+            continue
+        name = rest
+        if name not in st["threads"]:
+            st["threads"][name] = _blank_thread(st, name)
+            notes.append(f"{name}: thread restored from branch {ref} (kind, owns, focus unknown)")
+            roster_changed = True
+    for name, t in st["threads"].items():
+        for k, v in _blank_thread(st, name, t.get("kind", "rc")).items():
+            t.setdefault(k, v)
+        t["title"] = title_for(st, name)
+    if roster_changed:
+        bump_roster(st)  # session ids or threads changed: every thread needs a new ROSTER
+        notes.append("the roster changed: broadcast ROSTER to every live thread")
+    return st, notes
+
+
+def _session_page(x, depth=0):
+    """The page dict inside a list_sessions result ({"ccr": {"data": [...], "has_more": ...}}, or bare), or None."""
+    if not isinstance(x, dict) or depth > 4:
+        return None
+    if isinstance(x.get("data"), list) or isinstance(x.get("sessions"), list):
+        return x
+    return next((pg for v in x.values() for pg in [_session_page(v, depth + 1)] if pg), None)
+
+
+def _load_sessions(path):
+    """Rows from a saved list_sessions result: one result, several pages (a JSON list of results, or results
+    written one after another), or a plain list of rows. Refused if the last page says more rows exist."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as e:
+        sys.exit(f"cannot read --sessions {path}: {e}")
+    docs, dec, i = [], json.JSONDecoder(), 0
+    while i < len(text):
+        while i < len(text) and text[i] in " \t\r\n,":
+            i += 1
+        if i >= len(text):
+            break
+        try:
+            doc, i = dec.raw_decode(text, i)
+        except ValueError as e:
+            sys.exit(f"cannot read --sessions {path}: {e}")
+        docs.append(doc)
+    pages, rows = [], []
+    for doc in docs:
+        for item in (doc if isinstance(doc, list) else [doc]):
+            pg = _session_page(item)
+            if pg is not None:
+                pages.append(pg)
+                rows += [x for x in (pg.get("data") if isinstance(pg.get("data"), list) else pg.get("sessions"))
+                         if isinstance(x, dict)]
+            elif isinstance(item, dict):
+                rows.append(item)  # a plain row
+    if pages and pages[-1].get("has_more"):
+        sys.exit("--sessions: the last page has has_more true; page through list_sessions to the end and save "
+                 "every page")
+    seen, out = set(), []
+    for x in rows:
+        k = x.get("id") or x.get("session_id")
+        if k and k in seen:
+            continue
+        seen.add(k)
+        out.append(x)
+    return out
+
+
+def cmd_rebuild(a):
+    d = Path(os.environ.get("TEAMWORK_DIR") or (Path.cwd() / ".teamwork")).resolve()
+    if not d.is_dir():
+        sys.exit(f"{d} does not exist")
+    sessions = _load_sessions(a.sessions) if a.sessions else []
+    st, notes = rebuild_state(d, a.project, sessions, a.short)
+    if a.sessions and not any(isinstance(x, str) and x.startswith("teamwork:")
+                              for sess in sessions for x in (sess.get("tags") or []) if isinstance(sess.get("tags"), list)):
+        notes.append(f"--sessions {a.sessions}: {len(sessions)} session(s), none with a teamwork tag; nothing taken "
+                     "from it (save the whole list_sessions result)")
+    st["updated"] = now()
+    preview = d / "state.json.rebuilt"
+    preview.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary = {"preview": str(preview), "threads": sorted(st["threads"]), "tasks": sorted(st["tasks"]),
+               "requests": sorted(st["requests"]), "notes": notes}
+    cur = d / "state.json"
+    old = None
+    if cur.exists():
+        try:
+            old = json.loads(cur.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = None
+        if not isinstance(old, dict) or not all(isinstance(old.get(k, {}), dict) and all(
+                isinstance(v, dict) for v in old.get(k, {}).values()) for k in ("threads", "tasks", "requests")):
+            old = None
+            notes.append("the current state.json is unreadable: no diff shown; --apply keeps a copy of it")
+    if old is not None:
+        summary["vs_current"] = {}
+        for kind in ("threads", "tasks", "requests"):
+            o, n = old.get(kind, {}), st[kind]
+            changed = {i: sorted(k for k in set(o[i]) | set(n[i]) if o[i].get(k) != n[i].get(k)
+                                 and k not in ("last_seen", "updated"))
+                       for i in set(o) & set(n)}
+            summary["vs_current"][kind] = {"missing": sorted(set(o) - set(n)), "extra": sorted(set(n) - set(o)),
+                                           "changed": {i: f for i, f in sorted(changed.items()) if f}}
+        summary["vs_current"]["other"] = sorted(k for k in ("lead", "prefs", "questions", "plan_approved", "envs",
+                                                             "repo", "goal") if old.get(k) != st.get(k))
+        lost = sum(len(old.get(k, {})) for k in ("threads", "tasks", "requests"))
+        kept = sum(len(st[k]) for k in ("threads", "tasks", "requests"))
+        if a.apply and lost and kept < lost / 2 and not a.force:
+            sys.exit(json.dumps({**summary, "refused": "the rebuild has far less than the current state; check the "
+                                 "notes, then re-run with --apply --force if you are sure"}, ensure_ascii=False, indent=2))
+    if a.apply:
+        if cur.exists():
+            stamp = now()[:19].replace(':', '')
+            bak, i = d / f"state.json.bak-{stamp}", 1
+            while bak.exists():  # never overwrite an earlier backup
+                i += 1
+                bak = d / f"state.json.bak-{stamp}-{i}"
+            bak.write_bytes(cur.read_bytes())
+            summary["backup"] = str(bak)
+        preview.replace(cur)
+        (d / "BOARD.md").write_text(render_board(st), encoding="utf-8")
+        log(d, {"ev": "rebuild", "notes": notes})
+        summary["applied"] = True
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
 def find_projects(root):
@@ -1151,7 +2866,7 @@ def main():
     x.add_argument("--goal")
     x.add_argument("--path", default=".")
     x.add_argument("--repo-url")
-    x.add_argument("--base", default="main")
+    x.add_argument("--base", help="base branch (default: the repo's default branch, else main)")
     x.add_argument("--force", action="store_true")
     x.add_argument("--short", help="short name, max 6 chars, used in titles/headers/tags (default: initials, e.g. TFCC)")
     x.set_defaults(f=cmd_init)
@@ -1161,11 +2876,12 @@ def main():
     x.add_argument("--rc-env")
     x.add_argument("--cloud-env")
     x.add_argument("--repo-url")
+    x.add_argument("--base", help="change the base branch (merges, leases, trace and handover diff against it)")
     x.add_argument("--force", action="store_true", help="take over from a previous lead session")
     x.set_defaults(f=cmd_lead)
 
-    x = s.add_parser("thread", help="add or update a thread")
-    x.add_argument("action", choices=["add", "set"])
+    x = s.add_parser("thread", help="add, update or reseat a thread (a seat that outlives its sessions)")
+    x.add_argument("action", choices=["add", "set", "reseat"])
     x.add_argument("name")
     x.add_argument("--kind", choices=["rc", "cloud"], default="rc")
     x.add_argument("--focus")
@@ -1174,6 +2890,9 @@ def main():
     x.add_argument("--branch")
     x.add_argument("--status")
     x.add_argument("--summary")
+    x.add_argument("--roster-sent", action="store_true",
+                   help="you sent this thread the newest ROSTER (thread name 'all': every live thread)")
+    x.add_argument("--reason", help="reseat: why the previous session left (failed, recalled, context full, ...)")
     x.add_argument("--from-status", action="store_true",
                    help="this update comes from a report the thread sent (tw-status block or message): resets stuck timer")
     x.set_defaults(f=cmd_thread)
@@ -1185,17 +2904,22 @@ def main():
     x.add_argument("--owner")
     x.add_argument("--deps")
     x.add_argument("--accept")
+    x.add_argument("--topics", help="comma list of concepts/deliverables (e.g. mechanism,request-ledger): related "
+                   "tasks must not run in parallel")
+    x.add_argument("--touches", help="comma list of paths/globs the task will change (file lease), e.g. 'web/**,api/x.py'")
     x.add_argument("--status")
     x.add_argument("--notes")
     x.add_argument("--review", choices=["pass", "fail"], help="independent review result against 'done when'")
     x.add_argument("--reviewer", help="who reviewed (not the owner): lead-subagent, review thread name, user")
     x.add_argument("--review-note")
     x.add_argument("--checks", choices=["pass", "fail", "none"], help="tests / checks result on the branch")
-    x.add_argument("--skip-review", metavar="REASON", help="mark done without review (recorded)")
+    x.add_argument("--skip-review", metavar="REASON", help="mark done without review (recorded; needs --user-said)")
+    x.add_argument("--user-said", metavar="WORDS", help="the user's words: needed for --skip-review and dropping")
     x.set_defaults(f=cmd_task)
 
     x = s.add_parser("plan", help="show, approve or reopen the plan")
     x.add_argument("action", choices=["show", "approve", "reopen"])
+    x.add_argument("--user-said", metavar="WORDS", help="approve: the user's words agreeing to the plan (recorded)")
     x.set_defaults(f=cmd_plan)
     s.add_parser(
         "ready", help="approved tasks whose deps are done, and free slots"
@@ -1206,7 +2930,8 @@ def main():
     x = s.add_parser("ask", help="record a question waiting on the user, or --answer N")
     x.add_argument("text", nargs="?", default="")
     x.add_argument("--from", dest="frm", default="lead")
-    x.add_argument("--answer", type=int)
+    x.add_argument("--answer", type=int, metavar="N", help="mark question N (as numbered on the board, from 1) "
+                   "answered; the answer text is optional")
     x.set_defaults(f=cmd_ask)
     x = s.add_parser("memory", help="append a project memory line")
     x.add_argument("text")
@@ -1225,6 +2950,7 @@ def main():
         "prefs", help="show or set coordination prefs: --set key=value ..."
     )
     x.add_argument("--set", nargs="*")
+    x.add_argument("--user-said", metavar="WORDS", help="the user's words, needed to turn require_review off")
     x.set_defaults(f=cmd_prefs)
     x = s.add_parser(
         "worker-prompt",
@@ -1233,18 +2959,45 @@ def main():
     x.add_argument("thread")
     x.set_defaults(f=cmd_worker_prompt)
     x = s.add_parser("req", help="user requests ledger: add / link / set / close / list / import")
-    x.add_argument("action", choices=["add", "link", "set", "close", "list", "import"])
+    x.add_argument("action", choices=["add", "link", "set", "close", "drop", "list", "import"])
     x.add_argument("args", nargs="*", help='add: "<text>"; link: R<n> T1 [T2]; set/close: R<n>; import: <file.md>')
     x.add_argument("--id", help="add: explicit id (default next R<n>)")
     x.add_argument("--tasks", help="comma list of task ids to link")
-    x.add_argument("--status", help="set: open | dispatched | delivered | reported (closed only via close)")
+    x.add_argument("--status", help="set: proposed | dispatched | delivered | reported (ending only via close/drop)")
     x.add_argument("--where"); x.add_argument("--followup"); x.add_argument("--text")
-    x.add_argument("--confirmed", action="store_true", help="close: the user confirmed it is done")
-    x.add_argument("--declined", action="store_true", help="close: the user said not to do it")
+    x.add_argument("--user-said", metavar="WORDS", help="close/drop, and moves that are the user's decision: "
+                   "the user's own words (recorded)")
+    x.add_argument("--confirmed", action="store_true", help="close: kept for compatibility (needs --user-said)")
+    x.add_argument("--declined", action="store_true", help="close --declined = drop (needs --user-said)")
     x.add_argument("--note")
     x.add_argument("--all", action="store_true", help="list: include closed")
     x.add_argument("--dry-run", action="store_true", help="import: show what would be imported")
     x.set_defaults(f=cmd_req)
+    x = s.add_parser("rebuild", help="rebuild state.json from log.jsonl, sessions JSON and tw/<project>/* branches")
+    x.add_argument("--sessions", help="JSON file with the list_sessions result (sessions tagged teamwork:<project>)")
+    x.add_argument("--project", help="project name, only needed when the log has none")
+    x.add_argument("--short", help="the project's short name in session tags (teamwork:<short>), if the log lost it")
+    x.add_argument("--apply", action="store_true", help="replace state.json (a timestamped backup is kept)")
+    x.add_argument("--force", action="store_true", help="apply even when the rebuild is much smaller than state.json")
+    x.set_defaults(f=cmd_rebuild)
+    x = s.add_parser("handover", help="handover brief for the next session taking a thread's seat")
+    x.add_argument("thread")
+    x.add_argument("--leaving", help="session id that is leaving (default: the one holding the seat now)")
+    x.add_argument("--reason", help="why it is leaving (failed, recalled, context full, ...)")
+    x.set_defaults(f=cmd_handover)
+    x = s.add_parser("trace", help="follow a request: its tasks, threads, sessions, commits, report times")
+    x.add_argument("request")
+    x.add_argument("--json", action="store_true")
+    x.set_defaults(f=cmd_trace)
+    x = s.add_parser("guard", help="fail if private words/paths (.teamwork/PRIVATE.md) are in commits or files")
+    x.add_argument("--repo", help="git checkout to scan (default: current folder)")
+    x.add_argument("--base", help="scan commits base..ref (default: origin/<base branch>)")
+    x.add_argument("--ref", default="HEAD")
+    x.add_argument("--private", action="append", help="extra private list file (same format), repeatable")
+    x.add_argument("--pre-push", action="store_true", help="read git pre-push stdin for the ranges to scan")
+    x.add_argument("--remote", help="pre-push: the remote's name (the hook's $1); new branches are scanned for "
+                   "every commit that remote does not have yet. Without it the whole pushed history is scanned")
+    x.set_defaults(f=cmd_guard)
     x = s.add_parser("worktree", help="create an rc thread's git worktree + branch if missing (run before create_session)")
     x.add_argument("thread")
     x.add_argument("--dry-run", action="store_true")

@@ -92,6 +92,12 @@ def main():
     ap.add_argument("--project", help="project folder to receive the SessionStart hook")
     ap.add_argument("--served", help="folder the Remote Control server serves (RC sessions start here); also gets the hook")
     ap.add_argument(
+        "--pre-push",
+        action="store_true",
+        help="also install a git pre-push hook in --project's repo that runs `tw.py guard` (blocks pushes that "
+        "contain words or paths from .teamwork/PRIVATE.md); never replaces an existing hook",
+    )
+    ap.add_argument(
         "--no-allow",
         action="store_true",
         help="skip adding allow rules to <config dir>/settings.json",
@@ -154,6 +160,42 @@ def main():
             s["autoMemoryEnabled"] = False
             print("  autoMemoryEnabled: false")
         write(ps, s, a.apply)
+
+    if a.pre_push:
+        print("4. pre-push privacy guard")
+        if not a.project:
+            print("  needs --project (the teamwork project whose .teamwork/PRIVATE.md is used)")
+        else:
+            proj = Path(a.project).expanduser().resolve()
+            import subprocess
+            r = subprocess.run(["git", "-C", str(proj), "rev-parse", "--git-common-dir"], capture_output=True, text=True)
+            hp = subprocess.run(["git", "-C", str(proj), "config", "core.hooksPath"], capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"  {proj} is not a git repository: skipped")
+            else:
+                common = (proj / r.stdout.strip()).resolve()
+                hooks = (proj / hp.stdout.strip()).resolve() if hp.stdout.strip() else common / "hooks"
+                hook = hooks / "pre-push"
+                marker = "# teamwork privacy guard (installed by install.py --pre-push)"
+                body = (f"#!/bin/sh\n{marker}\n"
+                        f'exec python3 "{DEST / "scripts" / "tw.py"}" -C "{proj}" guard --repo "$PWD" --pre-push '
+                        '--remote "$1"\n')
+                old = hook.read_text(encoding="utf-8", errors="replace") if hook.exists() else None
+                ours = old is not None and old.splitlines()[:2] == ["#!/bin/sh", marker] and len(old.splitlines()) == 3
+                if old == body:
+                    print(f"  already installed: {hook}")
+                elif old is not None and not ours:
+                    print(f"  a different pre-push hook exists: left untouched: {hook}\n"
+                          "  add this line to it yourself (git passes the remote name as $1):\n  "
+                          + body.splitlines()[-1])
+                else:
+                    if ours:
+                        print(f"  {'updating' if a.apply else 'would update'} an older teamwork hook: {hook}")
+                    print(f"  {'writing' if a.apply else 'would write'}: {hook} (covers every worktree of this repo)")
+                    if a.apply:
+                        hooks.mkdir(parents=True, exist_ok=True)
+                        hook.write_text(body, encoding="utf-8")
+                        hook.chmod(0o755)
 
     if not a.apply:
         print("\nDry run only. Re-run with --apply to make these changes.")

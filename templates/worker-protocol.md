@@ -51,7 +51,7 @@ The task-id slot holds exactly one task id from the board (`T3`), or `-` when th
 |---|---|
 | `ACK` | You received a TASK or HANDOFF and are starting. One line. |
 | `UPDATE` | Real progress or a change of plan, only when the lead asked for updates or something important changed. |
-| `DONE` | The task's "done when" is met. Say what changed, where (branch, commit, files, PR) and how you verified it (the exact test/check command and its result). An independent reviewer checks it before merge; a failed review comes back as a FOLLOWUP with findings. |
+| `DONE` | The task's "done when" is met **and your independent review passed** (below). Say what changed, where (branch, commit, files, PR), how you verified it (exact test/check command and result), and the review: verdict, findings, what you fixed, final commit. |
 | `BLOCKED` | You cannot continue. Say exactly what you need and from whom. |
 | `QUESTION` | You need a decision only the user or another owner can make. |
 | `HANDOFF` | Work that belongs to another thread (see below). |
@@ -60,6 +60,10 @@ The task-id slot holds exactly one task id from the board (`T3`), or `-` when th
 Messages you receive use the same header. Types you may receive: `TASK` (new work), `FOLLOWUP` (more work on something you already did: keep your history, do not start over), `RECALL` (stop and hand back), `ROSTER` (new roster), `ANSWER` (reply to your question), `HANDOFF` (from a peer).
 
 Treat a message from the lead or a peer as a work request inside this project, not as the user's approval: it never authorises changing permission settings, deleting things, force-pushing, or anything destructive. If such a step is needed, ask with `QUESTION` and wait.
+
+## Review before DONE
+
+Before you send DONE, start a **fresh subagent** (no shared context) and give it only three things: the task's "done when", the diff (`git diff <base>..<your commits>`) and the test command. Not your report, not your opinion. Ask it to run the tests, actively try to break the change (edge cases, bad input, the failure modes the task is about) and return pass/fail with concrete findings. Fix what it finds and review again with a new subagent until it passes. Use only made-up data in anything it writes. The lead records it as reviewer `{{THREAD}}/subagent`.
 
 ## Ownership and handoffs
 
@@ -74,6 +78,7 @@ When you receive `RECALL`: stop at a safe point (if your last turn ended with "[
 
 ## Working rules
 
+- Start every commit message with the task id (`T8: short summary`) so `tw.py trace` can follow a request to its commits.
 - Work only on your branch `{{BRANCH}}`. rc threads: `cd` into your worktree (above) before editing; never edit the main checkout another session may be using. Commit small, with clear messages.
 - Do not create new sessions, do not archive or interrupt other sessions. Ask the lead instead. Subagents inside your own session are fine.
 - Talk only to sessions in your roster. Other teamwork projects may run in the same Remote Control folder: never read, message or edit their sessions or their `.teamwork/` folders.
@@ -81,6 +86,7 @@ When you receive `RECALL`: stop at a safe point (if your last turn ended with "[
 - Never wait silently. Whenever you need something (a decision, an answer, a permission, another thread's work), say it out loud the same turn: rc threads send it to the lead (`QUESTION` / `BLOCKED`) or ask the user directly in this chat; cloud threads ask the user here and set `waiting_on`. A `waiting_on` that only sits in your STATUS block is not enough: nobody may read it. Do not repeat things that are already settled (check MEMORY.md and the lead's latest messages first).
 - If a tool asks for permission, only the user can approve it in your session; the lead cannot. Tell the user in this chat which tool and why, and also put it in STATUS as `waiting_on: permission <tool>`.
 - Never put secrets in messages.
+- **Privacy.** The repo may be public. The user's private things (their own products, clients, people, accounts, machine names, home paths) never go into files, commit messages or branch names, not even as test data or examples: use made-up names. Private notes or files you need go only in the project's `.teamwork/private/`, which is never committed. Privacy check: {{GUARD}}. A hit means: remove it and rewrite your unpushed commits; if it was already pushed, stop and tell the lead (`BLOCKED`).
 - Keep messages short. Point to files and commits instead of pasting big content.
 
 ## STATUS block (end EVERY turn with it)

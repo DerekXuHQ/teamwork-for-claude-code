@@ -14,6 +14,30 @@ import unittest
 from pathlib import Path
 
 TW = Path(__file__).resolve().parent / "tw.py"
+WALK = ["planned", "approved", "dispatched", "working", "review", "done"]
+
+
+def walk_args(run, args, state_file):
+    """Tests that only care about the end status: step a task through the legal path first (T20 enforces it).
+    run(*args) must run tw.py; the final call is left to the caller."""
+    if len(args) < 3 or args[0] != "task" or args[1] != "set" or "--status" not in args:
+        return
+    target = args[args.index("--status") + 1]
+    if target == "blocked":
+        target_path = WALK[:WALK.index("working") + 1]
+    elif target in WALK:
+        target_path = WALK[:WALK.index(target)]
+    else:
+        return
+    st = json.loads(Path(state_file).read_text(encoding="utf-8"))
+    cur = st["tasks"].get(args[2], {}).get("status")
+    if cur not in WALK:
+        return
+    for step in target_path[WALK.index(cur) + 1:]:
+        if step == "approved":
+            run("plan", "approve", "--user-said", "ok")  # tasks are approved with the plan (T20)
+        else:
+            run("task", "set", args[2], "--status", step)
 
 
 class TwCase(unittest.TestCase):
@@ -26,7 +50,9 @@ class TwCase(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def tw(self, *args, ok=True):
+    def tw(self, *args, ok=True, walk=True):
+        if walk:
+            walk_args(lambda *x: self.tw(*x, walk=False), args, self.dir / ".teamwork" / "state.json")
         r = subprocess.run([sys.executable, str(TW), *args], cwd=self.dir, env=self.env,
                            capture_output=True, text=True)
         if ok:
@@ -273,27 +299,35 @@ class Requests(TwCase):
     def test_lifecycle_and_rules(self):
         out = json.loads(self.tw("req", "add", "make the button blue").stdout)
         self.assertEqual(out["R1"]["status"], "open")
-        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "reported", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "delivered", ok=False).returncode, 0)
         self.assertNotEqual(self.tw("req", "set", "R1", "--status", "closed", ok=False).returncode, 0)
         self.tw("req", "link", "R1", "T1", "T2")
         self.assertEqual(self.req("R1")["status"], "dispatched")
         self.assertNotEqual(self.tw("req", "link", "R1", "T9", ok=False).returncode, 0)
-        self.tw("task", "set", "T1", "--status", "done", "--review", "pass", "--reviewer", "rev")
+        self.tw("task", "set", "T1", "--accept", "x", "--status", "done", "--review", "pass", "--reviewer", "rev")
         self.assertEqual(self.req("R1")["status"], "dispatched")  # T2 still open
-        r = self.tw("task", "set", "T2", "--status", "done", "--review", "pass", "--reviewer", "rev")
+        self.tw("task", "set", "T2", "--status", "working")
+        r = self.tw("task", "set", "T2", "--status", "review")  # review is enough: the result exists
         self.assertIn("request R1 delivered", r.stderr)
         self.assertEqual(self.req("R1")["status"], "delivered")
-        self.assertNotEqual(self.tw("req", "close", "R1", "--confirmed", ok=False).returncode, 0)  # not reported yet
-        self.assertNotEqual(self.tw("req", "close", "R1", ok=False).returncode, 0)  # needs a reason
+        self.assertNotEqual(self.tw("req", "close", "R1", "--user-said", "ok", ok=False).returncode, 0)  # not reported
         self.tw("req", "set", "R1", "--status", "reported", "--followup", "ask if blue is right")
+        self.assertNotEqual(self.tw("req", "close", "R1", ok=False).returncode, 0)  # needs the user's words
+        self.assertNotEqual(self.tw("req", "close", "R1", "--confirmed", ok=False).returncode, 0)
         self.assertIn("reported_at", self.req("R1"))
-        self.tw("req", "close", "R1", "--confirmed")
-        self.assertEqual(self.req("R1")["closed_reason"], "confirmed")
+        # T2 is in review with no verdict: the user would accept unchecked work
+        self.assertNotEqual(self.tw("req", "close", "R1", "--user-said", "looks good", ok=False).returncode, 0)
+        self.tw("task", "set", "T2", "--accept", "x", "--review", "pass", "--reviewer", "rev")
+        self.tw("req", "close", "R1", "--user-said", "looks good")
+        self.assertEqual(self.req("R1")["closed_reason"], "accepted")
+        self.assertEqual(self.req("R1")["user_said"][-1]["text"], "looks good")
+        self.assertNotEqual(self.tw("req", "drop", "R1", "--user-said", "x", ok=False).returncode, 0)  # ended
 
     def test_declined_closes_from_any_state(self):
         self.tw("req", "add", "maybe a dark mode")
-        self.tw("req", "close", "R1", "--declined", "--note", "user: not now")
-        self.assertEqual(self.req("R1")["status"], "closed")
+        self.assertNotEqual(self.tw("req", "drop", "R1", ok=False).returncode, 0)
+        self.tw("req", "drop", "R1", "--user-said", "not now")
+        self.assertEqual(self.req("R1")["status"], "dropped")
         self.assertEqual(json.loads(self.tw("req", "list").stdout), {})
         self.assertIn("R1", json.loads(self.tw("req", "list", "--all").stdout))
 
@@ -301,8 +335,8 @@ class Requests(TwCase):
         self.tw("req", "add", "fix login", "--tasks", "T1")
         self.tw("req", "add", "done thing")
         self.tw("req", "add", "dropped")
-        self.tw("req", "close", "R3", "--declined")
-        self.tw("task", "set", "T1", "--status", "done", "--review", "pass", "--reviewer", "rev")
+        self.tw("req", "close", "R3", "--declined", "--user-said", "skip it")
+        self.tw("task", "set", "T1", "--accept", "x", "--status", "done", "--review", "pass", "--reviewer", "rev")
         board = self.tw("board").stdout
         self.assertLess(board.index("## Your requests (not closed)"), board.index("## Overview"))
         self.assertIn("**R1** [delivered (report it!)] fix login", board)
@@ -371,13 +405,16 @@ class Review(TwCase):
         r = self.tw("task", "set", "T1", "--review", "fail", "--reviewer", "rev", "--review-note", "still red")
         self.assertIn("back to working", r.stderr)
         self.assertEqual(self.task()["status"], "working")
+        self.assertNotEqual(self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "rev",
+                                    ok=False).returncode, 0)  # a verdict only on work that is in review
+        self.tw("task", "set", "T1", "--status", "review")
         self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--checks", "fail")
         self.assertNotEqual(self.tw("task", "set", "T1", "--status", "done", ok=False).returncode, 0)
         self.tw("task", "set", "T1", "--status", "done", "--checks", "pass")
         self.assertEqual(self.task()["checks"], "pass")
 
     def test_skip_review_is_recorded(self):
-        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "docs typo")
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "docs typo", "--user-said", "ok")
         self.assertEqual(self.task()["review"]["result"], "skipped")
         self.assertEqual(self.task()["review"]["note"], "docs typo")
 
@@ -385,17 +422,1747 @@ class Review(TwCase):
         st = self.state()
         del st["prefs"]["require_review"]
         (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
-        self.tw("prefs", "--set", "require_review=false")
+        self.assertNotEqual(self.tw("prefs", "--set", "require_review=false", ok=False).returncode, 0)
+        self.tw("prefs", "--set", "require_review=false", "--user-said", "no reviews for this demo")
         self.assertIs(self.state()["prefs"]["require_review"], False)
         self.tw("prefs", "--set", "require_review=true")
         self.assertIs(self.state()["prefs"]["require_review"], True)
 
-    def test_old_project_without_pref_not_gated(self):
+    def test_project_without_pref_is_gated(self):
         st = self.state()
-        del st["prefs"]["require_review"]
+        del st["prefs"]["require_review"]  # an old state or a rebuild without the key: gated (fail closed)
         (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
-        self.tw("task", "set", "T1", "--status", "done")
+        self.assertNotEqual(self.tw("task", "set", "T1", "--status", "done", ok=False).returncode, 0)
 
+
+class Guard(unittest.TestCase):
+    """T16: private words/paths never leave the machine in commits."""
+
+    SECRET = "Zorblax"  # stands in for a private product name; deliberately made up
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.remote = root / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.remote)], check=True)
+        self.proj = root / "proj"
+        self.proj.mkdir()
+        self.git("init", "-q", "-b", "main")
+        (self.proj / ".gitignore").write_text(".teamwork/\n")
+        (self.proj / "a.txt").write_text("hello\n")
+        self.commit("init")
+        self.git("remote", "add", "origin", str(self.remote))
+        self.git("push", "-q", "origin", "main")
+        self.tw("init", "proj")
+        (self.proj / ".teamwork" / "PRIVATE.md").write_text(f"# private\n- {self.SECRET.lower()}\npath: secrets/*\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def git(self, *x):
+        return subprocess.run(["git", "-C", str(self.proj), *x], check=True, capture_output=True, text=True)
+
+    def commit(self, msg):
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", msg)
+
+    def tw(self, *args):
+        return subprocess.run([sys.executable, str(TW), "-C", str(self.proj), *args], cwd=self.proj,
+                              capture_output=True, text=True)
+
+    def test_init_ignores_private_files(self):
+        ig = (self.proj / ".teamwork" / ".gitignore").read_text()
+        self.assertIn("PRIVATE.md", ig)
+        self.assertIn("private/", ig)
+        self.assertTrue((self.proj / ".teamwork" / "private").is_dir())
+
+    def test_clean_passes(self):
+        (self.proj / "b.txt").write_text("nothing to see\n")
+        self.commit("b")
+        r = self.tw("guard")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("guard: ok", r.stdout)
+
+    def test_hit_in_worktree_and_history_masked(self):
+        (self.proj / "b.txt").write_text(f"look at {self.SECRET}\n")
+        r = self.tw("guard")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("worktree b.txt", r.stdout)
+        self.assertNotIn(self.SECRET.lower(), r.stdout.lower())  # the word itself is never printed
+        self.commit("add b")
+        self.assertIn("history", self.tw("guard").stdout)
+
+    def test_hit_only_in_history(self):
+        (self.proj / "b.txt").write_text(f"{self.SECRET} notes\n")
+        self.commit("oops")
+        (self.proj / "b.txt").write_text("cleaned\n")
+        self.commit("clean up")
+        r = self.tw("guard")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("history", r.stdout)
+        self.assertNotIn("worktree b.txt", r.stdout)
+
+    def test_private_path(self):
+        (self.proj / "secrets").mkdir()
+        (self.proj / "secrets" / "k.txt").write_text("x\n")
+        r = self.tw("guard")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("*****/k.txt", r.stdout)  # the rule's own folder name is private too
+        self.assertNotIn("secrets", r.stdout)
+
+    def guard(self, *a):
+        return self.tw("guard", *a)
+
+    def test_round5_star_globs_keep_their_stars(self):
+        pm = self.proj / ".teamwork" / "PRIVATE.md"
+        pm.write_text("- quixbar\npath: *.pem\n- path: notes_*\n- path: `*.key`\n**path: dump_*.md**\n")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tw", TW)
+        tw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tw)
+        _, paths, _ = tw.load_private(self.proj / ".teamwork")
+        self.assertEqual(paths, ["*.pem", "notes_*", "*.key", "dump_*.md"])
+        for name in ["server.pem", "notes_client.md", "deep/id.key", "dump_x.md"]:
+            f = self.proj / name
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x\n")
+            self.commit("add " + name)
+            r = self.guard("--base", "origin/main")
+            self.assertEqual(r.returncode, 1, name + ": " + r.stdout + r.stderr)
+            self.git("reset", "-q", "--hard", "origin/main")
+            self.git("clean", "-qfd")
+        self.assertEqual(self.guard("--base", "origin/main").returncode, 0)
+
+    def test_review_binary_and_encodings(self):
+        (self.proj / "l1.txt").write_bytes(("caf\xe9 " + self.SECRET).encode("latin-1"))
+        self.assertEqual(self.guard().returncode, 1)
+        (self.proj / "l1.txt").unlink()
+        (self.proj / "u16.txt").write_bytes(("x " + self.SECRET).encode("utf-16"))
+        self.assertEqual(self.guard().returncode, 1)
+        (self.proj / "u16.txt").unlink()
+        (self.proj / "img.png").write_bytes(b"\x89PNG\x00\x01" + self.SECRET.encode() + b"\x00")
+        self.commit("bin")
+        (self.proj / "img.png").unlink()
+        self.commit("rm bin")
+        r = self.guard()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("history", r.stdout)
+
+    def test_review_gitattributes_nodiff(self):
+        (self.proj / ".gitattributes").write_text("*.dat -diff\n")
+        (self.proj / "x.dat").write_text(self.SECRET + "\n")
+        self.commit("dat")
+        (self.proj / "x.dat").unlink()
+        self.commit("rm dat")
+        self.assertEqual(self.guard().returncode, 1)
+
+    def test_review_names_and_chinese(self):
+        (self.proj / ".teamwork" / "PRIVATE.md").write_text("- 蓝鲸星\n1. Quixbar\n**Snorf**  # product\n")
+        for name, body in (("文件.txt", "Quixbar inside"), ("蓝鲸星.txt", "ok"), ("notes-snorf.md", "ok")):
+            (self.proj / name).write_text(body)
+            r = self.guard()
+            self.assertEqual(r.returncode, 1, name)
+            for w in ("蓝鲸星", "quixbar", "snorf"):
+                self.assertNotIn(w, r.stdout.lower())  # nothing printed in clear, file names included
+            (self.proj / name).unlink()
+        self.assertEqual(self.guard().returncode, 0)
+
+    def test_review_ref_not_checked_out(self):
+        self.git("checkout", "-q", "-b", "feat")
+        (self.proj / "f.txt").write_text(self.SECRET)
+        self.commit("feat")
+        self.git("checkout", "-q", "main")
+        r = self.guard("--base", "main", "--ref", "feat")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("tree feat", r.stdout)
+
+    def test_review_missing_list_fails_closed(self):
+        (self.proj / ".teamwork" / "PRIVATE.md").unlink()
+        r = self.guard()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no private list", r.stdout + r.stderr)
+        (self.proj / ".teamwork" / "PRIVATE.md").write_text("# nothing private\n")
+        self.assertEqual(self.guard().returncode, 0)
+
+    def test_review_branch_name(self):
+        r = subprocess.run([sys.executable, str(TW), "-C", str(self.proj), "guard", "--pre-push"], cwd=self.proj,
+                           input=f"refs/heads/x {'a' * 40} refs/heads/{self.SECRET.lower()}-wip {'0' * 40}\n",
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("ref name", r.stdout)
+
+    def test_pre_push_hook_blocks(self):
+        inst = Path(__file__).resolve().parent / "install.py"
+        cfg = Path(self._tmp.name) / "cfg"
+        r = subprocess.run([sys.executable, str(inst), "--apply", "--link", "--no-allow", "--config-dir", str(cfg),
+                            "--project", str(self.proj), "--pre-push"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        hook = self.proj / ".git" / "hooks" / "pre-push"
+        self.assertTrue(hook.exists())
+        self.assertIn('--remote "$1"', hook.read_text())
+        lines = hook.read_text().splitlines()  # an older teamwork hook (no --remote) is upgraded in place
+        hook.write_text("\n".join(lines[:2] + [lines[2].replace(' --remote "$1"', "")]) + "\n")
+        subprocess.run([sys.executable, str(inst), "--apply", "--link", "--no-allow", "--config-dir", str(cfg),
+                        "--project", str(self.proj), "--pre-push"], capture_output=True, text=True, check=True)
+        self.assertIn('--remote "$1"', hook.read_text())
+        (self.proj / "c.txt").write_text(f"{self.SECRET}\n")
+        self.commit("c")
+        push = subprocess.run(["git", "-C", str(self.proj), "push", "origin", "main"], capture_output=True, text=True)
+        self.assertNotEqual(push.returncode, 0)
+        self.assertIn("guard: FAILED", push.stdout + push.stderr)
+        self.git("reset", "-q", "--hard", "HEAD~1")
+        (self.proj / "d.txt").write_text("fine\n")
+        self.commit("d")
+        push = subprocess.run(["git", "-C", str(self.proj), "push", "origin", "main"], capture_output=True, text=True)
+        self.assertEqual(push.returncode, 0, push.stdout + push.stderr)
+
+
+    def pre_push(self, stdin, remote="origin"):
+        return subprocess.run([sys.executable, str(TW), "-C", str(self.proj), "guard", "--pre-push",
+                               *(["--remote", remote] if remote else [])],
+                              cwd=self.proj, input=stdin, capture_output=True, text=True)
+
+    def test_round2_first_push_to_another_remote(self):
+        (self.proj / "b.txt").write_text(f"{self.SECRET}\n")
+        self.commit("old leak, already on origin")
+        self.git("push", "-q", "origin", "main")
+        (self.proj / "b.txt").write_text("clean\n")
+        self.commit("clean")
+        self.git("push", "-q", "origin", "main")
+        other = Path(self._tmp.name) / "mirror.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(other)], check=True)
+        self.git("remote", "add", "mirror", str(other))
+        head = self.git("rev-parse", "HEAD").stdout.strip()
+        line = f"refs/heads/main {head} refs/heads/main {'0' * 40}\n"
+        self.assertEqual(self.pre_push(line, "mirror").returncode, 1)  # mirror never had the old commit
+        self.assertEqual(self.pre_push(line, None).returncode, 1)  # remote unknown: whole history
+        self.assertEqual(self.pre_push(line, "origin").returncode, 0)  # origin already has all of it
+
+    def test_round2_encodings_everywhere(self):
+        (self.proj / ".teamwork" / "PRIVATE.md").write_text("蓝鲸星\nQuixbär\n")
+        for name, data in (("gb.txt", "注意 蓝鲸星".encode("gb18030")), ("l1.txt", "x Quixbär".encode("latin-1")),
+                           ("u16.txt", "x 蓝鲸星".encode("utf-16-le")), ("up.txt", "QUIXBÄR".encode("utf-8"))):
+            (self.proj / name).write_bytes(data)
+            self.commit(name)
+            self.assertEqual(self.guard().returncode, 1, f"worktree/tree {name}")
+            (self.proj / name).unlink()
+            self.commit("rm " + name)
+            r = self.guard()
+            self.assertEqual(r.returncode, 1, f"history {name}")
+            self.assertIn("history", r.stdout)
+            self.git("reset", "-q", "--hard", "origin/main")
+
+    def test_round2_list_formats(self):
+        (self.proj / ".teamwork" / "PRIVATE.md").write_text(
+            "| word | why |\n|---|---|\n| Zeta9 | client |\n"
+            "- [ ] Snorf\n- [x] Blorpo\nQuixbar, Flimwax\nFlurbo - our client\nGronky: internal\n")
+        terms = None
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tw", TW)
+        tw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tw)
+        terms, _, _ = tw.load_private(self.proj / ".teamwork")
+        for w in ("Zeta9", "Snorf", "Blorpo", "Quixbar", "Flimwax", "Flurbo", "Gronky"):
+            self.assertIn(w, terms)
+        self.assertNotIn("word", terms)  # table header skipped
+        self.assertTrue(tw._path_rule_hit("secrets/k.txt", "/Secrets/"))
+        self.assertTrue(tw._path_rule_hit("docs/Notes.md", "notes.md"))
+        self.assertTrue(tw._path_rule_hit("a/b/key.pem", "**/*.pem"))
+        self.assertFalse(tw._path_rule_hit("docs/secrets/x", "/secrets/"))
+
+    def test_round2_author_tag_and_branch_names(self):
+        (self.proj / "e.txt").write_text("e\n")
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", f"user.email={self.SECRET.lower()}@example.invalid",
+                 "commit", "-qm", "clean message")
+        r = self.guard()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.git("reset", "-q", "--hard", "origin/main")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "tag", "-a", "v1", "-m",
+                 f"release for {self.SECRET}")
+        head = self.git("rev-parse", "HEAD").stdout.strip()
+        tag = self.git("rev-parse", "v1").stdout.strip()
+        self.assertEqual(self.pre_push(f"refs/tags/v1 {tag} refs/tags/v1 {'0' * 40}\n").returncode, 1)
+        self.git("checkout", "-q", "-b", f"{self.SECRET.lower()}-wip")
+        r = self.guard()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("ref name", r.stdout)
+        self.assertNotIn(self.SECRET.lower(), r.stdout.lower())
+
+    def test_round2_private_folder_name_masked(self):
+        (self.proj / ".teamwork" / "private" / "Quixbar-notes.txt").write_text("x")
+        self.git("add", "-f", ".teamwork/private/Quixbar-notes.txt")  # someone force-added it
+        r = self.guard()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("private/*****", r.stdout)
+        self.assertNotIn("quixbar", r.stdout.lower())
+
+
+    def test_round3_stale_remote_url(self):
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty",
+                 "-m", f"fix for {self.SECRET} customer")
+        self.git("push", "-q", "origin", "main")  # on the old (private) remote
+        public = Path(self._tmp.name) / "public.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(public)], check=True)
+        self.git("remote", "set-url", "origin", str(public))  # refs/remotes/origin/* are now stale
+        head = self.git("rev-parse", "HEAD").stdout.strip()
+        r = self.pre_push(f"refs/heads/main {head} refs/heads/main {'0' * 40}\n", "origin")
+        self.assertEqual(r.returncode, 1, r.stdout)
+
+    def test_round4_history_zip_pushurl_list_encoding(self):
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("word/document.xml", f"<w>hello {self.SECRET} quixbar</w>" * 50)
+        (self.proj / "d.docx").write_bytes(buf.getvalue())
+        self.commit("add doc")
+        self.git("rm", "-q", "d.docx")
+        self.commit("drop doc")
+        r = self.tw("guard")
+        self.assertEqual(r.returncode, 1, r.stdout)  # only in history, compressed
+        self.git("reset", "-q", "--hard", "origin/main")
+        # pushurl differs from the fetch URL: compare against what the push server has
+        (self.proj / "b.txt").write_text(f"{self.SECRET}\n")
+        self.commit("leak")
+        (self.proj / "b.txt").write_text("clean\n")
+        self.commit("clean")
+        self.git("push", "-q", "origin", "main")
+        public = Path(self._tmp.name) / "public2.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(public)], check=True)
+        self.git("config", "remote.origin.pushurl", str(public))
+        head = self.git("rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(self.pre_push(f"refs/heads/main {head} refs/heads/main {'0' * 40}\n").returncode, 1)
+        self.git("config", "--unset", "remote.origin.pushurl")
+        # a list saved with a BOM or as UTF-16 still works; undecodable fails closed
+        self.git("reset", "-q", "--hard", "HEAD~2")
+        (self.proj / "c.txt").write_text(f"{self.SECRET}\n")
+        priv = self.proj / ".teamwork" / "PRIVATE.md"
+        for data in (b"\xef\xbb\xbf" + self.SECRET.encode(), self.SECRET.encode("utf-16"), b"\xff\xfa\x80"):
+            priv.write_bytes(data)
+            r = self.tw("guard")
+            self.assertEqual(r.returncode, 1, data[:4])
+            self.assertIn("UTF-8" if data[:2] == b"\xff\xfa" else "FAILED", r.stdout + r.stderr)
+
+    def test_round3_tags_on_blobs_and_nested(self):
+        blob = subprocess.run(["git", "-C", str(self.proj), "hash-object", "-w", "--stdin"],
+                              input=f"{self.SECRET} plan", capture_output=True, text=True).stdout.strip()
+        self.git("tag", "lw", blob)
+        r = self.pre_push(f"refs/tags/lw {blob} refs/tags/lw {'0' * 40}\n")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        g = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        self.git(*g, "tag", "-a", "inner", "-m", f"{self.SECRET} inner")
+        self.git(*g, "tag", "-a", "outer", "inner", "-m", "clean")
+        outer = self.git("rev-parse", "outer").stdout.strip()
+        self.git("tag", "-d", "inner")
+        self.assertEqual(self.pre_push(f"refs/tags/outer {outer} refs/tags/outer {'0' * 40}\n").returncode, 1)
+
+    def test_round3_parser_nfd_replace_zip_symlink(self):
+        import importlib.util, unicodedata, zipfile, io, os as _os
+        spec = importlib.util.spec_from_file_location("tw", TW)
+        tw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tw)
+        (self.proj / ".teamwork" / "PRIVATE.md").write_text(
+            "Name: Zorblax\n> Quixbar\n* [x] ~~Snorfle~~\n<!-- Blorpo -->\nFlimwax/Gronky\nCrème\n")
+        terms, _, _ = tw.load_private(self.proj / ".teamwork")
+        for w in ("Zorblax", "Quixbar", "Snorfle", "Blorpo", "Flimwax", "Gronky"):
+            self.assertIn(w, terms)
+        (self.proj / "n.txt").write_text(unicodedata.normalize("NFD", "la Crème"))
+        self.assertEqual(self.guard().returncode, 1)
+        (self.proj / "n.txt").unlink()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("word/document.xml", "<w>Zorblax roadmap</w>" * 50)
+        (self.proj / "r.docx").write_bytes(buf.getvalue())
+        self.assertEqual(self.guard().returncode, 1)
+        (self.proj / "r.docx").unlink()
+        _os.symlink("/nonexistent/Quixbar-dir", self.proj / "ln")
+        self.assertEqual(self.guard().returncode, 1)
+        (self.proj / "ln").unlink()
+        self.assertEqual(self.guard().returncode, 0)
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty",
+                 "-m", "Zorblax secret msg")
+        bad = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--amend",
+                 "--allow-empty", "-m", "clean copy")
+        good = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("reset", "-q", "--hard", bad)
+        self.git("replace", bad, good)  # local view says clean; the server would get the original
+        self.assertEqual(self.guard().returncode, 1)
+
+
+class Leases(TwCase):
+    """T11: a ready task that overlaps an active task's paths is held back."""
+
+    def setUp(self):
+        super().setUp()
+        for t in ("ui", "api"):
+            self.tw("thread", "add", t)
+        self.tw("plan", "approve", "--user-said", "ok")
+
+    def ready(self):
+        return json.loads(self.tw("ready").stdout)
+
+    def test_declared_overlap_blocks(self):
+        self.tw("task", "add", "T1", "--owner", "ui", "--touches", "web/**")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "web/login.js,api/x.py")
+        self.tw("task", "add", "T3", "--owner", "api", "--touches", "api/**")
+        self.tw("task", "set", "T1", "--status", "working")
+        r = self.ready()
+        self.assertEqual(r["blocked_by_lease"]["T2"][0]["with"], "T1")
+        self.assertEqual(r["blocked_by_lease"]["T2"][0]["paths"], ["web/**"])
+        self.assertIn("T3", r["ready"])
+        self.assertNotIn("T2", r["ready"])
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+        self.assertIn("T2", self.ready()["ready"])
+
+    def test_same_owner_not_blocked_and_no_touches_listed(self):
+        self.tw("task", "add", "T1", "--owner", "ui", "--touches", "web/**")
+        self.tw("task", "add", "T2", "--owner", "ui", "--touches", "web/a.js")
+        self.tw("task", "add", "T3", "--owner", "api")
+        self.tw("task", "set", "T1", "--status", "working")
+        r = self.ready()
+        self.assertEqual(r["blocked_by_lease"], {})
+        self.assertEqual(r["no_touches"], ["T3"])
+
+    def test_overlap_rules(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tw", TW)
+        tw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tw)
+        self.assertTrue(tw.paths_overlap("web/", "web/sub/a.js"))
+        self.assertTrue(tw.paths_overlap("web/*.js", "web/**"))
+        self.assertTrue(tw.paths_overlap("./api/x.py", "api/x.py"))
+        self.assertFalse(tw.paths_overlap("web/**", "api/x.py"))
+        self.assertFalse(tw.paths_overlap("docs/a.md", "docs/b.md"))
+        # review findings
+        self.assertTrue(tw.paths_overlap("web", "web/app.js"))
+        self.assertTrue(tw.paths_overlap("web", "web/"))
+        self.assertTrue(tw.paths_overlap("web/**", "web"))
+        self.assertFalse(tw.paths_overlap(".github/x", "github/x"))
+        self.assertFalse(tw.paths_overlap("webapp/x", "web"))
+        # round 2
+        self.assertTrue(tw.paths_overlap("**/config.py", "config.py"))
+        self.assertTrue(tw.paths_overlap("web/**/a.js", "web/a.js"))
+        self.assertTrue(tw.paths_overlap(".", "api/x.py"))
+        self.assertTrue(tw.paths_overlap("web/./a/../b.js", "web/b.js"))
+        self.assertTrue(tw.paths_overlap("/web/", "web/b.js"))
+        self.assertFalse(tw.paths_overlap("Web/a.js", "web/b.js"))
+        # round 3: glob against glob
+        for a, b in (("**/*.py", "api/"), ("**/*.py", "api"), ("api/**/*.py", "**/x.py"), ("*.py", "web/*"),
+                     ("*/config.py", "api/*.py"), ("docs/*.md", "*/README.md"), ("web/{a,b}.py", "web/a.py"),
+                     ("Web/App.py", "web/app.py"), ("app/[id]/page.js", "app/[id]/")):
+            self.assertTrue(tw.paths_overlap(a, b), (a, b))
+        self.assertTrue(tw.paths_overlap("web/*", "web/sub/a.js"))  # 'web/*' may be a folder
+        self.assertTrue(tw.paths_overlap("{a,b}" * 20 + "/x", "b" * 20 + "/x"))  # too many braces: widened
+        self.assertFalse(tw.paths_overlap("web/*.css", "web/a.py"))
+        self.assertNotEqual(self.tw("task", "add", "T9", "--touches", "../x", ok=False).returncode, 0)
+
+    def test_round8_brace_widening(self):
+        import importlib.util
+        import time
+        spec = importlib.util.spec_from_file_location("tw", TW)
+        tw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tw)
+        many = "src/{" + ",".join(f"a{i}" for i in range(70)) + ",deep/q}.py"
+        self.assertTrue(tw.paths_overlap(many, "src/deep/q.py"))  # widened across folders
+        self.assertTrue(tw.paths_overlap("x/{z,{" + ",".join(f"a{i}" for i in range(70)) + "}}", "x/a5"))
+        t0 = time.time()
+        self.assertTrue(tw.paths_overlap("{a,b}" * 24 + "/x", "a" * 24 + "/x"))
+        self.assertLess(time.time() - t0, 2)
+
+    def test_two_ready_tasks_do_not_collide(self):
+        self.tw("task", "add", "T1", "--owner", "ui", "--touches", "web/app.js")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "web/**")
+        r = self.ready()
+        self.assertEqual(r["ready"], ["T1"])
+        self.assertEqual(r["blocked_by_lease"]["T2"][0]["with"], "T1")
+
+
+class LeasesGit(unittest.TestCase):
+    """T11: the real diff of an active branch counts, even when undeclared."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.proj = Path(self._tmp.name) / "proj"
+        self.proj.mkdir()
+        self.git("init", "-q", "-b", "main")
+        (self.proj / "README").write_text("r\n")
+        (self.proj / ".gitignore").write_text(".teamwork/\n")
+        self.commit("init")
+        self.tw("init", "proj")
+        self.tw("thread", "add", "ui")
+        self.tw("thread", "add", "api")
+        self.tw("plan", "approve", "--user-said", "ok")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def git(self, *x):
+        return subprocess.run(["git", "-C", str(self.proj), *x], check=True, capture_output=True, text=True)
+
+    def commit(self, msg):
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", msg)
+
+    def tw(self, *args, walk=True, ok=True):
+        if walk and ok:
+            walk_args(lambda *x: self.tw(*x, walk=False), args, self.proj / ".teamwork" / "state.json")
+        r = subprocess.run([sys.executable, str(TW), "-C", str(self.proj), *args], cwd=self.proj,
+                           capture_output=True, text=True)
+        if ok:
+            self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    def test_branch_diff_blocks(self):
+        self.tw("task", "add", "T1", "--owner", "ui")  # declared nothing
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared/config.py")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "shared").mkdir()
+        (self.proj / "shared" / "config.py").write_text("x = 1\n")
+        self.commit("ui touches shared")
+        self.git("checkout", "-q", "main")
+        r = json.loads(self.tw("ready").stdout)
+        self.assertEqual(r["blocked_by_lease"]["T2"][0]["paths"], ["shared/config.py"])
+
+
+class LeasesGitReview(LeasesGit):
+    """T11 review findings: base only on origin / wrong base, done-but-unmerged keeps its lease."""
+
+    test_branch_diff_blocks = None
+
+    def ui_branch_changes_shared(self):
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "shared").mkdir()
+        (self.proj / "shared" / "config.py").write_text("x = 1\n")
+        self.commit("T1: ui touches shared")
+        self.git("checkout", "-q", "main")
+
+    def test_wrong_base_warns(self):
+        st = json.loads((self.proj / ".teamwork" / "state.json").read_text())
+        st["repo"]["base"] = "master"
+        (self.proj / ".teamwork" / "state.json").write_text(json.dumps(st))
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.ui_branch_changes_shared()
+        r = json.loads(self.tw("ready").stdout)
+        self.assertTrue(any("base branch master not found" in w for w in r["lease_warnings"]))
+
+    def test_done_but_unmerged_still_holds(self):
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared")  # bare folder
+        self.ui_branch_changes_shared()
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+        r = json.loads(self.tw("ready").stdout)
+        self.assertEqual(r["blocked_by_lease"]["T2"][0]["status"], "done")
+        self.git("merge", "-q", "tw/proj/ui")
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["ready"])
+
+
+    def test_round8_quoted_file_names(self):
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "dir/")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "dir").mkdir()
+        for n in ('a"b.py', "c\td.py", "e\\f.py"):
+            (self.proj / "dir" / n).write_text("x\n")
+        self.commit("T1: odd names")
+        self.git("checkout", "-q", "main")
+        r = json.loads(self.tw("ready").stdout)
+        self.assertEqual(sorted(r["blocked_by_lease"]["T2"][0]["paths"]),
+                         sorted(["dir/a\"b.py", "dir/c\td.py", "dir/e\\f.py"]))
+
+    def test_round10_brace_cli_and_subfolder_project(self):
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "web/{zorblax,quixbar}.js, api/x.py")
+        st = json.loads((self.proj / ".teamwork" / "state.json").read_text())
+        self.assertEqual(st["tasks"]["T2"]["touches"], ["web/{zorblax,quixbar}.js", "api/x.py"])
+        self.assertNotEqual(self.tw("task", "add", "T9", "--touches", "{a,../x}", ok=False).returncode, 0)
+        self.tw("task", "set", "T1", "--status", "working")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "web").mkdir()
+        (self.proj / "web" / "quixbar.js").write_text("x\n")
+        self.commit("T1: quixbar")
+        self.git("checkout", "-q", "main")
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["blocked_by_lease"])
+        # a project in a subfolder of the repo: --touches are relative to the project folder
+        sub = self.proj / "pkg"
+        sub.mkdir()
+        run = lambda *x: subprocess.run([sys.executable, str(TW), "-C", str(sub), *x], cwd=sub,
+                                        capture_output=True, text=True)
+        self.assertEqual(run("init", "pkg").returncode, 0)
+        for x in (("thread", "add", "ui"), ("thread", "add", "api"), ("plan", "approve", "--user-said", "ok"),
+                  ("task", "add", "T1", "--owner", "ui"), ("task", "add", "T2", "--owner", "api",
+                                                            "--touches", "src/zorblax.ts")):
+            self.assertEqual(run(*x).returncode, 0, x)
+        for x in ("approved", "dispatched"):
+            run("task", "set", "T1", "--status", x)
+        self.git("checkout", "-q", "-b", "tw/pkg/ui")
+        (sub / "src").mkdir()
+        (sub / "src" / "zorblax.ts").write_text("x\n")
+        self.commit("T1: zorblax")
+        self.git("checkout", "-q", "main")
+        r = json.loads(run("ready").stdout)
+        self.assertEqual(r["blocked_by_lease"]["T2"][0]["paths"], ["src/zorblax.ts"])
+
+    def test_round11_earlier_task_squash_not_held_by_later_ones(self):
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared/config.py")
+        self.tw("task", "add", "T4", "--owner", "ui", "--touches", "zz/q.js")
+        self.ui_branch_changes_shared()
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+        self.git("merge", "-q", "--squash", "tw/proj/ui")
+        self.commit("T1: squash")
+        (self.proj / "shared" / "config.py").write_text("x = 9\n")
+        self.commit("T5: later edit on main")
+        self.tw("task", "set", "T4", "--status", "working")  # the same branch goes on with T4
+        r = json.loads(self.tw("ready").stdout)
+        self.assertNotIn("T2", r["blocked_by_lease"], r)
+        self.assertNotEqual(self.tw("task", "add", "T9", "--touches", "web/{a,b.js, api/x.py", ok=False).returncode, 0)
+
+    def test_round12_stale_origin_copy_after_squash(self):
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared/config.py")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "shared").mkdir()
+        (self.proj / "shared" / "config.py").write_text("x = 0\n")
+        self.commit("T1: wip")
+        self.git("update-ref", "refs/remotes/origin/tw/proj/ui", "HEAD")  # pushed WIP, now behind
+        (self.proj / "shared" / "config.py").write_text("x = 1\n")
+        self.commit("T1: final")
+        self.git("checkout", "-q", "main")
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+        self.git("merge", "-q", "--squash", "tw/proj/ui")
+        self.commit("T1: squash")
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["ready"])
+        self.assertNotEqual(self.tw("task", "add", "T9", "--touches", "web/}a,b{.js, api/x.py", ok=False).returncode, 0)
+
+    def test_round13_diverged_stale_copy_and_deleted_branch(self):
+        def commit_at(msg, when):
+            self.git("add", "-A")
+            subprocess.run(["git", "-C", str(self.proj), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "commit", "-qm", msg], check=True, capture_output=True,
+                           env={**os.environ, "GIT_COMMITTER_DATE": when, "GIT_AUTHOR_DATE": when})
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared/config.py")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "shared").mkdir()
+        (self.proj / "shared" / "config.py").write_text("x = 0\n")
+        commit_at("T1: wip", "2030-01-01T10:00:00Z")
+        self.git("update-ref", "refs/remotes/origin/tw/proj/ui", "HEAD")  # pushed WIP
+        (self.proj / "shared" / "config.py").write_text("x = 1\n")
+        self.git("add", "-A")
+        subprocess.run(["git", "-C", str(self.proj), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "commit", "-q", "--amend", "-m", "T1: final"], check=True, capture_output=True,
+                       env={**os.environ, "GIT_COMMITTER_DATE": "2030-01-01T11:00:00Z"})  # diverged from origin
+        self.git("checkout", "-q", "main")
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+        self.git("merge", "-q", "--squash", "tw/proj/ui")
+        commit_at("T1: zorblax (#12)", "2030-01-01T12:00:00Z")
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["ready"])
+        self.git("branch", "-q", "-D", "tw/proj/ui")  # the host deleted the branch: only the stale origin copy left
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["blocked_by_lease"])  # unsure: held ...
+        self.git("update-ref", "-d", "refs/remotes/origin/tw/proj/ui")  # ... until `git fetch --prune`
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["ready"])
+
+    def test_round14_unpushed_work_after_older_copy_squashed(self):
+        def commit_at(msg, when):
+            self.git("add", "-A")
+            subprocess.run(["git", "-C", str(self.proj), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "commit", "-qm", msg], check=True, capture_output=True,
+                           env={**os.environ, "GIT_COMMITTER_DATE": when, "GIT_AUTHOR_DATE": when})
+        for fix_id in ("T4", "T1"):  # a later task's work, or the done task's own review fix, not pushed
+            self.tearDown()
+            self.setUp()
+            self.tw("task", "add", "T1", "--owner", "ui")
+            self.tw("task", "add", "T4", "--owner", "ui", "--touches", "zz/q.js")
+            self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared/zorb.py")
+            self.git("checkout", "-q", "-b", "tw/proj/ui")
+            (self.proj / "shared").mkdir()
+            (self.proj / "shared" / "zorb.py").write_text("a = 1\n")
+            commit_at("T1: zorblax", "2030-01-01T10:00:00Z")
+            self.git("update-ref", "refs/remotes/origin/tw/proj/ui", "HEAD")  # pushed
+            pushed = self.git("rev-parse", "HEAD").stdout.strip()
+            (self.proj / "shared" / "zorb.py").write_text("a = 2\n")
+            commit_at(f"{fix_id}: more on zorb", "2030-01-01T11:30:00Z")  # local only
+            self.git("checkout", "-q", "main")
+            self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+            if fix_id == "T4":
+                self.tw("task", "set", "T4", "--status", "working")
+            self.git("merge", "-q", "--squash", pushed)
+            commit_at("T1: Zorblax (#3)", "2030-01-01T12:00:00Z")
+            self.assertIn("T2", json.loads(self.tw("ready").stdout)["blocked_by_lease"], fix_id)
+
+    def test_round15_combined_squash_and_amended_fix(self):
+        def commit_at(msg, when, *extra):
+            self.git("add", "-A")
+            subprocess.run(["git", "-C", str(self.proj), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "commit", "-q", *extra, "-m", msg], check=True, capture_output=True,
+                           env={**os.environ, "GIT_COMMITTER_DATE": when, "GIT_AUTHOR_DATE": when})
+        lines = lambda *x: "".join(f"{v}\n" for v in x)
+        for case in ("plain", "later-task", "amended"):
+            self.tearDown()
+            self.setUp()
+            (self.proj / "shared").mkdir()
+            (self.proj / "shared" / "zorb.py").write_text(lines(1, 2, 3, 4, 5, 6, 7))
+            commit_at("base file", "2030-01-01T09:00:00Z")
+            self.tw("task", "add", "T1", "--owner", "ui")
+            self.tw("task", "add", "T4", "--owner", "ui", "--touches", "zz/q.js")
+            self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared/zorb.py")
+            self.git("checkout", "-q", "-b", "tw/proj/ui")
+            (self.proj / "shared" / "zorb.py").write_text(lines("one", 2, 3, 4, 5, 6, 7))
+            commit_at("T1: zorblax", "2030-01-01T10:00:00Z")
+            pushed = self.git("rev-parse", "HEAD").stdout.strip()
+            self.git("update-ref", "refs/remotes/origin/tw/proj/ui", pushed)
+            if case == "later-task":
+                (self.proj / "shared" / "zorb.py").write_text(lines("one", 2, 3, "four", 5, 6, 7))
+                commit_at("T4: quixbar", "2030-01-01T11:00:00Z")
+            if case == "amended":
+                (self.proj / "shared" / "zorb.py").write_text(lines("ONE", 2, 3, 4, 5, 6, 7))
+                commit_at("T1: zorblax", "2030-01-01T11:00:00Z", "--amend")
+            self.git("checkout", "-q", "main")
+            (self.proj / "shared" / "zorb.py").write_text(lines(1, 2, 3, 4, 5, 6, "seven"))
+            commit_at("lead: line 7", "2030-01-01T10:30:00Z")
+            self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+            if case == "later-task":
+                self.tw("task", "set", "T4", "--status", "working")
+            (self.proj / "shared" / "zorb.py").write_text(lines("one", 2, 3, 4, 5, 6, "seven"))  # host squash
+            commit_at("T1: Zorblax (#3)", "2030-01-01T12:00:00Z")
+            r = json.loads(self.tw("ready").stdout)
+            if case == "plain":
+                self.assertIn("T2", r["ready"], case)  # the squash folded in the base's own edit
+            else:
+                self.assertIn("T2", r["blocked_by_lease"], case)  # later work / an unpushed fix is not on the base
+
+    def test_round2_stale_origin_rename_recalled(self):
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared")
+        self.ui_branch_changes_shared()
+        self.git("update-ref", "refs/remotes/origin/main", "main")  # origin/main from before the merge
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+        self.git("merge", "-q", "tw/proj/ui")  # merged locally, not pushed: local main is newer
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["ready"])
+        # a rename moves files out of a leased folder: both names count
+        self.git("checkout", "-q", "-b", "tw/proj/api2", "main")
+        self.tw("thread", "add", "api2")
+        self.tw("task", "add", "T3", "--owner", "api2")
+        self.tw("task", "add", "T4", "--owner", "ui", "--touches", "shared/**")
+        (self.proj / "moved.py").write_text((self.proj / "shared" / "config.py").read_text())
+        (self.proj / "shared" / "config.py").unlink()
+        self.commit("T3: move config")
+        self.git("checkout", "-q", "main")
+        self.tw("task", "set", "T3", "--status", "working")
+        r = json.loads(self.tw("ready").stdout)
+        self.assertIn("shared/config.py", r["blocked_by_lease"]["T4"][0]["paths"])
+        self.tw("task", "set", "T3", "--status", "recalled")  # WIP stays on the branch
+        r = json.loads(self.tw("ready").stdout)
+        self.assertEqual(r["blocked_by_lease"]["T4"][0]["status"], "recalled")
+
+    def test_round3_squash_merge_releases(self):
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared")
+        self.ui_branch_changes_shared()
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+        self.git("merge", "-q", "--squash", "tw/proj/ui")
+        self.commit("T1: squash of tw/proj/ui")
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["ready"])
+
+    def test_round8_real_files_and_later_fix(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tw", TW)
+        tw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tw)
+        F = tw.RealFile
+        for g, f in (("*.css", "zorb/app.py"), ("**/*.test.js", "quix/main.go"), ("src/**/*.ts", "src/app.py"),
+                     ("*.md", "README"), ("zorb/*.py", "zorb/back\\sl.txt")):
+            self.assertFalse(tw.paths_overlap(g, F(f)), (g, f))
+        for g, f in (("**/*.py", "a/b.py"), ("zorb/", "zorb/x/y.py"), ("zorb", "zorb/a.py"), ("*.md", "d/x.md"),
+                     ("zorb/*.py", "zorb/back\\sl.py"), ("a/[*]b", "a/*b")):
+            self.assertTrue(tw.paths_overlap(g, F(f)), (g, f))
+        self.assertTrue(tw.paths_overlap(F("Zorb/A.py"), F("zorb/a.py")))
+        for g, f in (("app/[id]/page.tsx", "app/[id]/page.tsx"), ("app/[id]/", "app/[id]/x.ts"),
+                     ("src/routes/[slug]/**", "src/routes/[slug]/+page.svelte"), ("{a,b}.py", "{a,b}.py"),
+                     ("*blax", "src/zorblax/gen.py")):
+            self.assertTrue(tw.paths_overlap(g, F(f)), (g, f))
+            self.assertTrue(tw.paths_overlap(g, f), (g, f))  # declared and real agree
+        # squash-merged, then a review fix on the branch that is not merged: still held
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared")
+        self.ui_branch_changes_shared()
+        self.git("merge", "-q", "--squash", "tw/proj/ui")
+        self.commit("T1: squash of tw/proj/ui")
+        self.git("checkout", "-q", "tw/proj/ui")
+        (self.proj / "shared" / "config.py").write_text("x = 2\n")
+        self.commit("T1: review fix")
+        self.git("checkout", "-q", "main")
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["blocked_by_lease"])
+
+    def test_round4_squash_then_base_edits_and_topic_blocked(self):
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared")
+        self.ui_branch_changes_shared()
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+        self.git("merge", "-q", "--squash", "tw/proj/ui")
+        self.commit("T1: squash of tw/proj/ui")
+        (self.proj / "shared" / "config.py").write_text("x = 2\n")  # main edits the file afterwards
+        self.commit("later edit")
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["ready"])
+        self.tw("task", "add", "T3", "--owner", "ui", "--topics", "t", "--touches", "z.py")
+        self.tw("task", "add", "T4", "--owner", "api", "--topics", "t")
+        self.tw("thread", "add", "db")
+        self.tw("task", "add", "T5", "--owner", "db", "--touches", "z.py")
+        self.tw("task", "set", "T4", "--status", "working")
+        r = json.loads(self.tw("ready").stdout)
+        self.assertIn("T3", r["blocked_by_topic"])
+        self.assertIn("T5", r["ready"])  # T3 will not start, so it holds no lease
+
+    def test_round5_mention_is_not_a_merge(self):
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared/config.py")
+        self.ui_branch_changes_shared()
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+        (self.proj / "NOTES").write_text("n\n")
+        self.commit("plan: T1 review pending, do not merge yet")  # names T1, touches nothing of it
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["blocked_by_lease"])
+        (self.proj / "shared").mkdir(exist_ok=True)
+        (self.proj / "shared" / "config.py").write_text("other\n")
+        self.commit("Revert T1 partially")
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["blocked_by_lease"])
+
+    def test_round5_one_pass_no_collisions(self):
+        for n in ("web", "db"):
+            self.tw("thread", "add", n)
+        self.tw("task", "add", "X", "--owner", "api", "--touches", "a/")
+        self.tw("task", "add", "A", "--owner", "ui", "--topics", "t", "--touches", "a/")
+        self.tw("task", "add", "B", "--owner", "web", "--topics", "t", "--touches", "b/")
+        self.tw("task", "add", "C", "--owner", "db", "--touches", "b/x.py")
+        self.tw("task", "set", "X", "--status", "working")
+        r = json.loads(self.tw("ready").stdout)
+        self.assertIn("A", r["blocked_by_lease"])
+        self.assertIn("B", r["ready"])
+        self.assertIn("C", r["blocked_by_lease"])  # B is offered, so it holds b/
+
+    def test_round6_bracket_names_and_mention_edits(self):
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "docs/*.md")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "docs").mkdir()
+        (self.proj / "docs" / "notes[draft.md").write_text("d\n")
+        self.commit("T1: odd name")
+        self.git("checkout", "-q", "main")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["blocked_by_lease"])  # no crash, still a clash
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "t", "--user-said", "ok")
+        (self.proj / "docs").mkdir(exist_ok=True)
+        (self.proj / "docs" / "notes[draft.md").write_text("prep\n")
+        self.commit("Prepare docs for T1 (not merged yet)")  # names T1 and edits the file, but is not T1
+        self.assertIn("T2", json.loads(self.tw("ready").stdout)["blocked_by_lease"])
+
+class HandoverGit(LeasesGit):
+    test_branch_diff_blocks = None
+
+    def test_origin_commits_not_hidden_by_local_branch(self):
+        self.git("checkout", "-q", "-b", "tmp")
+        (self.proj / "w.txt").write_text("w\n")
+        self.commit("T1: pushed work")
+        sha = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("checkout", "-q", "main")
+        self.git("update-ref", "refs/remotes/origin/tw/proj/ui", sha)
+        self.git("branch", "tw/proj/ui", "main")  # local branch has nothing
+        out = self.tw("handover", "ui").stdout
+        self.assertIn("T1: pushed work", out)
+        self.assertIn("local and origin differ", out)
+        self.assertIn("[origin/tw/proj/ui]", out)
+
+
+    def test_round2_missing_base_keeps_configured_name(self):
+        st = json.loads((self.proj / ".teamwork" / "state.json").read_text())
+        st["repo"]["base"] = "nope"
+        (self.proj / ".teamwork" / "state.json").write_text(json.dumps(st))
+        out = self.tw("handover", "ui").stdout
+        self.assertIn("(base nope)", out)
+        self.assertIn("base branch nope not found", out)
+
+
+class Trace(LeasesGit):
+    """T17: follow a request to tasks, threads, sessions, commits and report time."""
+
+    test_branch_diff_blocks = None  # inherited fixture only
+
+    def test_trace_request_end_to_end(self):
+        self.tw("thread", "set", "ui", "--session", "sess-ui", "--status", "working")
+        self.tw("task", "add", "T1", "--owner", "ui", "--title", "blue button")
+        self.tw("task", "add", "T2", "--owner", "ui", "--title", "other work")
+        self.tw("req", "add", "make the button blue", "--tasks", "T1")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "b.css").write_text("blue\n")
+        self.commit("T1: blue button")
+        (self.proj / "c.css").write_text("x\n")
+        self.commit("T2: unrelated")
+        self.git("checkout", "-q", "main")
+        t = json.loads(self.tw("trace", "R1", "--json").stdout)
+        k = t["tasks"][0]
+        self.assertEqual((k["task"], k["thread"], k["session_id"], k["branch"]), ("T1", "ui", "sess-ui", "tw/proj/ui"))
+        self.assertEqual(len(k["commits"]), 1)  # only its own commits
+        self.assertTrue(any("T2: unrelated" in c for c in t["other_branch_work"]["tw/proj/ui"]))
+        self.git("merge", "-q", "--no-ff", "tw/proj/ui", "-m", "Merge ui (T1)")
+        self.tw("task", "set", "T1", "--accept", "x", "--status", "done", "--review", "pass", "--reviewer", "rev")
+        self.tw("req", "set", "R1", "--status", "reported")
+        t = json.loads(self.tw("trace", "R1", "--json").stdout)
+        self.assertTrue(t["reported_at"])
+        commits = t["tasks"][0]["commits"]
+        self.assertTrue(any("T1: blue button" in c for c in commits))
+        self.assertFalse(any("T2: unrelated" in c for c in commits))  # finished task: only its own commits
+        evs = [e["ev"] for e in t["events"]]
+        self.assertIn("req-add", evs)
+        self.assertIn("task-set", evs)
+        text = self.tw("trace", "R1").stdout
+        self.assertIn("R1 [reported] make the button blue", text)
+        self.assertIn("session sess-ui", text)
+
+    def test_board_cross_references(self):
+        self.tw("task", "add", "T1", "--owner", "ui", "--title", "blue button")
+        self.tw("req", "add", "make the button blue", "--tasks", "T1")
+        board = self.tw("board").stdout
+        self.assertIn("**R1** [dispatched] make the button blue — T1", board)
+        row = [ln for ln in board.splitlines() if ln.startswith("| T1 |")][0]
+        self.assertTrue(row.rstrip().endswith("| R1 |"))
+
+    def test_review_reassigned_task_keeps_commits(self):
+        self.tw("task", "add", "T1", "--owner", "ui", "--title", "x")
+        self.tw("req", "add", "x", "--tasks", "T1")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "early.txt").write_text("e\n")
+        self.commit("T1: early work by ui")
+        self.git("checkout", "-q", "main")
+        self.tw("task", "set", "T1", "--owner", "api")
+        t = json.loads(self.tw("trace", "R1", "--json").stdout)
+        self.assertEqual(t["tasks"][0]["owners"], ["ui", "api"])
+        self.assertTrue(any("T1: early work by ui" in c for c in t["tasks"][0]["commits"]))
+
+    def test_review_bad_log_lines_wrong_base_zh_closed(self):
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("req", "add", "x", "--tasks", "T1")
+        with open(self.proj / ".teamwork" / "log.jsonl", "ab") as f:
+            f.write(b'[1,2]\n"str"\n42\n{bad\n\xff\xfe\n')
+        st = json.loads((self.proj / ".teamwork" / "state.json").read_text())
+        st["repo"]["base"] = "master"
+        (self.proj / ".teamwork" / "state.json").write_text(json.dumps(st))
+        t = json.loads(self.tw("trace", "R1", "--json").stdout)
+        self.assertTrue(t["warnings"])
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("req", "drop", "R1", "--user-said", "不做了")
+        text = self.tw("trace", "R1").stdout
+        self.assertIn("[已放弃]", text)
+        self.assertIn("线程 ui", text)
+        self.assertIn("关闭 20", text)
+        self.assertIn("| R1✗ |", self.tw("board").stdout)
+
+    def test_trace_without_git(self):
+        subprocess.run(["rm", "-rf", str(self.proj / ".git")], check=True)
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("req", "add", "x", "--tasks", "T1")
+        t = json.loads(self.tw("trace", "R1", "--json").stdout)
+        self.assertEqual(t["tasks"][0]["commits"], [])
+
+
+    def test_round2_ids_dedupe_base_text(self):
+        self.tw("thread", "set", "ui", "--session", "s1")
+        self.tw("thread", "reseat", "ui", "--session", "s2", "--reason", "failed")
+        for t in ("T1", "T2", "T3"):
+            self.tw("task", "add", t, "--owner", "ui", "--title", t)
+        self.tw("req", "add", "two tasks", "--tasks", "T1,T2")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        for msg in ("T1: one", "T2: two", "T1.5: half step", "T3: other"):
+            (self.proj / (msg[:4].replace(":", "").replace(".", "_") + ".txt")).write_text(msg)
+            self.commit(msg)
+        self.git("checkout", "-q", "main")
+        self.git("update-ref", "refs/remotes/origin/tw/proj/ui", "tw/proj/ui")
+        t = json.loads(self.tw("trace", "R1", "--json").stdout)
+        t1 = t["tasks"][0]["commits"]
+        self.assertEqual(len(t1), 1, t1)  # T1.5 is not T1
+        other = [c for cs in t["other_branch_work"].values() for c in cs]
+        self.assertEqual(sorted(c.split(" ", 2)[2] for c in other), ["T1.5: half step", "T3: other"])  # once each
+        with open(self.proj / ".teamwork" / "log.jsonl", "a") as f:
+            f.write(json.dumps({"ev": "custom", "ids": "R1,R12"}) + "\n" + json.dumps({"ev": "x", "ids": "R12"}) + "\n")
+        evs = [e["ev"] for e in json.loads(self.tw("trace", "R1", "--json").stdout)["events"]]
+        self.assertIn("custom", evs)
+        self.assertNotIn("x", evs)
+        self.tw("req", "drop", "R1", "--user-said", "stop", "--note", "superseded by R2")
+        text = self.tw("trace", "R1").stdout
+        self.assertIn("superseded by R2", text)
+        self.assertIn("sessions: s1 (failed) -> s2", text)
+
+    def test_round3_sub_ids_and_bad_log_fields(self):
+        for t in ("T1", "T1a"):
+            self.tw("task", "add", t, "--owner", "ui")
+        self.tw("req", "add", "one", "--tasks", "T1")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        for msg in ("T1: main", "T1a: sub", "T1-2: part", "T1_x: other"):
+            (self.proj / (str(abs(hash(msg))) + ".txt")).write_text(msg)
+            self.commit(msg)
+        self.git("checkout", "-q", "main")
+        with open(self.proj / ".teamwork" / "log.jsonl", "a") as f:
+            for e in ({"ids": 42}, {"task": "T1", "snap_task": "str"}, {"task": "T1", "owner": ["ui"]}):
+                f.write(json.dumps(e) + "\n")
+        t = json.loads(self.tw("trace", "R1", "--json").stdout)
+        self.assertEqual([c.split(" ", 4)[4] for c in t["tasks"][0]["commits"]], ["T1: main"])
+
+    def test_round2_init_detects_base_and_lead_base(self):
+        self.git("branch", "-m", "main", "trunk")
+        other = self.proj.parent / "p2"
+        subprocess.run(["git", "clone", "-q", str(self.proj), str(other)], check=True, capture_output=True)
+        subprocess.run([sys.executable, str(TW), "-C", str(other), "init", "p2", "--path", str(other)],
+                       check=True, capture_output=True, cwd=other)
+        self.assertEqual(json.loads((other / ".teamwork" / "state.json").read_text())["repo"]["base"], "trunk")
+        self.tw("lead", "--base", "trunk")
+        self.assertEqual(json.loads((self.proj / ".teamwork" / "state.json").read_text())["repo"]["base"], "trunk")
+
+
+class Seats(TwCase):
+    """T12: a thread is a seat; sessions come and go, history is kept."""
+
+    def setUp(self):
+        super().setUp()
+        self.tw("thread", "add", "ui", "--session", "s-old", "--status", "working", "--owns", "web/")
+        self.tw("task", "add", "T1", "--owner", "ui", "--title", "blue button", "--accept", "button is blue")
+
+    def seat(self):
+        return self.state()["threads"]["ui"]
+
+    def test_reseat_keeps_history_and_roster_shows_current(self):
+        self.assertEqual([h["session_id"] for h in self.seat()["sessions"]], ["s-old"])
+        self.assertNotEqual(self.tw("thread", "reseat", "ui", ok=False).returncode, 0)  # needs --session
+        self.tw("thread", "reseat", "ui", "--session", "s-new", "--reason", "context full")
+        t = self.seat()
+        self.assertEqual(t["session_id"], "s-new")
+        self.assertEqual(t["status"], "starting")
+        self.assertEqual([h["session_id"] for h in t["sessions"]], ["s-old", "s-new"])
+        self.assertEqual(t["sessions"][0]["reason"], "context full")
+        self.assertTrue(t["sessions"][0]["to"])
+        self.assertNotIn("to", t["sessions"][1])
+        roster = self.tw("roster").stdout
+        self.assertIn("session_id=s-new", roster)
+        self.assertNotIn("s-old", roster)
+        self.assertNotEqual(self.tw("thread", "reseat", "ui", "--session", "s-new", ok=False).returncode, 0)
+
+    def test_set_session_records_history_for_old_threads(self):
+        st = self.state()
+        del st["threads"]["ui"]["sessions"]  # thread created before T12
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.tw("thread", "set", "ui", "--session", "s2")
+        self.assertEqual([h["session_id"] for h in self.seat()["sessions"]], ["s-old", "s2"])
+
+    def test_review_reseat_with_status_resets_timer_and_logs(self):
+        self.env["TW_NOW"] = "2026-01-01T00:00:00+00:00"
+        self.tw("thread", "set", "ui", "--from-status")
+        self.env["TW_NOW"] = "2026-03-01T00:00:00+00:00"
+        self.tw("thread", "reseat", "ui", "--session", "s-new", "--status", "working", "--reason", "failed")
+        self.assertEqual(json.loads(self.tw("ready").stdout)["stuck"], {})
+        log = (self.dir / ".teamwork" / "log.jsonl").read_text()
+        ev = [json.loads(x) for x in log.splitlines() if '"thread-reseat"' in x][-1]
+        self.assertEqual((ev["session"], ev["prev_session"], ev["reason"]), ("s-new", "s-old", "failed"))
+
+    def test_review_handover_prefers_active_task_and_no_git(self):
+        self.tw("task", "add", "T2", "--owner", "ui", "--title", "active one")
+        self.tw("task", "set", "T2", "--status", "working")
+        out = self.tw("handover", "ui").stdout
+        self.assertIn("TASK lead -> ui T2", out)
+        self.assertIn("Unmerged commits on the branch: unknown", out)  # temp project is not a git repo
+
+    def test_handover_brief(self):
+        self.tw("thread", "reseat", "ui", "--session", "s-new", "--reason", "failed")
+        r = self.tw("handover", "ui")
+        self.assertIn("--leaving s-old", r.stderr)  # already reseated: the tool says how to name the old session
+        out = self.tw("handover", "ui", "--leaving", "s-old").stdout
+        self.assertIn("[tw:demo] TASK lead -> ui T1", out)
+        self.assertIn("from an earlier session (s-old, left: failed)", out)
+        self.assertIn("T1 [planned] blue button — done when: button is blue", out)
+        self.assertIn("<paste here>", out)
+
+
+    def test_round2_handover_before_reseat_names_leaving_session(self):
+        self.env["TW_NOW"] = "2026-01-01T00:00:00+00:00"
+        self.tw("thread", "reseat", "ui", "--session", "s2", "--reason", "ctx full")
+        self.assertIn("(s-old, left: ctx full)", self.tw("handover", "ui", "--leaving", "s-old").stdout)
+        self.env["TW_NOW"] = "2026-01-01T01:00:00+00:00"
+        self.tw("thread", "set", "ui", "--status", "working", "--from-status")  # s2 reported, then failed
+        out = self.tw("handover", "ui", "--reason", "failed").stdout  # SKILL step 6: handover before reseat
+        self.assertIn("from an earlier session (s2, left: failed)", out)
+        out = self.tw("handover", "ui", "--leaving", "s-old").stdout
+        self.assertIn("(s-old, left: ctx full)", out)
+
+    def test_round3_manual_set_shared_session_first_seat(self):
+        self.env["TW_NOW"] = "2026-01-01T00:00:00+00:00"
+        self.tw("thread", "set", "ui", "--from-status")
+        self.env["TW_NOW"] = "2026-01-01T01:00:00+00:00"
+        self.tw("thread", "set", "ui", "--session", "s-B")  # switched by hand, not reseat
+        self.assertIn("(s-old, left: session changed)", self.tw("handover", "ui", "--leaving", "s-old").stdout)
+        self.assertIn("(s-B, left: died early)", self.tw("handover", "ui", "--reason", "died early").stdout)
+        self.tw("thread", "add", "api", "--session", "s-X", "--status", "working")
+        r = self.tw("thread", "reseat", "ui", "--session", "s-X", ok=False)
+        self.assertIn("already holds the api seat", r.stderr)
+        self.assertNotEqual(self.tw("thread", "set", "ui", "--session", "s-X", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("handover", "ui", "--leaving", "nobody", ok=False).returncode, 0)
+        self.tw("thread", "add", "pl")
+        self.assertIn("You start the pl seat (no earlier session)", self.tw("handover", "pl").stdout)
+
+    def test_round4_revive_lead_starting_leaving(self):
+        self.tw("thread", "add", "api", "--session", "s-X", "--status", "working")
+        self.tw("thread", "set", "api", "--status", "archived")
+        self.tw("thread", "reseat", "ui", "--session", "s-X", "--reason", "r")
+        self.assertNotEqual(self.tw("thread", "set", "api", "--status", "working", ok=False).returncode, 0)
+        self.tw("lead", "--session", "L1")
+        self.assertNotEqual(self.tw("thread", "add", "x2", "--session", "L1", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("lead", "--session", "s-X", "--force", ok=False).returncode, 0)
+        self.tw("thread", "add", "st", "--session", "A", "--status", "starting")
+        self.assertIn("(A, left: failed to start)", self.tw("handover", "st", "--reason", "failed to start").stdout)
+        self.env["TW_NOW"] = "2026-01-01T00:00:00+00:00"
+        self.tw("thread", "add", "cy", "--session", "c1", "--status", "working")
+        self.tw("thread", "reseat", "cy", "--session", "c2", "--reason", "context full")
+        self.env["TW_NOW"] = "2026-01-01T01:00:00+00:00"
+        self.tw("thread", "reseat", "cy", "--session", "c1", "--reason", "back")
+        self.assertIn("(c1, left: context full)", self.tw("handover", "cy", "--leaving", "c1").stdout)
+
+    def test_round5_lead_revive_and_rebuild_keeps_return(self):
+        self.tw("thread", "set", "ui", "--status", "archived")
+        self.tw("lead", "--session", "s-old", "--force")
+        self.assertNotEqual(self.tw("thread", "set", "ui", "--status", "idle", ok=False).returncode, 0)
+
+    def test_round2_reseat_status_and_log_reason(self):
+        for bad in ("planned", "archived", "done"):
+            self.assertNotEqual(self.tw("thread", "reseat", "ui", "--session", "s2", "--status", bad,
+                                        ok=False).returncode, 0, bad)
+        self.assertEqual(self.seat()["session_id"], "s-old")  # nothing changed
+        self.tw("thread", "reseat", "ui", "--session", "s2")
+        log = (self.dir / ".teamwork" / "log.jsonl").read_text()
+        ev = [json.loads(x) for x in log.splitlines() if '"thread-reseat"' in x][-1]
+        self.assertEqual(ev["reason"], self.seat()["sessions"][0]["reason"])
+
+
+class Rebuild(LeasesGit):
+    """T13: state.json can be rebuilt from log.jsonl, the session list and branches."""
+
+    test_branch_diff_blocks = None
+
+    def populate(self):
+        self.tw("lead", "--session", "lead-1")
+        self.tw("thread", "set", "ui", "--session", "s-ui", "--status", "working", "--summary", "step 2")
+        self.tw("task", "add", "T1", "--owner", "ui", "--title", "blue button", "--accept", "is blue",
+                "--touches", "web/**")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.tw("req", "add", "make it blue", "--tasks", "T1")
+        self.tw("prefs", "--set", "stuck_minutes=15")
+
+    def test_delete_and_rebuild(self):
+        self.populate()
+        tw_dir = self.proj / ".teamwork"
+        before = json.loads((tw_dir / "state.json").read_text())
+        (tw_dir / "state.json").unlink()
+        out = json.loads(self.tw("rebuild").stdout)
+        self.assertFalse((tw_dir / "state.json").exists())  # preview only by default
+        self.assertTrue((tw_dir / "state.json.rebuilt").exists())
+        self.assertEqual(out["threads"], ["api", "ui"])
+        self.assertEqual(out["tasks"], ["T1"])
+        self.assertEqual(out["requests"], ["R1"])
+        self.tw("rebuild", "--apply")
+        after = json.loads((tw_dir / "state.json").read_text())
+        for key in ("threads", "tasks", "requests", "lead", "plan_approved"):
+            self.assertEqual(after[key], before[key], key)
+        self.assertEqual(after["prefs"]["stuck_minutes"], 15)
+        self.assertIn("make it blue", self.tw("board").stdout)
+
+    def test_apply_keeps_backup_and_reports_diff(self):
+        self.populate()
+        out = json.loads(self.tw("rebuild").stdout)
+        self.assertEqual(out["vs_current"]["tasks"], {"missing": [], "extra": [], "changed": {}})
+        out = json.loads(self.tw("rebuild", "--apply").stdout)
+        self.assertTrue(Path(out["backup"]).exists())
+
+    def test_review_plan_approve_and_delivered_survive(self):
+        tw_dir = self.proj / ".teamwork"
+        st = json.loads((tw_dir / "state.json").read_text())
+        st["plan_approved"] = False
+        (tw_dir / "state.json").write_text(json.dumps(st))
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T2", "--owner", "api")
+        self.tw("plan", "approve", "--user-said", "ok")
+        self.tw("req", "add", "x", "--tasks", "T1")
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "test", "--user-said", "ok")
+        before = json.loads((tw_dir / "state.json").read_text())
+        self.assertEqual(before["requests"]["R1"]["status"], "delivered")
+        (tw_dir / "state.json").unlink()
+        self.tw("rebuild", "--apply")
+        after = json.loads((tw_dir / "state.json").read_text())
+        self.assertEqual(after["tasks"]["T2"]["status"], before["tasks"]["T2"]["status"])
+        self.assertEqual(after["requests"]["R1"]["status"], "delivered")
+        self.assertEqual(after.get("roster_version"), before.get("roster_version"))
+
+    def test_review_bad_lines_diff_backups_ignore(self):
+        self.populate()
+        tw_dir = self.proj / ".teamwork"
+        with open(tw_dir / "log.jsonl", "ab") as f:
+            f.write(b'42\n[1]\n{"ev": "worktree"}\n\xe4\xb8\n')
+        st = json.loads((tw_dir / "state.json").read_text())
+        st["tasks"]["T1"]["title"] = "edited by hand"
+        (tw_dir / "state.json").write_text(json.dumps(st))
+        out = json.loads(self.tw("rebuild").stdout)
+        self.assertIn("title", out["vs_current"]["tasks"]["changed"]["T1"])
+        self.assertTrue(any("unreadable" in n for n in out["notes"]))
+        b1 = json.loads(self.tw("rebuild", "--apply").stdout)["backup"]
+        b2 = json.loads(self.tw("rebuild", "--apply").stdout)["backup"]
+        self.assertNotEqual(b1, b2)
+        ig = (tw_dir / ".gitignore").read_text()
+        self.assertIn("state.json.rebuilt", ig)
+        self.assertIn("state.json.bak-*", ig)
+
+    def test_sessions_and_branches_fill_gaps(self):
+        tw_dir = self.proj / ".teamwork"
+        (tw_dir / "log.jsonl").unlink()  # worst case: no log at all
+        (tw_dir / "state.json").unlink()
+        self.git("branch", "tw/proj/docs")
+        sessions = self.proj.parent / "sessions.json"
+        sessions.write_text(json.dumps({"data": [
+            {"id": "s-old", "tags": ["teamwork:proj", "teamwork-thread:ui"], "created_at": "2026-11-01"},
+            {"id": "s-new", "tags": ["teamwork:proj", "teamwork-thread:ui"], "created_at": "2026-11-02",
+             "environment_kind": "bridge"},
+            {"id": "s-cloud", "tags": ["teamwork:proj", "teamwork-thread:research"],
+             "environment_kind": "anthropic_cloud"},
+            {"id": "other", "tags": ["teamwork:another", "teamwork-thread:ui"]},
+        ]}))
+        out = json.loads(self.tw("rebuild", "--project", "proj", "--sessions", str(sessions), "--apply").stdout)
+        st = json.loads((tw_dir / "state.json").read_text())
+        self.assertEqual(st["threads"]["ui"]["session_id"], "s-new")
+        self.assertEqual([h["session_id"] for h in st["threads"]["ui"]["sessions"]], ["s-old", "s-new"])
+        self.assertEqual(st["threads"]["research"]["kind"], "cloud")
+        self.assertIn("docs", st["threads"])
+        self.assertTrue(any("restored from branch" in n for n in out["notes"]))
+
+
+    def test_round4_session_list_change_bumps_roster(self):
+        self.tw("thread", "set", "ui", "--session", "s1", "--status", "working")
+        self.tw("thread", "set", "api", "--session", "s2", "--status", "idle")
+        self.tw("thread", "set", "all", "--roster-sent")
+        f = self.proj.parent / "f.json"
+        f.write_text(json.dumps([{"id": "s9", "tags": ["teamwork:proj", "teamwork-thread:api"],
+                                  "created_at": "2030-01-01"}]))
+        out = json.loads(self.tw("rebuild", "--apply", "--sessions", str(f)).stdout)
+        self.assertTrue(any("broadcast ROSTER" in n for n in out["notes"]))
+        self.assertIn("ui", json.loads(self.tw("ready").stdout)["roster_not_sent"])
+
+    def test_round6_session_list_never_shares(self):
+        self.tw("lead", "--session", "S-lead")
+        self.tw("thread", "set", "ui", "--session", "N", "--status", "working")
+        f = self.proj.parent / "f.json"
+        f.write_text(json.dumps([{"id": "S-lead", "tags": ["teamwork:proj", "teamwork-thread:ui"],
+                                  "created_at": "2030-01-01"}]))
+        out = json.loads(self.tw("rebuild", "--sessions", str(f)).stdout)
+        st = json.loads((self.proj / ".teamwork" / "state.json.rebuilt").read_text())
+        self.assertEqual(st["threads"]["ui"]["session_id"], "N")
+        self.assertTrue(any("held by the lead" in n for n in out["notes"]))
+
+    def test_round8_closed_stints_survive_rebuild(self):
+        self.tw("lead", "--session", "s_LEAD")
+        self.tw("thread", "add", "zorblax", "--session", "s_A")
+        self.tw("thread", "set", "zorblax", "--status", "archived")
+        self.tw("thread", "add", "quixbar", "--session", "s_A")
+        self.tw("thread", "add", "blue", "--session", "s_B")
+        self.tw("thread", "set", "blue", "--status", "archived")
+        self.tw("lead", "--session", "s_B", "--force")
+        sp = self.proj / ".teamwork" / "state.json"
+        before = json.loads(sp.read_text())["threads"]
+        self.assertTrue(all(h.get("to") for h in before["blue"]["sessions"]))  # moved to the lead
+        sp.unlink()
+        self.tw("rebuild", "--apply")
+        after = json.loads(sp.read_text())["threads"]
+        for n in ("zorblax", "blue"):
+            self.assertEqual([(h["session_id"], bool(h.get("to"))) for h in after[n]["sessions"]],
+                             [(h["session_id"], bool(h.get("to"))) for h in before[n]["sessions"]], n)
+
+    def test_round9_retired_session_stays_retired(self):
+        self.tw("lead", "--session", "L1")
+        self.tw("thread", "add", "zorb", "--session", "S1")
+        self.tw("thread", "reseat", "zorb", "--session", "S2", "--reason", "failed")
+        f = self.proj.parent / "s.json"
+        f.write_text(json.dumps([{"id": "S1", "tags": ["teamwork:proj", "teamwork-thread:zorb"],
+                                  "created_at": "2020-01-01T10:00:00Z"},
+                                 {"id": "S2", "tags": ["teamwork:proj", "teamwork-thread:zorb"],
+                                  "created_at": "2020-01-01T11:00:00Z", "status": "archived"}]))
+        self.tw("rebuild", "--sessions", str(f), "--apply")
+        z = json.loads((self.proj / ".teamwork" / "state.json").read_text())["threads"]["zorb"]
+        self.assertEqual(z["session_id"], "S2")
+        self.assertEqual([h["session_id"] for h in z["sessions"] if not h.get("to")], ["S2"])
+        # reviving a seat whose stint ended (its session went to a seat that is archived now) is refused
+        self.tw("thread", "add", "quix", "--session", "S3")
+        self.tw("thread", "set", "quix", "--status", "archived")
+        self.tw("thread", "add", "blip", "--session", "S3")
+        self.tw("thread", "set", "blip", "--status", "archived")
+        self.assertNotEqual(self.tw("thread", "set", "quix", "--status", "idle", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("thread", "set", "quix", "--session", "S3", "--status", "idle",
+                                    ok=False).returncode, 0)  # naming its own old session changes nothing
+
+    def test_round_t13_short_name_and_headless_log(self):
+        sub = Path(self._tmp.name) / "qz"
+        sub.mkdir()
+        run = lambda *x: subprocess.run([sys.executable, str(TW), "-C", str(sub), *x], cwd=sub,
+                                        capture_output=True, text=True)
+        self.assertEqual(run("init", "quixbar-zorblax").returncode, 0)
+        run("lead", "--session", "L1")
+        run("thread", "add", "ui", "--kind", "cloud", "--session", "S1")
+        run("req", "add", "blue whale star")
+        run("prefs", "--set", "language=en")
+        tw = sub / ".teamwork"
+        # the log loses its head: requests before the next project-carrying event survive
+        lines = (tw / "log.jsonl").read_text().splitlines()
+        (tw / "log.jsonl").write_text("\n".join(lines[1:]) + "\n")
+        (tw / "state.json").unlink()
+        r = run("rebuild")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertIn("R1", out["requests"])
+        self.assertTrue(any("does not start with init" in n for n in out["notes"]))
+        # the whole folder is lost: the session list alone, tagged with the short name, brings the seat back
+        import shutil
+        shutil.rmtree(tw)
+        tw.mkdir()
+        ss = sub / "s.json"
+        ss.write_text(json.dumps([{"id": "S1", "tags": ["teamwork:QZ", "teamwork-thread:ui"],
+                                   "created_at": "2020-01-01T00:00:00Z"}]))
+        out = json.loads(run("rebuild", "--project", "quixbar-zorblax", "--sessions", str(ss)).stdout)
+        self.assertEqual(out["threads"], ["ui"])
+        ss.write_text(json.dumps([{"id": "S1", "tags": ["teamwork:ZB", "teamwork-thread:ui"]}]))
+        out = json.loads(run("rebuild", "--project", "quixbar-zorblax", "--sessions", str(ss)).stdout)
+        self.assertTrue(any("--short" in n for n in out["notes"]))
+        out = json.loads(run("rebuild", "--project", "quixbar-zorblax", "--short", "ZB", "--sessions",
+                             str(ss)).stdout)
+        self.assertEqual(out["threads"], ["ui"])
+        # the real list_sessions shape: wrapped, session_status, has_more
+        row = lambda i, st, d: {"id": i, "session_status": st, "created_at": d,
+                                "tags": ["teamwork:QZ", "teamwork-thread:ui"]}
+        ss.write_text(json.dumps({"ccr": {"data": [row("S1", "SESSION_STATUS_IDLE", "2020-01-01T00:00:00Z"),
+                                                   row("S9", "SESSION_STATUS_ARCHIVED", "2021-01-01T00:00:00Z")],
+                                          "has_more": False}}))
+        r = run("rebuild", "--project", "quixbar-zorblax", "--sessions", str(ss))
+        self.assertEqual(json.loads((tw / "state.json.rebuilt").read_text())["threads"]["ui"]["session_id"], "S1",
+                         r.stdout)
+        ss.write_text(json.dumps({"ccr": {"data": [], "has_more": True}}))
+        self.assertNotEqual(run("rebuild", "--project", "quixbar-zorblax", "--sessions", str(ss)).returncode, 0)
+        ss.write_text(json.dumps({"rows": [{"id": "S1"}]}))
+        out = json.loads(run("rebuild", "--project", "quixbar-zorblax", "--sessions", str(ss)).stdout)
+        self.assertTrue(any("none with a teamwork tag" in n for n in out["notes"]))
+
+    def test_round_t13_pages_corrupt_state_old_short(self):
+        sub = Path(self._tmp.name) / "zq"
+        sub.mkdir()
+        run = lambda *x: subprocess.run([sys.executable, str(TW), "-C", str(sub), *x], cwd=sub,
+                                        capture_output=True, text=True)
+        run("init", "zorblax-quixbar")
+        run("thread", "add", "ui", "--session", "S1")
+        run("prefs", "--set", "short_name=ZQX")
+        tw = sub / ".teamwork"
+        row = lambda i, n, t="ZQ": {"id": i, "tags": [f"teamwork:{t}", f"teamwork-thread:{n}"],
+                                    "created_at": "2020-01-01T00:00:00Z"}
+        page = lambda rows, more: {"ccr": {"data": rows, "has_more": more}, "meta": {}}
+        ss = sub / "s.json"
+        # pages as a list, and pages written one after another; an earlier short name (ZQ) still matches
+        for text in (json.dumps([page([row("S1", "ui")], True), page([row("S2", "api")], False)]),
+                     json.dumps(page([row("S1", "ui")], True)) + "\n" + json.dumps(page([row("S2", "api")], False))):
+            ss.write_text(text)
+            r = run("rebuild", "--sessions", str(ss))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout)["threads"], ["api", "ui"])
+        ss.write_text(json.dumps([page([row("S1", "ui")], False), page([row("S2", "api")], True)]))
+        self.assertNotEqual(run("rebuild", "--sessions", str(ss)).returncode, 0)  # stopped before the end
+        # a corrupted state.json: rebuild still previews and applies, with a copy of the broken file
+        for bad in ('{"threads": {"ui": ', "[]", "", '{"threads": []}'):
+            (tw / "state.json").write_text(bad)
+            r = run("rebuild")
+            self.assertEqual(r.returncode, 0, (bad, r.stderr))
+            self.assertTrue(any("unreadable" in n for n in json.loads(r.stdout)["notes"]))
+        r = run("rebuild", "--apply")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ui", json.loads((tw / "state.json").read_text())["threads"])
+
+    def test_round7_rebuild_history_is_true(self):
+        self.tw("lead", "--session", "L")
+        self.tw("thread", "set", "ui", "--session", "A", "--status", "working")
+        self.tw("thread", "set", "api", "--session", "B", "--status", "working")
+        tag = lambda i, d: {"id": i, "tags": ["teamwork:proj", "teamwork-thread:ui"], "created_at": d}
+        f = self.proj.parent / "f.json"
+        f.write_text(json.dumps([tag("L", "2020-01-01"), tag("B", "2020-01-02"), tag("A", "2020-01-03"),
+                                 tag("A5", "2999-01-01")]))
+        self.tw("rebuild", "--sessions", str(f), "--apply")
+        hist = [h["session_id"] for h in json.loads((self.proj / ".teamwork" / "state.json").read_text())
+                ["threads"]["ui"]["sessions"]]
+        self.assertEqual(hist, ["A"])  # not the lead's, not api's, not a newer never-seated one
+        self.tw("thread", "set", "api", "--status", "archived")
+        self.tw("thread", "add", "c", "--session", "B")
+        api = json.loads((self.proj / ".teamwork" / "state.json").read_text())["threads"]["api"]
+        self.assertTrue(all(h.get("to") for h in api["sessions"] if h["session_id"] == "B"))
+
+    def test_round2_bad_names_and_files(self):
+        tw_dir = self.proj / ".teamwork"
+        self.git("branch", "tw/proj/a/b")
+        sessions = self.proj.parent / "s2.json"
+        sessions.write_text(json.dumps([{"id": "x", "tags": ["teamwork:proj", "teamwork-thread:../evil"]}, 7]))
+        out = json.loads(self.tw("rebuild", "--sessions", str(sessions)).stdout)
+        self.assertTrue(any("invalid thread name" in n for n in out["notes"]))
+        self.assertTrue(any("ignored branch" in n for n in out["notes"]))
+        self.assertNotIn("../evil", out["threads"])
+        sessions.write_text("{not json")
+        r = self.tw("rebuild", "--sessions", str(sessions), ok=False)
+        self.assertIn("cannot read --sessions", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_round2_roster_sent_all_and_small_rebuild_guard(self):
+        self.populate()
+        self.tw("thread", "set", "all", "--roster-sent")
+        tw_dir = self.proj / ".teamwork"
+        before = json.loads((tw_dir / "state.json").read_text())
+        out = json.loads(self.tw("rebuild", "--apply").stdout)
+        after = json.loads((tw_dir / "state.json").read_text())
+        self.assertEqual({k: v.get("roster_seen") for k, v in after["threads"].items()},
+                         {k: v.get("roster_seen") for k, v in before["threads"].items()})
+        self.assertEqual(out["vs_current"]["other"], [])
+        (tw_dir / "log.jsonl").write_text("")  # log lost: the rebuild would wipe the board
+        r = self.tw("rebuild", "--apply", ok=False)
+        self.assertIn("refused", r.stdout + r.stderr)
+        self.assertEqual(json.loads((tw_dir / "state.json").read_text())["tasks"], after["tasks"])
+        self.tw("rebuild", "--apply", "--force")
+
+
+class Preconditions(TwCase):
+    """T20 / framework I28: illegal transitions are rejected in code, not stored."""
+
+    def setUp(self):
+        super().setUp()
+        self.tw("thread", "add", "ui")
+        self.tw("task", "add", "T1", "--owner", "ui")
+
+    def status(self, t="T1"):
+        return self.state()["tasks"][t]["status"]
+
+    def raw(self, *args):
+        return self.tw(*args, ok=False, walk=False)
+
+    def test_task_machine(self):
+        r = self.raw("task", "set", "T1", "--status", "working")  # planned -> working skips steps
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("can move to approved, dropped", r.stderr)
+        self.assertEqual(self.status(), "planned")  # rejected, not stored
+        self.assertIn("plan approve", self.raw("task", "set", "T1", "--status", "approved").stderr)
+        self.tw("plan", "approve", "--user-said", "ok")
+        for s in ("dispatched", "working"):
+            self.assertEqual(self.raw("task", "set", "T1", "--status", s).returncode, 0, s)
+        r = self.raw("task", "set", "T1", "--status", "done", "--review", "pass", "--reviewer", "rev")
+        self.assertIn("done only from review", r.stderr)
+        self.assertEqual(self.raw("task", "set", "T1", "--status", "review").returncode, 0)
+        self.assertEqual(self.raw("task", "set", "T1", "--accept", "x", "--status", "done", "--review", "pass",
+                                  "--reviewer", "rev").returncode, 0)
+        self.assertNotEqual(self.raw("task", "set", "T1", "--status", "working").returncode, 0)  # done is final
+
+    def test_recall_and_drop(self):
+        self.tw("plan", "approve", "--user-said", "ok")
+        for s in ("dispatched", "recalled", "dispatched", "working", "recalled"):
+            self.assertEqual(self.raw("task", "set", "T1", "--status", s).returncode, 0, s)
+        self.assertIn("user's decision", self.raw("task", "set", "T1", "--status", "dropped").stderr)
+        self.assertEqual(self.raw("task", "set", "T1", "--status", "dropped", "--user-said", "skip it").returncode, 0)
+        self.tw("task", "add", "T2", "--owner", "ui")
+        for s in ("dispatched", "working"):
+            self.raw("task", "set", "T2", "--status", s)
+        self.assertNotEqual(self.raw("task", "set", "T2", "--status", "dropped").returncode, 0)  # recall first
+
+    def test_request_machine(self):
+        self.tw("req", "add", "answer me")
+        self.assertEqual(self.raw("req", "set", "R1", "--status", "reported").returncode, 0)  # answered in place
+        self.tw("req", "add", "plan first")
+        self.raw("req", "set", "R2", "--status", "proposed")
+        self.raw("req", "link", "R2", "T1")  # proposed stays proposed until the user says yes
+        r = self.raw("req", "set", "R2", "--status", "dispatched")
+        self.assertIn("user's decision", r.stderr)
+        self.assertEqual(self.raw("req", "set", "R2", "--status", "dispatched", "--user-said", "yes go").returncode, 0)
+        self.assertEqual(self.state()["requests"]["R2"]["user_said"][0]["text"], "yes go")
+        self.assertNotEqual(self.raw("req", "set", "R2", "--status", "reported").returncode, 0)  # not delivered
+        self.assertNotEqual(self.raw("req", "set", "R2", "--status", "delivered").returncode, 0)  # no tasks done
+        self.tw("req", "add", "x")
+        self.tw("req", "drop", "R3", "--user-said", "never mind")
+        self.assertNotEqual(self.raw("req", "link", "R3", "T1").returncode, 0)  # ended
+
+
+    def test_round1_stale_review_deps_undeliver(self):
+        self.tw("plan", "approve", "--user-said", "ok")
+        self.assertNotEqual(self.raw("task", "set", "T1", "--review", "pass", "--reviewer", "rev").returncode, 0)
+        for s in ("dispatched", "working", "review"):
+            self.raw("task", "set", "T1", "--status", s)
+        self.tw("req", "add", "x", "--tasks", "T1")
+        self.assertEqual(self.state()["requests"]["R1"]["status"], "delivered")
+        self.raw("task", "set", "T1", "--review", "pass", "--reviewer", "rev")
+        self.raw("task", "set", "T1", "--status", "working")  # rework after the pass
+        self.assertEqual(self.state()["requests"]["R1"]["status"], "dispatched")  # no longer delivered
+        self.raw("task", "set", "T1", "--status", "review")
+        self.assertNotEqual(self.raw("task", "set", "T1", "--status", "done").returncode, 0)  # old pass is void
+        self.raw("task", "set", "T1", "--review", "pass", "--reviewer", "api")
+        self.tw("thread", "add", "api")
+        self.raw("task", "set", "T1", "--owner", "api")  # the reviewer now owns it
+        self.assertNotEqual(self.raw("task", "set", "T1", "--status", "done").returncode, 0)
+        self.assertNotEqual(self.raw("task", "set", "T1", "--review", "pass", "--reviewer", "api thread").returncode, 0)
+        self.tw("task", "add", "T2", "--owner", "ui", "--deps", "T1")
+        r = self.raw("task", "set", "T2", "--status", "dispatched")
+        self.assertIn("waits for T1", r.stderr)
+        self.tw("req", "add", "y")
+        self.raw("req", "set", "R2", "--status", "reported")
+        self.assertNotEqual(self.raw("req", "close", "R2", "--user-said", "  ").returncode, 0)  # blank words
+
+
+    def test_round8_hyphen_owner_and_stale_report(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tw", TW)
+        tw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tw)
+        for rv in ("research-2-thread", "the research-2", "research-2:self", "Research-2"):
+            self.assertFalse(tw.reviewer_independent(rv, "research-2"), rv)
+        for rv in ("research-20", "research", "research-2/subagent", "zorblax"):
+            self.assertTrue(tw.reviewer_independent(rv, "research-2"), rv)
+        self.tw("plan", "approve", "--user-said", "ok")
+        for s in ("dispatched", "working", "review"):
+            self.raw("task", "set", "T1", "--status", s)
+        self.tw("req", "add", "quixbar", "--tasks", "T1")
+        self.raw("req", "set", "R1", "--status", "reported")
+        self.raw("task", "set", "T1", "--status", "working")  # review failed after the report
+        self.assertNotEqual(self.raw("req", "close", "R1", "--user-said", "fine").returncode, 0)
+        self.assertEqual(self.state()["requests"]["R1"]["status"], "dispatched")  # the report is stale
+        self.raw("task", "set", "T1", "--status", "review")
+        self.assertEqual(self.state()["requests"]["R1"]["status"], "delivered")  # report the new result first
+        self.assertNotEqual(self.raw("req", "close", "R1", "--user-said", "fine").returncode, 0)
+        self.assertNotEqual(self.raw("task", "set", "T1", "--status", "done", "--review", "pass",
+                                     "--reviewer", "rev").returncode, 0)  # no 'done when' to check against
+        # an earlier owner wrote part of it: never its reviewer
+        self.tw("thread", "add", "zorblax")
+        self.tw("task", "set", "T1", "--accept", "Quixbar works", "--owner", "zorblax")
+        for rv in ("ui", "ui-thread"):
+            self.assertNotEqual(self.raw("task", "set", "T1", "--review", "pass", "--reviewer", rv,
+                                         "--status", "done").returncode, 0, rv)
+        self.assertEqual(self.raw("task", "set", "T1", "--review", "pass", "--reviewer", "ui/subagent",
+                                  "--status", "done").returncode, 0)
+
+    def test_round11_link_reopens_delivered_and_ownerless_review(self):
+        ok = lambda *x: self.assertEqual(self.raw(*x).returncode, 0, x)
+        no = lambda *x: self.assertNotEqual(self.raw(*x).returncode, 0, x)
+        req = lambda r="R1": self.state()["requests"][r]["status"]
+        self.tw("thread", "add", "qa")
+        ok("task", "set", "T1", "--accept", "Quixbar works")
+        ok("task", "add", "T2", "--owner", "qa", "--accept", "Zorblax works")
+        ok("plan", "approve", "--user-said", "ok")
+        for st in ("dispatched", "working", "review"):
+            ok("task", "set", "T1", "--status", st)
+        ok("task", "set", "T1", "--review", "pass", "--reviewer", "rev")
+        ok("task", "set", "T2", "--status", "dispatched")
+        ok("req", "add", "zorblax", "--tasks", "T1")
+        self.assertEqual(req(), "delivered")
+        ok("req", "link", "R1", "T2")  # unfinished work joins: the delivery no longer holds
+        self.assertEqual(req(), "dispatched")
+        no("req", "set", "R1", "--status", "reported")
+        no("req", "close", "R1", "--user-said", "fine")
+        self.assertEqual(req(), "dispatched")
+        # no owner: a review cannot be recorded
+        ok("task", "set", "T1", "--owner", "")
+        no("task", "set", "T1", "--review", "pass", "--reviewer", "rev")
+
+    def test_round9_each_gate_pinned(self):
+        ok = lambda *x: self.assertEqual(self.raw(*x).returncode, 0, x)
+        no = lambda *x: self.assertNotEqual(self.raw(*x).returncode, 0, x)
+        no("plan", "approve")  # the user's words are needed
+        ok("plan", "approve", "--user-said", "ok")
+        self.tw("thread", "add", "qa")
+        for st in ("dispatched", "working", "review"):
+            ok("task", "set", "T1", "--status", st)
+        ok("req", "add", "zorblax", "--tasks", "T1")
+        ok("req", "set", "R1", "--status", "reported")
+        ok("task", "set", "T1", "--review", "pass", "--reviewer", "qa")
+        no("req", "close", "R1", "--user-said", "fine")  # passed against an empty 'done when'
+        ok("task", "set", "T1", "--accept", "Quixbar works", "--review", "pass", "--reviewer", "qa")
+        ok("task", "set", "T1", "--checks", "fail")
+        no("req", "close", "R1", "--user-said", "fine")  # checks failing
+        ok("task", "set", "T1", "--checks", "pass")
+        ok("task", "set", "T1", "--owner", "qa")  # the reviewer became the owner: the pass is void
+        self.assertNotEqual((self.state()["tasks"]["T1"].get("review") or {}).get("result"), "pass")
+        no("req", "close", "R1", "--user-said", "fine")
+        no("task", "set", "T1", "--status", "done")
+        no("task", "set", "T1", "--review", "pass", "--reviewer", "ui")  # an earlier owner cannot review
+        ok("task", "set", "T1", "--review", "pass", "--reviewer", "rev")
+        ok("task", "set", "T1", "--status", "working")  # rework voids the pass
+        ok("task", "set", "T1", "--status", "review")
+        self.assertNotEqual((self.state()["tasks"]["T1"].get("review") or {}).get("result"), "pass")
+        no("task", "set", "T1", "--status", "done")
+        ok("task", "set", "T1", "--review", "fail", "--reviewer", "rev")
+        ok("task", "set", "T1", "--status", "review")
+        ok("req", "set", "R1", "--status", "reported")
+        no("req", "close", "R1", "--user-said", "fine")  # a recorded fail
+        ok("req", "add", "quixbar question")
+        no("req", "close", "R2", "--user-said", "fine")  # never reported
+        # an owner cleared after the pass: neither close nor done
+        ok("task", "set", "T1", "--review", "pass", "--reviewer", "rev")
+        ok("task", "set", "T1", "--owner", "")
+        no("req", "close", "R1", "--user-said", "fine")
+        no("task", "set", "T1", "--status", "done")
+        ok("task", "set", "T1", "--owner", "qa")
+        ok("task", "set", "T1", "--review", "pass", "--reviewer", "rev")
+        no("task", "set", "T1", "--status", "done", "--skip-review", " ", "--user-said", "ok")  # blank reason
+        ok("task", "set", "T1", "--status", "done")
+        no("task", "set", "T1", "--owner", "rev")  # a done task is final
+        no("task", "set", "T1", "--accept", "")
+        no("plan", "approve", "--user-said", "  ")  # blank words
+
+    def test_round2_more_bypasses(self):
+        self.tw("plan", "approve", "--user-said", "ok")
+        for s in ("dispatched", "working", "review"):
+            self.raw("task", "set", "T1", "--status", s)
+        self.tw("task", "add", "T2", "--owner", "ui")
+        self.tw("req", "add", "x", "--tasks", "T1")
+        self.raw("req", "set", "R1", "--status", "reported")
+        self.assertNotEqual(self.raw("req", "link", "R1", "T2").returncode, 0)  # reopening is the user's call
+        self.assertEqual(self.raw("req", "link", "R1", "T2", "--user-said", "also do T2").returncode, 0)
+        self.assertEqual(self.state()["requests"]["R1"]["status"], "dispatched")
+        self.assertNotEqual(self.raw("req", "close", "R1", "--user-said", "ok").returncode, 0)
+        self.assertNotEqual(self.raw("task", "set", "T1", "--status", "done", "--skip-review", "x").returncode, 0)
+        for who in ("ui-thread", "the ui", "Ui:self"):
+            self.assertNotEqual(self.raw("task", "set", "T1", "--review", "pass", "--reviewer", who).returncode, 0, who)
+        self.tw("task", "add", "T3", "--owner", "ui")
+        self.tw("task", "add", "T4", "--owner", "ui")
+        self.assertNotEqual(self.raw("task", "set", "T3", "--status", "dispatched", "--deps", "T4").returncode, 0)
+        self.tw("plan", "reopen")
+        self.assertIn("reopened", self.raw("task", "set", "T3", "--status", "dispatched").stderr)
+
+
+    def test_round3_gate_words_deps_accept_checks(self):
+        self.assertNotEqual(self.raw("plan", "approve").returncode, 0)  # needs the user's words
+        self.tw("plan", "approve", "--user-said", "go")
+        self.assertNotEqual(self.raw("prefs", "--set", "require_review=nope").returncode, 0)
+        self.assertNotEqual(self.raw("prefs", "--set", "require_review=").returncode, 0)
+        self.tw("task", "add", "T2", "--owner", "ui", "--deps", "T1")
+        self.assertNotEqual(self.raw("task", "set", "T2", "--status", "dispatched", "--deps", "").returncode, 0)
+        self.tw("task", "add", "T3")
+        self.assertIn("no owner", self.raw("task", "set", "T3", "--status", "dispatched").stderr)
+        for st_ in ("dispatched", "working", "review"):
+            self.raw("task", "set", "T1", "--status", st_)
+        self.raw("task", "set", "T1", "--review", "pass", "--reviewer", "rev")
+        self.raw("task", "set", "T1", "--accept", "something else")  # new "done when": old verdict void
+        self.assertNotEqual(self.raw("task", "set", "T1", "--status", "done").returncode, 0)
+        self.raw("task", "set", "T1", "--checks", "fail")
+        r = self.raw("task", "set", "T1", "--status", "done", "--skip-review", "x", "--user-said", "ok")
+        self.assertIn("checks failed", r.stderr)
+        self.tw("req", "add", "q")
+        self.tw("req", "drop", "R1", "--user-said", "no")
+        self.assertNotEqual(self.raw("req", "set", "R1", "--text", "rewritten").returncode, 0)
+
+
+    def test_round4_same_command_and_blank_values(self):
+        self.tw("plan", "approve", "--user-said", "go")
+        self.tw("thread", "add", "api")
+        for st_ in ("dispatched", "working", "review"):
+            self.raw("task", "set", "T1", "--status", st_)
+        r = self.raw("task", "set", "T1", "--owner", "", "--review", "pass", "--reviewer", "ui", "--status", "done")
+        self.assertNotEqual(r.returncode, 0)  # clearing the owner does not make its author independent
+        self.assertNotEqual(self.raw("task", "set", "T1", "--review", "pass", "--reviewer", " ").returncode, 0)
+        self.raw("task", "set", "T1", "--review", "pass", "--reviewer", "rev")
+        self.assertNotEqual(self.raw("task", "set", "T1", "--status", "done", "--accept", "B").returncode, 0)
+        self.raw("task", "set", "T1", "--checks", "fail")
+        self.assertNotEqual(self.raw("task", "set", "T1", "--checks", "none").returncode, 0)
+        self.assertNotEqual(self.raw("task", "set", "T1", "--status", "done", "--skip-review", " ",
+                                     "--user-said", "ok").returncode, 0)
+        self.tw("prefs", "--set", "require_review=off", "--user-said", "fine skip it")
+        self.assertEqual(self.state()["prefs_user_said"][-1]["text"], "fine skip it")
+        self.assertIn("fine skip it", (self.dir / ".teamwork" / "log.jsonl").read_text())
+        self.tw("req", "add", "z")
+        self.assertIn("no tasks", self.raw("req", "set", "R1", "--status", "dispatched").stderr)
+
+
+class TopicsRosterAsk(TwCase):
+    """T19: related tasks never run in parallel; ROSTER broadcasts are tracked; questions numbered from 1."""
+
+    def setUp(self):
+        super().setUp()
+        self.tw("thread", "add", "docs", "--session", "s-docs", "--status", "working")
+        self.tw("thread", "add", "kit", "--session", "s-kit", "--status", "idle")
+        self.tw("plan", "approve", "--user-said", "ok")
+
+    def ready(self):
+        return json.loads(self.tw("ready").stdout)
+
+    def test_topic_overlap_blocks(self):
+        self.tw("task", "add", "T1", "--owner", "docs", "--topics", "Mechanism,request-ledger")
+        self.tw("task", "add", "T2", "--owner", "kit", "--topics", "mechanism")
+        self.tw("task", "add", "T3", "--owner", "kit", "--topics", "installer")
+        self.tw("task", "add", "T4", "--owner", "docs", "--topics", "mechanism")  # same thread: sequential
+        self.tw("task", "set", "T1", "--status", "working")
+        r = self.ready()
+        self.assertEqual(r["blocked_by_topic"]["T2"][0]["with"], "T1")
+        self.assertEqual(r["blocked_by_topic"]["T2"][0]["topics"], ["mechanism"])
+        self.assertIn("why", r["blocked_by_topic"]["T2"][-1])
+        self.assertEqual(sorted(r["ready"]), ["T3", "T4"])
+
+    def test_roster_reminder(self):
+        self.assertEqual(self.ready()["roster_not_sent"], ["docs"])  # kit was added after docs
+        self.tw("thread", "set", "all", "--roster-sent")
+        self.assertEqual(self.ready()["roster_not_sent"], [])
+        self.tw("thread", "add", "wl2", "--session", "s-wl2", "--status", "starting")
+        self.assertEqual(sorted(self.ready()["roster_not_sent"]), ["docs", "kit"])  # new thread knows itself
+        self.tw("thread", "set", "docs", "--roster-sent")
+        self.assertEqual(self.ready()["roster_not_sent"], ["kit"])
+        self.assertFalse([x for x in json.loads(self.tw("open").stdout) if x["thread"] == "kit"][0]["roster_sent"])
+        self.tw("thread", "set", "all", "--roster-sent")
+        self.tw("thread", "set", "kit", "--owns", "kit/")  # ownership changed: everyone needs a new ROSTER
+        self.assertEqual(sorted(self.ready()["roster_not_sent"]), ["docs", "kit", "wl2"])
+        self.assertNotEqual(self.tw("thread", "add", "all", ok=False).returncode, 0)
+
+    def test_owner_subagent_may_review(self):
+        self.tw("task", "add", "T1", "--owner", "docs")
+        self.assertNotEqual(self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "docs", ok=False).returncode, 0)
+        self.tw("task", "set", "T1", "--accept", "x", "--review", "pass", "--reviewer", "docs/subagent", "--status", "done")
+        self.assertEqual(self.state()["tasks"]["T1"]["review"]["reviewer"], "docs/subagent")
+
+    def test_ask_numbers_from_one(self):
+        self.tw("ask", "blue or green?", "--from", "docs")
+        self.assertIn("- [1] (docs) blue or green?", self.tw("board").stdout)
+        self.tw("ask", "--answer", "1")
+        self.assertTrue(self.state()["questions"][0]["answered"])
+        self.tw("ask", "second?", "--from", "kit")
+        self.tw("ask", "--answer", "2", "green")
+        self.assertEqual(self.state()["questions"][1]["answer"], "green")
+        r = self.tw("ask", "--answer", "3", ok=False)
+        self.assertIn("numbered 1..2", r.stderr)
+        self.assertNotEqual(self.tw("ask", "--answer", "0", ok=False).returncode, 0)
+
+
+    def test_round2_topics_reviewer_answers_roster(self):
+        self.tw("task", "add", "T1", "--owner", "docs", "--topics", "Request Ledger")
+        self.tw("task", "add", "T2", "--owner", "kit", "--topics", "request_ledger")
+        r = self.ready()  # both ready, neither active: still must not run in parallel
+        self.assertIn("T2", r["blocked_by_topic"])
+        self.assertNotIn("T2", r["ready"])
+        for bad in ("Docs", "./docs", "docs/", "docs/x/.."):
+            self.assertNotEqual(self.tw("task", "set", "T1", "--review", "pass", "--reviewer", bad,
+                                        ok=False).returncode, 0, bad)
+        self.tw("ask", "q?", "--from", "docs")
+        self.tw("ask", "--answer", "1", "yes")
+        r = self.tw("ask", "--answer", "1", "no", ok=False)
+        self.assertIn("already answered", r.stderr)
+        self.assertEqual(self.state()["questions"][0]["answer"], "yes")
+        self.assertNotIn("status", self.tw("roster").stdout.lower().replace("tw-status", ""))
+
+
+    def test_round3_lead_takeover_needs_roster(self):
+        self.tw("lead", "--session", "L1")
+        self.tw("thread", "set", "all", "--roster-sent")
+        self.assertEqual(self.ready()["roster_not_sent"], [])
+        self.tw("lead", "--session", "L2", "--force")
+        self.assertEqual(sorted(self.ready()["roster_not_sent"]), ["docs", "kit"])
+        self.tw("thread", "set", "kit", "--status", "resolved")
+        self.assertEqual(self.ready()["roster_not_sent"], ["docs"])  # same rule as `open`
 
 if __name__ == "__main__":
     unittest.main()

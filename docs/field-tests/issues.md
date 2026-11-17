@@ -220,3 +220,16 @@ Scope: this covers only the `git push` rules; other ask rules (e.g. `gh api`, R2
 - R27-5 A `TMPDIR` that points into a subfolder of the home directory (e.g. `~/Documents/x`) is added to `additionalDirectories` as is.
 - R27-6 A malformed settings.json is only detected after step 1 has copied the skill, leaving a half-installed state. Re-running works, but the check could move first.
 - R27-7 `install.py` and `tw.py` compute the worktree folder differently (`--project` vs `repo.path`). When the project folder is not the repo root, the two disagree.
+
+### T25: review gate and privacy guard
+
+Reviewed at core branch commit 6692599.
+
+- R25-1 `task set --status done --skip-review` overwrites an existing `pass` + remaining verdict without going through void, so follow-up tasks already opened are not flagged (`tw.py`, around line 1052).
+- R25-2 `rebuild`: in a project with a short name and no lead events in the log, a session from another project that matches only on the initials tag is still accepted (with a warning).
+- R25-3 A PRIVATE.md line written as `"X Y" - note` also yields the extra word `X Y" - note`. No false positives, just untidy.
+- R25-4 The cloud kit does not check ref names other than tags and the current branch; in XML with line breaks, words split by tags are not joined back.
+- R25-5 The number of hashes roughly reveals the number of words; with a large word list (1000 words) scanning costs about 1.85 s per MB.
+- R25-6 `--rounds` can be reported as 2 on the first round; "at least 2 rounds" relies on the thread reporting honestly.
+- R25-7 PDF decompression has no total size cap; `~/x` is not expanded to the absolute home path; short paths such as `/a` cause false positives.
+- R25-8 Encodings suggested in review round 1 and not handled: Python `\x` escapes, base64, quoted-printable (.eml), double percent-encoding. Note: the local `tw.py guard` already decodes HTML entities, `\u` Unicode escapes and UTF-16 text (T25 batch 1, with tests). Only the cloud kit (`tw-guard.py`) does not decode them, because it reads raw text only (see R25-4).

@@ -1321,20 +1321,50 @@ def _subject_leads_with(subj, tids, rxs=None):
     return bool(lead) and (any(rx.fullmatch(lead.strip()) for rx in rxs) or lead.strip() in tids)
 
 
-def _other_tasks_only(git, base, br, others):
-    """Files on br (since base) changed only by commits whose subject starts with one of the other task ids.
-    Everything else holds: this task's commits, and commits naming no task (`WIP: ...`, `fixup! ...`, merges,
-    whose files git log does not list), so unclear work is never dropped from the lease."""
-    if not others:
-        return set()
-    rxs = [_ID_RX(t) for t in others]
-    theirs, rest = set(), set()
-    log = git("log", "-z", "--relative", "--no-renames", "--name-only", "--format=%x01%s", f"{base}..{br}").stdout
-    for chunk in log.split("\x01")[1:]:
-        subj, _, names = chunk.partition("\x00")
-        names = set(_z(names[1:] if names.startswith("\n") else names))
-        (theirs if _subject_leads_with(subj, others, rxs) else rest).update(names)
-    return theirs - rest
+_TOKEN_RX = re.compile(r"[A-Za-z0-9_]+(?:[.-][0-9A-Za-z]+)*")  # one id-like word, as _ID_RX delimits task ids
+_TOUCHES_CACHE = {}
+
+
+def _branch_touches(git, base, br):
+    """{file: [(lead id, words in the subject, plain)]} for the commits on br since base, parsed once per run.
+    lead: the subject's leading id (`T5: ...`, `[T5] ...`, `fix(T5): ...`); words: lowercased, each also cut
+    at its first `-` or `.` (`T29-related` names T29: a near miss holds); plain: an add / modify / delete in a
+    one-parent commit. Renames git detects (both names) and every file a merge brought in (first parent) are
+    never plain, whatever the subject says. Copies are not looked for (`--find-copies-harder` is too slow), and
+    a rename git sees as delete + add counts as plain."""
+    args = ("-z", "-M", "--relative", "--name-status", "--format=%x01%P%x02%s", f"{base}..{br}")
+    r = git("log", "--diff-merges=first-parent", *args)  # a merge lists what it brought in (git >= 2.31) ...
+    log = (r if r.returncode == 0 else git("log", "-m", *args)).stdout  # ... older git: against every parent
+    key = log  # git calls are cached per run; the parse is shared by every task that reads this branch
+    if key not in _TOUCHES_CACHE:
+        touches = {}
+        for chunk in log.split("\x01")[1:]:
+            subj, _, names = chunk.partition("\x00")
+            parents, _, subj = subj.partition("\x02")
+            merge = len(parents.split()) > 1
+            head = re.match(r"\s*(?:\[([^\]]+)\]|\w+\(([^)]+)\)|([^\s:]+))", subj)
+            lead = ((head and next((g for g in head.groups() if g), "")) or "").strip()
+            words = {w.lower() for w in _TOKEN_RX.findall(subj)}
+            words = frozenset(words | {re.split(r"[.-]", w, 1)[0] for w in words})
+            tok, i = _z(names[1:] if names.startswith("\n") else names), 0
+            while i < len(tok):
+                two = tok[i].strip()[:1] in ("R", "C")
+                paths = tok[i + 1:i + 3] if two else tok[i + 1:i + 2]
+                for f in paths:
+                    touches.setdefault(f, []).append((lead, words, not (two or merge)))
+                i += 1 + len(paths)
+        _TOUCHES_CACHE[key] = touches
+    return _TOUCHES_CACHE[key]
+
+
+def _other_tasks_only(git, base, br, task, ids, files):
+    """The files (of `files`) that only other tasks' commits on br changed: every commit touching them leads with
+    another task's id (`T5: ...`), does not name `task` anywhere, and is a plain one-parent change (see
+    _branch_touches). Everything else holds: this task's commits, commits naming no task (`WIP: ...`, `fixup! ...`),
+    renames and merges, so unclear work is never dropped from the lease."""
+    touches = _branch_touches(git, base, br)
+    return {f for f in files if touches.get(f) and all(plain and lead != task and lead in ids and task.lower() not in words
+                                                         for lead, words, plain in touches[f])}
 
 
 def _landed_files(git, base, br, files, tids):
@@ -1421,18 +1451,17 @@ def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None, task=Non
             past |= set(two)  # the current owner comes first, so a branch it shares is never filtered
         refs += [r for r in two if r not in refs]
     for br in refs:
-        if True:
-            r = git("diff", "-z", "--relative", "--name-only", "--no-renames", f"{base}...{br}")  # a rename holds old and new
-            if r.returncode != 0 and warnings is not None:
-                warnings.append(f"git diff {base}...{br} failed: {r.stderr.strip()[:120]}")
-            got = [RealFile(f) for f in _z(r.stdout)]
-            if br in past:
-                theirs = _other_tasks_only(git, base, br, [x for x in st["tasks"] if x != task])
-                got = [f for f in got if f not in theirs]
-            if unmerged_only and got:
-                gone = _landed_files(git, base, br, got, tid)
-                got = [f for f in got if f not in gone]
-            files += got
+        r = git("diff", "-z", "--relative", "--name-only", "--no-renames", f"{base}...{br}")  # a rename holds old and new
+        if r.returncode != 0 and warnings is not None:
+            warnings.append(f"git diff {base}...{br} failed: {r.stderr.strip()[:120]}")
+        got = [RealFile(f) for f in _z(r.stdout)]
+        if br in past:
+            theirs = _other_tasks_only(git, base, br, task, st["tasks"], got)
+            got = [f for f in got if f not in theirs]
+        if unmerged_only and got:
+            gone = _landed_files(git, base, br, got, tid)
+            got = [f for f in got if f not in gone]
+        files += got
     return [RealFile(f) for f in sorted(set(files))]
 
 

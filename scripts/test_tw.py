@@ -1302,6 +1302,73 @@ class LeasesGitReview(LeasesGit):
         self.assertEqual(held, ["m/side.py", "w/fix.py", "w/zorblax.py"], r)
         self.assertIn("T8", r["ready"], r)  # T2's file is not held by T29
 
+    def test_t29_other_lead_naming_this_task_and_renames_hold(self):
+        """T29 review r2: `T5 and T29: ...` still names T29; a file T29 made that a T5 commit renamed still holds."""
+        self.tw("thread", "add", "db")
+        for t in ("T29", "T5"):
+            self.tw("task", "add", t, "--owner", "ui")
+        self.tw("task", "add", "T7", "--owner", "api", "--touches", "q/both.py, q/new.py")
+        self.tw("task", "set", "T29", "--status", "working")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "q").mkdir()
+        (self.proj / "q" / "both.py").write_text("b = 1\n")
+        self.commit("T5 and T29: shared Quixbar")
+        (self.proj / "q" / "old.py").write_text("o = 1\n" * 20)
+        self.commit("T29: zorblax module")
+        self.git("mv", "q/old.py", "q/new.py")
+        self.commit("T5: rename")
+        self.git("checkout", "-q", "main")
+        self.tw("task", "set", "T29", "--owner", "db")
+        r = json.loads(self.tw("ready").stdout)
+        self.assertEqual(sorted(p for b in r["blocked_by_lease"]["T7"] for p in b["paths"]), ["q/both.py", "q/new.py"])
+
+    def test_t29_tagged_merge_and_near_names_hold(self):
+        """T29 review r3: a merge titled `T5: ...` (evil edits included) and `T5: T29-related` still hold."""
+        self.tw("thread", "add", "db")
+        for t in ("T29", "T5"):
+            self.tw("task", "add", t, "--owner", "ui")
+        self.tw("task", "add", "T7", "--owner", "api", "--touches", "e/evil.py, e/side.py, e/near.py")
+        self.tw("task", "set", "T29", "--status", "working")
+        self.git("checkout", "-q", "-b", "side")
+        (self.proj / "e").mkdir()
+        (self.proj / "e" / "side.py").write_text("s = 1\n")
+        self.commit("T5: side")
+        self.git("checkout", "-q", "main")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        self.git("merge", "-q", "--no-ff", "--no-commit", "side")
+        (self.proj / "e" / "evil.py").write_text("e = 1\n")
+        self.commit("T5: merge side")
+        (self.proj / "e" / "near.py").write_text("n = 1\n")
+        self.commit("T5: T29-related Zorblax")
+        self.git("checkout", "-q", "main")
+        self.tw("task", "set", "T29", "--owner", "db")
+        r = json.loads(self.tw("ready").stdout)
+        self.assertEqual(sorted(p for b in r["blocked_by_lease"]["T7"] for p in b["paths"]),
+                         ["e/evil.py", "e/near.py", "e/side.py"])
+
+    def test_t29_many_tasks_stay_fast(self):
+        """T29 review r2: the branch log is parsed once, not once per task with a regex per task id."""
+        import time
+        self.tw("thread", "add", "db")
+        self.tw("task", "add", "T1", "--owner", "ui")
+        st = json.loads((self.proj / ".teamwork" / "state.json").read_text())
+        base = st["tasks"]["T1"]
+        for i in range(600):
+            st["tasks"][f"T{100 + i}"] = {**base, "owner": "db", "past_owners": ["ui"], "status": "working"}
+        (self.proj / ".teamwork" / "state.json").write_text(json.dumps(st))
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "z").mkdir()
+        for i in range(40):
+            (self.proj / "z" / f"f{i}.py").write_text(f"x = {i}\n")
+            self.commit(f"T{100 + i}: zorblax {i}")
+        self.git("checkout", "-q", "main")
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import tw
+        t0 = time.time()
+        held = tw._held_paths(json.loads((self.proj / ".teamwork" / "state.json").read_text()))
+        self.assertLess(time.time() - t0, 5)
+        self.assertEqual(held["T105"], ["z/f5.py"])
+
     def test_t25_diverged_copies_both_hold(self):
         """T11-b: local and origin diverged with different work on each side: both sides count, not only the newer."""
         def commit_at(msg, when):

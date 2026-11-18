@@ -6,7 +6,7 @@ Companion to [`framework.md`](framework.md). Two parts:
   `framework.md` that specifies it.
 - **Findings**: places where the implementation and the specification disagree, or the implementation is silent.
 
-Checked against `main` at `3640ebe`. The implementation files belong to core; findings are reported here, not fixed.
+Checked against `main` at `3640ebe`; the status of each finding was updated in T26 (end of Findings).
 
 ---
 
@@ -140,3 +140,34 @@ Severity: **H** can break a run, **M** wrong or misleading behaviour, **L** cosm
 - Worktree created by the lead (`tw.py worktree`) before `create_session`.
 - Thread permission mode passed at creation (`thread_permission_mode` or the lead's).
 - Stuck detection: `last_status_at`, `--from-status`, `stuck_minutes`, board group.
+
+### Status of the findings (T26)
+
+Every finding above has been handled. "Fixed" points to where it now lives; the ones changed in T26 have a
+test in `scripts/test_tw.py` (`AuditFollowups`) that checks the wording or the behaviour; "earlier" or a task id means it was done before T26.
+
+| # | Status | Where it is handled |
+|---|---|---|
+| Y-1 | fixed | worker-protocol "Ownership and handoffs" 2 and 4: a cloud thread messages only cloud peers; for an rc peer the whole HANDOFF goes in `handed_off` and the lead forwards it (SKILL §5.4). |
+| Y-2 | fixed (T25) | `Bash(sleep *)` and `send_later` in the skill's `allowed-tools`; archiving still asks. |
+| Y-3 | fixed | SKILL §5.3: `state: waiting` with a peer in `waiting_on` keeps the seat `working`, peer named in the summary; `waiting` means the user has to act. |
+| Y-4 | fixed | SKILL "Ledger": `plan show`, `plan reopen`, `log`, `roster --thread`, `worktree --dry-run` described. |
+| Y-5 | fixed | SKILL "Ledger" (statuses that follow from events) and §5.3: `starting` after a `reseat` without `--status`; task `working` on the ACK of a TASK or HANDOFF, `review` on DONE, a still-dispatched task through `working` first; `dropped` is the user's. |
+| Y-6 | fixed (earlier) | `tw.py context` ends a cut text with a marker that names INSTRUCTIONS.md, BOARD.md and MEMORY.md to read in full. |
+| Y-7 | fixed | SKILL §5.4: forward as `TASK` (new to the receiver) or `FOLLOWUP` (it had the task), quoting the original. |
+| Y-8 | fixed | `tw.py ask` refuses a blank question (it was still accepted; fixed now). The `--answer` index check was already there. |
+| Y-9 | decided | SKILL "Ledger": a task added after approval for a recorded user request counts as approved (the request is the go-ahead); one the lead thought of, with `propose_before_start=true`, is proposed first. This rests on the prompt only: `tw.py` still records such a task as `approved` and has no state for "proposed, waiting". |
+| Y-10 | fixed | worker-protocol STATUS: `task:` takes one entry per open task with its state word (`T3 working; T5 waiting`). |
+| Y-11 | fixed | SKILL §6 Recall: the seat goes `idle` once the thread confirms it stopped, or gets the next TASK. |
+| Y-12 | fixed | SKILL §3.1: one `extra_allowed_tools` entry, noting `thread add` prints it for every kind. |
+| Y-13 | fixed (earlier) | `cmd_init` prefs: each comment on its own key. |
+| Y-14 | fixed (T14) | Request ledger: `req add/link/set/close/drop`, `trace`, unreported requests on the board and in the context. |
+| Y-15 | fixed | SKILL §4 "Intake, sized to the ask": intent and success criterion, do / propose / drop, before routing; `proposed` request state (T14). |
+| Y-16 | fixed (T23) | SKILL §7 and the protocol: a fresh-subagent review before DONE, rounds, `pass` / `capped`, recorded reviewer. |
+| Y-17 | partial (decided) | worker-protocol ACK row: the first ACK doubles as a health check (task id, worktree or branch, anything unreachable), and SKILL §5.3 has the lead fix a reported gap soon while the thread works on what it can, sending BLOCKED if the gap stops it. This is lighter than I35: the TASK is already sent and the thread can see its own "done when", so it is a self-report, not a check the session cannot see the answer to. Chosen to save a round trip per thread; a separate check before the first TASK stays open. |
+| Y-18 | fixed | SKILL §5.3: never `done` from a report; done only from `review` after a pass or capped verdict (also enforced in `tw.py`, T20/T23). |
+| Y-19 | fixed | SKILL §5.3 and §5.7: one disconnected sweep keeps the seat `working`; a second one, or `failed`, makes it `waiting`. |
+| Y-20 | fixed | worker-protocol: ACK covers FOLLOWUP too; SKILL §5.3: a TASK or FOLLOWUP with no ACK by the next sweep is sent once more, and the user is told when the next sweep still has none. |
+| Y-21 | fixed (T24) | rc by default; `--kind cloud` needs `--cloud-reason`; SKILL §2.3. |
+| Y-22 | partial | `prefs --set thread_permission_mode=auto` or `bypassPermissions` prints a note that the host refuses a thread looser than the lead. Gap: the ledger still records the mode, because tw.py cannot see the lead's mode; `create_session` is what refuses it. |
+| Y-23 | fixed (T20) | `task set --status done` only from `review`, with a passing or capped review (TASK_MOVES, accept gate). |

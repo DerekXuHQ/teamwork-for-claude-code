@@ -1313,6 +1313,30 @@ def _z(out):
 _ID_RX = lambda tid: re.compile(rf"(^|[^A-Za-z0-9_]){re.escape(tid)}(?![0-9A-Za-z_]|[.-][0-9A-Za-z])")
 
 
+def _subject_leads_with(subj, tids, rxs=None):
+    """True when a commit subject starts with one of the task ids (`T3: ...`, `[T3] ...`, `fix(T3): ...`)."""
+    rxs = rxs or [_ID_RX(t) for t in tids]
+    head = re.match(r"\s*(?:\[([^\]]+)\]|\w+\(([^)]+)\)|([^\s:]+))", subj)
+    lead = head and next((g for g in head.groups() if g), "")
+    return bool(lead) and (any(rx.fullmatch(lead.strip()) for rx in rxs) or lead.strip() in tids)
+
+
+def _other_tasks_only(git, base, br, others):
+    """Files on br (since base) changed only by commits whose subject starts with one of the other task ids.
+    Everything else holds: this task's commits, and commits naming no task (`WIP: ...`, `fixup! ...`, merges,
+    whose files git log does not list), so unclear work is never dropped from the lease."""
+    if not others:
+        return set()
+    rxs = [_ID_RX(t) for t in others]
+    theirs, rest = set(), set()
+    log = git("log", "-z", "--relative", "--no-renames", "--name-only", "--format=%x01%s", f"{base}..{br}").stdout
+    for chunk in log.split("\x01")[1:]:
+        subj, _, names = chunk.partition("\x00")
+        names = set(_z(names[1:] if names.startswith("\n") else names))
+        (theirs if _subject_leads_with(subj, others, rxs) else rest).update(names)
+    return theirs - rest
+
+
 def _landed_files(git, base, br, files, tids):
     """The subset of a done branch's files that has reached the base, by any kind of merge:
     - merging the branch into the base would change nothing at all (git merge-tree, git >= 2.38): all of them;
@@ -1334,9 +1358,7 @@ def _landed_files(git, base, br, files, tids):
             for chunk in log.split("\x01")[1:]:
                 subj, _, names = chunk.partition("\x00")
                 sha, _, subj = subj.partition(" ")
-                head = re.match(r"\s*(?:\[([^\]]+)\]|\w+\(([^)]+)\)|([^\s:]+))", subj)
-                lead = head and next((g for g in head.groups() if g), "")
-                if lead and (any(rx.fullmatch(lead.strip()) for rx in rxs) or lead.strip() in tids):
+                if _subject_leads_with(subj, tids, rxs):
                     todo = (set(files) - same) & set(_z(names[1:] if names.startswith("\n") else names))
                     if not todo:
                         continue
@@ -1363,9 +1385,11 @@ def _blobs_at(git, rev, files):
     return out
 
 
-def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None):
-    """tid: a task id or a list of them whose squash commits count as landed (see _landed_files)."""
-    """Files changed on the owner's branch vs base ([] when not a git repo or no branch). Problems go to warnings.
+def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None, task=None):
+    """tid: a task id or a list of them whose squash commits count as landed (see _landed_files).
+    task: this task's id. An earlier owner's branch then does not hold files that only commits for other tasks
+    changed (subject starts with another task's id): that thread's other work is not this task's (T29).
+    Files changed on the owner's branch vs base ([] when not a git repo or no branch). Problems go to warnings.
     unmerged_only: leave out files that have already landed on the base (done or recalled tasks)."""
     # the current owner's branch, and every earlier owner's: work a handed-over task left unmerged there still counts
     seats = [st["threads"][n] for n in dict.fromkeys([k.get("owner") or ""] + list(k.get("past_owners") or []))
@@ -1382,7 +1406,7 @@ def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None):
             warnings.append(f"base branch {st.get('repo', {}).get('base') or 'main'} not found: real branch diffs "
                             "are not checked (fix repo.base)")
         return []
-    files, refs = [], []
+    files, refs, past = [], [], set()
     for owner in seats:
         two = [b for b in (owner["branch"], f"origin/{owner['branch']}")
                if git("rev-parse", "--verify", "--quiet", b).returncode == 0]
@@ -1393,6 +1417,8 @@ def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None):
                 two = [two[0]]
             # diverged (rebased, amended, force-pushed, or two sessions each holding work): both copies hold, so
             # work on either side is never dropped; a stale copy stops once it lands, is deleted or pruned
+        if task and owner is not st["threads"].get(k.get("owner") or "") and not set(two) & set(refs):
+            past |= set(two)  # the current owner comes first, so a branch it shares is never filtered
         refs += [r for r in two if r not in refs]
     for br in refs:
         if True:
@@ -1400,6 +1426,9 @@ def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None):
             if r.returncode != 0 and warnings is not None:
                 warnings.append(f"git diff {base}...{br} failed: {r.stderr.strip()[:120]}")
             got = [RealFile(f) for f in _z(r.stdout)]
+            if br in past:
+                theirs = _other_tasks_only(git, base, br, [x for x in st["tasks"] if x != task])
+                got = [f for f in got if f not in theirs]
             if unmerged_only and got:
                 gone = _landed_files(git, base, br, got, tid)
                 got = [f for f in got if f not in gone]
@@ -1417,9 +1446,9 @@ def _held_paths(st, warnings=None):
         landed_ids = [x for x, kx in st["tasks"].items() if kx.get("owner") and kx.get("owner") in seats
                       and kx.get("status") == "done"]
         if k["status"] in LEASE_ACTIVE:
-            held[t] = (k.get("touches") or []) + branch_changes(st, k, warnings, unmerged_only=True, tid=landed_ids)
+            held[t] = (k.get("touches") or []) + branch_changes(st, k, warnings, unmerged_only=True, tid=landed_ids, task=t)
         elif k["status"] in ("done", "recalled"):
-            changed = branch_changes(st, k, warnings, unmerged_only=True, tid=landed_ids)
+            changed = branch_changes(st, k, warnings, unmerged_only=True, tid=landed_ids, task=t)
             if changed:
                 held[t] = changed
     if warnings is not None:
@@ -1632,7 +1661,8 @@ def cmd_ask(a):
             q["answer"] = a.text
         save(d, st, {"ev": "answered", "n": n})
     else:
-        if not a.text:
+        a.text = (a.text or "").strip()
+        if not a.text:  # a blank question would sit on the board as "waiting on the user" with nothing to answer
             sys.exit('usage: ask "<question>" --from <thread>   or   ask --answer N ["<answer>"]')
         nt = (a.need_thread or "").strip().lower() or None
         if nt:
@@ -1719,6 +1749,11 @@ def cmd_prefs(a):
             st["prefs"][k] = v
         if k == "thread_permission_mode" and v and v not in PERMISSION_MODES:
             sys.exit(f"thread_permission_mode: one of {', '.join(PERMISSION_MODES)}, or empty for the lead's own mode")
+        if k == "thread_permission_mode" and v in ("auto", "bypassPermissions"):
+            # tw.py cannot see the lead's own mode: say the rule out loud instead of recording a mode that fails
+            print(f"note: threads get {v} only if the lead runs at least as loose a mode; create_session refuses a "
+                  "thread more permissive than its creator, and bypassPermissions lets a thread run everything without "
+                  "asking except the ask rules", file=sys.stderr)
         if k == "review_max_rounds":
             if not re.fullmatch(r"[0-9]{1,2}", v):
                 sys.exit("review_max_rounds: a whole number of review rounds, 0-99 (default 3; 0 = no limit)")

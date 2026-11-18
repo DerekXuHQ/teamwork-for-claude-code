@@ -49,7 +49,7 @@ The task-id slot holds exactly one task id from the board (`T3`), or `-` when th
 
 | TYPE | When |
 |---|---|
-| `ACK` | You received a TASK or HANDOFF and are starting. One line. |
+| `ACK` | You received a TASK, FOLLOWUP or HANDOFF and are starting. One line that doubles as a health check: the task id, your worktree (rc) or branch (cloud), and any tool or file you cannot reach (`-` if none). Work on what you can; if the gap stops the task, send `BLOCKED`. Cloud threads: your ACK is the STATUS block that ends your first turn on it, with the task id in `task:` and the gap in `couldnt_reach:`. |
 | `UPDATE` | Real progress or a change of plan, only when the lead asked for updates or something important changed. |
 | `DONE` | The task's "done when" is met **and your independent review passed or was capped** (below). Say what changed, where (branch, commit, files, PR), how you verified it (exact test/check command and result), and the review: verdict, rounds, findings, what you fixed, what is deferred, final commit. |
 | `BLOCKED` | You cannot continue. Say exactly what you need and from whom. |
@@ -75,13 +75,13 @@ Rounds (limit for this project: {{REVIEW_MAX}}, `prefs review_max_rounds`). A ro
 ## Ownership and handoffs
 
 1. Before starting any request, check it against "You own" and the roster.
-2. If it belongs to another thread: do not do it. Send that thread a `HANDOFF` with everything it needs (the original request, context, files, your findings). Then tell the lead in the same turn (rc: message the lead with the same `HANDOFF`; cloud: record it in your STATUS block under `handed_off`).
+2. If it belongs to another thread: do not do it. Send that thread a `HANDOFF` with everything it needs (the original request, context, files, your findings). Then tell the lead in the same turn (rc: message the lead with the same `HANDOFF`; cloud: record it in your STATUS block under `handed_off`). A cloud thread can message only cloud peers: for an rc peer, put the whole HANDOFF in `handed_off` and the lead forwards it.
 3. If nobody owns it, ask the lead with `QUESTION` (cloud: set `waiting_on` and ask the user here) instead of grabbing it.
-4. A `HANDOFF` you receive becomes your work: reply `ACK` to the sender and to the lead (rc) or in STATUS (cloud).
+4. A `HANDOFF` you receive becomes your work: reply `ACK` to the sender and to the lead (rc) or in STATUS (cloud; to an rc sender, only in STATUS).
 
 ## RECALL
 
-When you receive `RECALL`: stop at a safe point (if your last turn ended with "[Request interrupted by user]" and a RECALL follows, it was the lead that interrupted you), commit work in progress to your branch with a `WIP:` message, push if you have a remote, then send (rc) or write in STATUS (cloud): what is done, what is not, what you assumed, and where the code is. Do not start anything new until you get another TASK.
+When you receive `RECALL`: stop at a safe point (if your last turn ended with "[Request interrupted by user]" and a RECALL follows, it was the lead that interrupted you), commit work in progress to your branch with a `<task-id>: WIP ...` message (`T5: WIP parser half done`), push if you have a remote, then send (rc) or write in STATUS (cloud): what is done, what is not, what you assumed, and where the code is. Do not start anything new until you get another TASK.
 
 ## Working rules
 
@@ -110,7 +110,7 @@ The lead reads this from your transcript. Keep each field to one line; write `-`
 ```
 <tw-status>
 thread: {{THREAD}}
-task: <task-id>
+task: <task-id; several open: one entry each with its state word, e.g. `T3 working; T5 waiting`; `state` below is the one that needs the most attention>
 state: working | waiting | review | idle
 did: <what you did this turn>
 result: <branch / commit / PR / file paths>

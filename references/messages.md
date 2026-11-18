@@ -46,7 +46,7 @@ If the thread is mid-turn and must stop now, call `interrupt_session` **first** 
 
 ```
 [tw:shop] RECALL lead -> data T5
-The lead just interrupted you. Stop at a safe point. Commit WIP to tw/shop/data, push, and reply with: done, not done, assumptions, where the code is.
+The lead just interrupted you. Stop at a safe point. Commit WIP to tw/shop/data (`T5: WIP ...`), push, and reply with: done, not done, assumptions, where the code is.
 Reason: the user wants to rethink the schema first. Do not start anything new until a new TASK.
 ```
 

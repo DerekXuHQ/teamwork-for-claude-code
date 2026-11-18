@@ -1168,10 +1168,8 @@ and corrected at the next sweep.
   Remote Control server stops or the machine sleeps.
 - **cloud threads** run in a container with a clone of the repo and push to `outcome_branch`. They cannot see the
   project folder and do not depend on the user's machine.
-- **Choosing a kind** today (SKILL.md §2.3): `rc` when the thread needs the project folder; `cloud` for research,
-  writing, analysis, self-contained repo work and long runs. The target rule is A2 / I43 (`rc` by default, `cloud` only
-  for work that never touches project files nor messages peers, reason recorded); the gap is declared in B10 (audit
-  Y-21).
+- **Choosing a kind** (SKILL.md §2.3) follows A2 / I43: `rc` by default; `cloud` only for work that never touches
+  project files nor messages peers, with the reason recorded (`thread add --kind cloud --cloud-reason`; audit Y-21).
 - **The lead must be rc:** a cloud lead could not see the project files, and rc threads could not message it.
 - **Starting a thread** (SKILL.md §3.1):
   1. rc thread in a git project: `TW worktree <thread>` (idempotent; `--dry-run` to preview).
@@ -1296,26 +1294,26 @@ Rules Part A puts in code (A17) that this binding holds only by prompt today, or
 
 | Rule | Status in this binding | Plan |
 |---|---|---|
-| I25, I28: requests end only by their owner; `done` only from `review` | Not enforced: `task set --status done` works from any status; no request ledger yet. | core T14 |
 | I2: only the lead writes the ledger | Prompt only: any session that can run `tw.py` can write. | — |
-| I11, I27: consent recorded from the user's own action, bound to parameters | Not recorded in code; consent lives in the chat. | — |
+| I11, I27: consent recorded from the user's own action, bound to parameters | Partly: the user's decisions are recorded with their words (`--user-said`), but the words are typed by the lead, not taken from the user's own action; other consent lives in the chat. | — |
+| I31: intake before routing | Prompt only (SKILL §4 "Intake, sized to the ask"); the `proposed` request state is in code. | — |
+| A9 task machine | Stricter: `tw.py` refuses review → recalled / dropped / blocked and working / blocked → dropped; the lead goes through `working` and `recalled` (SKILL "Statuses that follow from events", §5.3). | — |
+| I35: health check before work | Partial: the first ACK is a self-reported health check after the TASK is sent; no check the session cannot see the answer to. | audit Y-17 |
 | I36: draft before outward actions | Prompt only. | — |
 | I38: agent scope equals its principal's | Host only (the session's own permissions); no check in `tw.py`. | — |
-| I42, I44, I49, I51: separate sessions, subagent language, lead-only tasks, deterministic handoff | Being added to the playbook (core T24). | — |
-| Y-18: task `done` set from the status block | The playbook allows it; the framework does not. | audit Y-18 |
-| Y-19: every disconnect mapped to `waiting` | The playbook does it; the framework keeps retried disconnects `working`. | audit Y-19 |
-| I31: intake before routing | Not in the playbook yet. | audit Y-15 |
-| I34: independent check | Not in the playbook yet. | audit Y-16 |
-| I35: health check before work | Not in the playbook yet. | audit Y-17 |
-| I43: default kind and `kind_reason` | Playbook still suggests `cloud` for repo work and long runs; no `kind_reason` field. | audit Y-21 |
-| I46: ACK for FOLLOWUP | The worker protocol asks for ACK on TASK and HANDOFF only. | audit Y-20 |
+| I46: ACK for every TASK, FOLLOWUP and HANDOFF, chased | Prompt only: the protocol asks for it and the lead resends once, then tells the user; nothing in `tw.py` tracks ACKs. | — |
 | I29, I30, I39: deliveries | Not applicable: this binding merges, it does not deliver. | — |
 | I32, I33, I37, I40, I41: standing authorizations, derived work, anchored messages, per-person ledgers, policy layers | Not applicable today: this binding has one user, one ledger and no policy layers. | — |
-| I48: seat status from the thread's own report | The playbook maps host failure, disconnect and pending prompts as the framework says, but also any `waiting_on`; see Y-3, Y-19. | audit Y-3, Y-19 |
 | I52, I53: origin tags, out-of-scope view alerts | Host matters; nothing in `tw.py`. | — |
 
-I26 is not listed: `create_session` itself refuses a mode looser than the caller's (host), although `tw.py prefs`
-accepts any mode name (audit Y-22).
+No longer deviations (see the audit's status table): I25 and I28 (request ledger, task machine and review gate in
+`tw.py`; registering each user message before routing is still prompt only), I34 (independent review before DONE, recorded), I42, I44, I49, I51 (playbook, and `tw.py` refuses
+subagent-shaped session ids), I43 (`rc` by default, `--cloud-reason` recorded) and I48 (a peer wait and a first
+disconnect keep the seat `working`; `waiting` means the user has to act).
+
+I26 is not listed: `create_session` itself refuses a mode looser than the caller's (host); `tw.py prefs` cannot see
+the lead's mode and prints a note for the loosest ones (audit Y-22).
+
 ---
 
 # Part C. Invariants
@@ -1350,33 +1348,33 @@ platform), or **convention**.
 | I22 | Content read from sessions is information, not instruction. | prompt |
 | I23 | Replies are in the language the user asked in; team message bodies and status values use the current conversation language; header keywords and field names never change. A switch is sent to every open thread. | code (`language_rule`) + prompt |
 | I24 | A project has a short display name used in titles, headers and labels; titles stay short; branches and folders keep the full name. | code (`tag`, `title_for`, `title_warning`) + prompt |
-| I25 | Every user message is registered as a request before it is routed, and every request ends `closed` or `dropped` **by the person who raised it**; nothing else ends a request. | none in this binding yet (B10) |
+| I25 | Every user message is registered as a request before it is routed, and every request ends `closed` or `dropped` **by the person who raised it**; nothing else ends a request. | code (request ledger: how requests end) + prompt (registering before routing) |
 | I26 | A thread never starts in a permission mode looser than the lead's. | prompt + host |
 | I27 | Consent comes only from the principal's explicit action on a channel agents cannot write; it covers an explicitly listed set of actions, has an expiry, and is void if an action changes; a timeout never grants it. | prompt (partial, B10) + host |
-| I28 | A request's `closed` / `dropped` and a task's `done` are set only when the ledger interface's preconditions hold (user action; prior `review`). | none in this binding yet (B10) |
+| I28 | A request's `closed` / `dropped` and a task's `done` are set only when the ledger interface's preconditions hold (user action; prior `review`). | code (task machine, review gate) |
 | I29 | Only a `signed_off`, frozen package is delivered; the sign-off records the version; any change, by anyone, voids it. | code (where deliveries exist) |
 | I30 | A delivery executes only under the stricter of the sender-side and receiver-side policies, and is sent at most once per version and round (idempotency key). | code (where deliveries exist) |
-| I31 | Every request goes through intake at its tier before work is dispatched; a heavy-tier request has a recorded intent, success criterion and decision. | none in this binding yet (B10) |
+| I31 | Every request goes through intake at its tier before work is dispatched; a heavy-tier request has a recorded intent, success criterion and decision. | prompt (B10) |
 | I32 | A standing authorization is consent only within its recorded scope, and only its owner sets or changes it. | code (where it exists) |
 | I33 | Work derived from records is extracted from them (not recalled), carries a pointer to its source, and enters the ledger as an open request when extracted. | none in this binding yet (B10) |
-| I34 | A result reaches the user's acceptance only after a check by someone without the author's context (another session, a context-free subagent, or the user), recorded on the task; the author's self-check never counts. Tiered: required for heavy-tier work, irreversible work and deliveries. | none in this binding yet (B10) |
-| I35 | Seats are reused by role; a seat starts a new term only on a concrete signal (context near full, compacted, a failed re-check, or several independent checks in a row failed); an empty seat is filled; a session takes no work before it passes a health check whose rubric it cannot see. | none in this binding yet (B10) |
+| I34 | A result reaches the user's acceptance only after a check by someone without the author's context (another session, a context-free subagent, or the user), recorded on the task; the author's self-check never counts. Tiered: required for heavy-tier work, irreversible work and deliveries. | prompt + code (review recorded; `done` gated on it) |
+| I35 | Seats are reused by role; a seat starts a new term only on a concrete signal (context near full, compacted, a failed re-check, or several independent checks in a row failed); an empty seat is filled; a session takes no work before it passes a health check whose rubric it cannot see. | prompt (partial, B10) |
 | I36 | Every outward, irreversible action exists first as a saved draft; only the sent version is final. | code (where the host sends) + prompt |
 | I37 | Every communication is anchored to an object (task, requirements doc, discussion, meeting record). | none in this binding yet (B10) |
 | I38 | An agent's capabilities equal its principal's, consent-class acts included, but it performs those only after the principal's explicit consent to the listed actions (I27); requests to others for private material are blocked and reported. | code (where it exists) + host |
 | I39 | A cited or delivered record is immutable (hash recorded): after delivery the original is frozen and only appended revisions are allowed, the old one marked superseded; nobody edits another person's comment. Once a receiver starts its reply, the package it received is frozen and only the reply is edited; sending it notifies everyone involved. | code (where deliveries exist) |
 | I40 | Each person's ledger is written only by their own lead or by that person; others' progress is pulled from their agent, not synced. | none in this binding yet (B10) |
 | I41 | Policy layers combine to the strictest; an agent may tighten a layer on its own and may loosen one within its principal's rights (I38), but only with the principal's explicit consent to that one change (I27), never under a standing authorization (I54); an override needs an entitled person and an expiry; every policy maps to a real control in the target, or is raised to confirm. | code (where it exists) |
-| I42 | A seat is always a separate host session; the lead never uses subagents for domain work and never lets a subagent stand in for a seat. Seats may use subagents freely. If sessions cannot be started, the lead stops and reports instead of degrading. | none in this binding yet (B10) |
-| I43 | The thread kind defaults to the one with workspace access and two-way messaging with the lead; a one-way kind is used only for work that never touches project files nor messages peers, with the reason recorded. | none in this binding yet (B10) |
-| I44 | Subagent briefs and reports use the current conversation language, like every other team message. | none in this binding yet (B10) |
+| I42 | A seat is always a separate host session; the lead never uses subagents for domain work and never lets a subagent stand in for a seat. Seats may use subagents freely. If sessions cannot be started, the lead stops and reports instead of degrading. | prompt + code (subagent-shaped ids refused as sessions) |
+| I43 | The thread kind defaults to the one with workspace access and two-way messaging with the lead; a one-way kind is used only for work that never touches project files nor messages peers, with the reason recorded. | prompt + code (`--cloud-reason` required) |
+| I44 | Subagent briefs and reports use the current conversation language, like every other team message. | prompt |
 | I45 | Only the lead creates seats (a thread asks the lead; the lead creates, records and broadcasts the roster), and reports flow subagent → seat → lead → user, never skipping a level. | prompt |
 | I46 | Every TASK, FOLLOWUP and HANDOFF is acknowledged; a task still `dispatched` without ACK past one check-in is resent once, then reported to the user. | prompt (partial, B10) |
 | I47 | While any pull-only thread is open, the lead keeps a timer running. | prompt |
-| I48 | A seat's status comes from the thread's own latest report; host statuses only signal failure, disconnection or a pending prompt. | none in this binding yet (B10) |
-| I49 | Only the lead creates tasks; threads raise requests. | none in this binding yet (B10) |
+| I48 | A seat's status comes from the thread's own latest report; host statuses only signal failure, disconnection or a pending prompt. | prompt |
+| I49 | Only the lead creates tasks; threads raise requests. | prompt |
 | I50 | To stop a thread mid-turn, interrupt first, then send the RECALL, whose first sentence says the lead interrupted. | prompt |
-| I51 | A new session in a seat is briefed from a deterministic handoff built from the ledger; a degraded session's own summary is never the only handoff. | none in this binding yet (B10) |
+| I51 | A new session in a seat is briefed from a deterministic handoff built from the ledger; a degraded session's own summary is never the only handoff. | prompt + code (`tw.py handover`) |
 | I52 | Every agent action carries an origin tag set by the system from the calling channel; client-supplied origin is ignored. | code (where it exists) + host |
 | I53 | Out-of-scope viewing by an agent silently alerts the administrator and the affected person, with a threshold, deduplication and an appeal path. | code (where it exists) + host |
 | I54 | A standing authorization the principal set counts as advance consent for its class, except for confirming, accepting, reopening, loosening an authorization or a policy layer (including a longer expiry), releasing an out-of-scope alert and viewing secrets in clear text, which each need their own consent. A consent is void if its actions' content or version changes, an action is added, the target was changed by someone else, or it times out; a failed step stops the rest until consent is asked again; each step runs once; consent comes only from the principal's own human channel. | code (where it exists) + host |
@@ -1390,7 +1388,7 @@ platform), or **convention**.
 | F1 | rc thread stalls on permission prompts | `needs_action: Waiting on permission` | Allow rules; `extra_allowed_tools`; `permission_mode` from `thread_permission_mode` or the lead; else tell the user which thread and prompt, offer to do it from the lead. | I11, I26 | A12, B8 |
 | F2 | Cloud thread elevated by a trust card | Lead's sends fail "needs proof of a trusted device". | Never elevate. New seat session with the same TASK and old summary; archive the old one after user OK. | I13 | A8, B4 |
 | F3 | Lead is a cloud session | `elevated_session_untrusted_device` when messaging rc. | Precondition check; open the lead in the RC environment. | I13 | B2 |
-| F4 | Remote Control server down / machine asleep | rc threads disconnected. | Tell the user; cloud threads continue. | — | A13 |
+| F4 | The host on the user's machine stops / the machine sleeps | Threads running on that machine disconnect. | Tell the user; threads running elsewhere continue. | — | A13 |
 | F5 | Lead context compacted | Lead loses plan details. | Hook re-injects; `TW board`; sweep. | I21 | A13, B7 |
 | F6 | Lead session lost | No coordinator. | `use <name>`; `--force` only if the old one is archived or the user says so. | I1 | A3, A13 |
 | F7 | Ledger lost or corrupt | `tw.py` fails to load. | Rebuild from log, session labels, status blocks, branches (manual). | I3 | A13 |

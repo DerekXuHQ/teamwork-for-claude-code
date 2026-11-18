@@ -1251,6 +1251,57 @@ class LeasesGitReview(LeasesGit):
         r = json.loads(self.tw("ready").stdout)
         self.assertEqual(r["blocked_by_lease"]["T2"][0]["paths"], ["shared/config.py"])
 
+    def test_t29_past_owner_holds_only_this_tasks_commits(self):
+        """T29: after a handover, the earlier owner's branch holds only what its commits for this task changed;
+        that thread's other work on the same branch is not counted against its own next task."""
+        self.tw("thread", "add", "db")
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("task", "add", "T5", "--owner", "ui")
+        self.tw("task", "add", "T6", "--owner", "ui", "--touches", "zorb/quixbar.py")
+        self.tw("task", "add", "T2", "--owner", "api", "--touches", "shared/config.py")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.ui_branch_changes_shared()  # T1: shared/config.py
+        self.git("checkout", "-q", "tw/proj/ui")
+        (self.proj / "zorb").mkdir()
+        (self.proj / "zorb" / "quixbar.py").write_text("q = 1\n")
+        self.commit("T5: zorblax on the same branch")
+        self.git("checkout", "-q", "main")
+        self.tw("task", "set", "T1", "--owner", "db")
+        r = json.loads(self.tw("ready").stdout)
+        self.assertEqual(r["blocked_by_lease"]["T2"][0]["paths"], ["shared/config.py"])  # T1's own work still holds
+        self.assertIn("T6", r["ready"], r)  # ui's other work is not held by db's T1
+        self.assertNotIn("T6", r["blocked_by_lease"])
+
+    def test_t29_untagged_and_merge_commits_still_hold(self):
+        """T29 review: a `WIP:` commit (RECALL), a fixup! and a merge on the earlier owner's branch keep holding;
+        a T2 commit is not T29's (id prefix)."""
+        self.tw("thread", "add", "db")
+        for t in ("T29", "T2"):
+            self.tw("task", "add", t, "--owner", "ui")
+        self.tw("task", "add", "T7", "--owner", "api", "--touches", "w/zorblax.py, w/fix.py, m/side.py")
+        self.tw("task", "add", "T8", "--owner", "ui", "--touches", "w/two.py")
+        self.tw("task", "set", "T29", "--status", "working")
+        self.git("checkout", "-q", "-b", "side")
+        (self.proj / "m").mkdir()
+        (self.proj / "m" / "side.py").write_text("s = 1\n")
+        self.commit("side work")
+        self.git("checkout", "-q", "main")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "w").mkdir()
+        (self.proj / "w" / "zorblax.py").write_text("z = 1\n")
+        self.commit("WIP: recall, half of the Zorblax parser")
+        (self.proj / "w" / "fix.py").write_text("f = 1\n")
+        self.commit("fixup! T29: quixbar")
+        (self.proj / "w" / "two.py").write_text("t = 1\n")
+        self.commit("T2: other work")
+        self.git("merge", "-q", "--no-ff", "-m", "T29: merge side", "side")
+        self.git("checkout", "-q", "main")
+        self.tw("task", "set", "T29", "--owner", "db")
+        r = json.loads(self.tw("ready").stdout)
+        held = sorted(p for b in r["blocked_by_lease"]["T7"] for p in b["paths"])
+        self.assertEqual(held, ["m/side.py", "w/fix.py", "w/zorblax.py"], r)
+        self.assertIn("T8", r["ready"], r)  # T2's file is not held by T29
+
     def test_t25_diverged_copies_both_hold(self):
         """T11-b: local and origin diverged with different work on each side: both sides count, not only the newer."""
         def commit_at(msg, when):
@@ -2468,6 +2519,62 @@ class FewerPrompts(TwCase):
         for want in ("Keep prompts rare", "The user's own decisions", "force-pushing the base branch",
                      "visibility", "Bash(sleep *)", "send_later"):
             self.assertIn(want, skill)
+
+
+class AuditFollowups(TwCase):
+    """T26: framework-audit leftovers (Y-1, Y-3 .. Y-22) are written down where the lead and threads read them."""
+
+    def test_protocol_covers_cloud_handoff_ack_health_and_task_list(self):
+        self.tw("thread", "add", "ui", "--kind", "cloud", "--cloud-reason", "web research only")
+        p = self.tw("worker-prompt", "ui").stdout
+        for want in ("A cloud thread can message only cloud peers",  # Y-1
+                     "You received a TASK, FOLLOWUP or HANDOFF",  # Y-20
+                     "doubles as a health check",  # Y-17
+                     "`T3 working; T5 waiting`"):  # Y-10
+            self.assertIn(want, p)
+
+    def test_skill_states_transitions(self):
+        skill = (Path(__file__).resolve().parent.parent / "SKILL.md").read_text()
+        for want in ("`waiting_on: <thread>` (a peer, not the user) → keep `working`",  # Y-3
+                     "TW plan reopen", "TW roster --thread", "TW worktree <t> --dry-run", 'TW log "',  # Y-4
+                     "Statuses that follow from events",  # Y-5
+                     "as a `TASK` when the work is new to the receiver",  # Y-7
+                     "a task you thought of yourself, with `propose_before_start=true`, is proposed",  # Y-9
+                     "once it confirms it stopped, `TW thread set <t> --status idle`",  # Y-11
+                     "**Intake, sized to the ask.**",  # Y-15
+                     "Never `done` from a report",  # Y-18
+                     "disconnected for a second sweep in a row"):  # Y-19
+            self.assertIn(want, skill)
+        self.assertEqual(skill.count('"mcp__claude-code-remote__send_message", "mcp__claude-code-remote__get_session"'), 0)  # Y-12
+
+    def test_report_paths_go_through_working(self):
+        """SKILL step 5.3: blocked -> review and review -> blocked are refused; the lead goes through working."""
+        skill = (Path(__file__).resolve().parent.parent / "SKILL.md").read_text()
+        self.assertIn("A task that cannot move straight to the new status goes to `working` first", skill)
+        self.assertIn("The ACK of a cloud thread is its STATUS block", skill)
+        self.tw("thread", "add", "ui", "--kind", "cloud", "--cloud-reason", "web research only")
+        self.assertIn("your ACK is the STATUS block", self.tw("worker-prompt", "ui").stdout)
+        self.tw("task", "add", "T1", "--owner", "ui")
+        self.tw("plan", "approve", "--user-said", "ok")
+        for s in ("dispatched", "working", "blocked"):
+            self.tw("task", "set", "T1", "--status", s)
+        self.assertNotEqual(self.tw("task", "set", "T1", "--status", "review", ok=False).returncode, 0)
+        self.tw("task", "set", "T1", "--status", "working")
+        self.tw("task", "set", "T1", "--status", "review")
+        self.assertNotEqual(self.tw("task", "set", "T1", "--status", "blocked", ok=False).returncode, 0)
+        self.tw("task", "set", "T1", "--status", "working")
+        self.tw("task", "set", "T1", "--status", "blocked")
+        self.assertEqual(self.state()["tasks"]["T1"]["status"], "blocked")
+
+    def test_blank_question_refused(self):
+        self.assertNotEqual(self.tw("ask", "   ", ok=False).returncode, 0)  # Y-8
+        self.assertNotEqual(self.tw("ask", "--answer", "9", ok=False).returncode, 0)
+        self.assertEqual(self.state()["questions"], [])
+
+    def test_loose_thread_mode_warns(self):
+        r = self.tw("prefs", "--set", "thread_permission_mode=bypassPermissions")
+        self.assertIn("more permissive than its creator", r.stderr)  # Y-22
+        self.assertNotIn("more permissive", self.tw("prefs", "--set", "thread_permission_mode=acceptEdits").stderr)
 
 
 class Preconditions(TwCase):

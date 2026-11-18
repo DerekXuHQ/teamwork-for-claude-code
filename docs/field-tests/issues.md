@@ -233,3 +233,16 @@ Reviewed at core branch commit 6692599.
 - R25-6 `--rounds` can be reported as 2 on the first round; "at least 2 rounds" relies on the thread reporting honestly.
 - R25-7 PDF decompression has no total size cap; `~/x` is not expanded to the absolute home path; short paths such as `/a` cause false positives.
 - R25-8 Encodings suggested in review round 1 and not handled: Python `\x` escapes, base64, quoted-printable (.eml), double percent-encoding. Note: the local `tw.py guard` already decodes HTML entities, `\u` Unicode escapes and UTF-16 text (T25 batch 1, with tests). Only the cloud kit (`tw-guard.py`) does not decode them, because it reads raw text only (see R25-4).
+
+### T26: framework audit and follow-ups
+
+Source: T26 review rounds 2 and 3, at core branch commit ce3599a. Owner: core for all.
+R26-1 and R26-5 are in `docs/framework.md`, which moved from the framework thread (finished) to
+core.
+
+- R26-1 `framework.md` B10 lists I31 and I46 as deviations, but A17 allows I31 to live in the notes only, and I46 is not in the "must be code" set. I46's "maintained by" column says "prompt (partly)" while B10 says "prompt only": the two disagree.
+- R26-2 I25: the code only checks the `--user-said` verbatim text the lead enters; the entry should say "partly; see I11/I27".
+- R26-3 `test_tw.py` AuditFollowups only checks text fragments; the Y-12 test only asserts the old list appears 0 times.
+- R26-4 I31's decision (do / propose / drop) has no place in the ledger.
+- R26-5 `framework.md:299` names the data-model field `kind_reason`; the code calls it `cloud_reason`.
+- R26-6 SKILL.md step 3.1 sets a new thread straight to `working`, which contradicts the definition of `starting` ("created, first turn not finished").

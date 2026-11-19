@@ -51,7 +51,7 @@ The task-id slot holds exactly one task id from the board (`T3`), or `-` when th
 |---|---|
 | `ACK` | You received a TASK, FOLLOWUP or HANDOFF and are starting. One line that doubles as a health check: the task id, your worktree (rc) or branch (cloud), and any tool or file you cannot reach (`-` if none). Work on what you can; if the gap stops the task, send `BLOCKED`. Cloud threads: your ACK is the STATUS block that ends your first turn on it, with the task id in `task:` and the gap in `couldnt_reach:`. |
 | `UPDATE` | Real progress or a change of plan, only when the lead asked for updates or something important changed. |
-| `DONE` | The task's "done when" is met **and your independent review passed or was capped** (below). Say what changed, where (branch, commit, files, PR), how you verified it (exact test/check command and result), and the review: verdict, rounds, findings, what you fixed, what is deferred, final commit. |
+| `DONE` | The task's "done when" is met **and your independent review passed or was capped** (below). Say what changed, where (branch, commit, files, PR), how you verified it (exact test/check command and result), and the review: verdict, rounds, findings, what you fixed, what is deferred, and the reviewed commit as a full SHA (`reviewed: <sha>`): the lead merges exactly that commit, so push nothing after it, or have the new commits reviewed and report the new SHA. |
 | `BLOCKED` | You cannot continue. Say exactly what you need and from whom. |
 | `QUESTION` | You need a decision only the user or another owner can make. |
 | `HANDOFF` | Work that belongs to another thread (see below). |

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -3071,8 +3072,11 @@ class MergeRehearsal(LeasesGit):
     def head(self, ref="main"):
         return self.git("rev-parse", ref).stdout.strip()
 
+    def m(self, *x, ok=True):
+        return self.tw("merge", "tw/proj/ui", "--sha", self.head("tw/proj/ui"), *x, ok=ok)
+
     def merge(self, *x, ok=True):
-        return self.tw("merge", "tw/proj/ui", "--test", "sh check.sh", *x, ok=ok)
+        return self.m("--test", "sh check.sh", *x, ok=ok)
 
     def no_temp_worktrees(self):
         self.assertNotIn("tw-merge-", self.git("worktree", "list").stdout)
@@ -3105,22 +3109,22 @@ class MergeRehearsal(LeasesGit):
         self.no_temp_worktrees()
 
     def test_red_checks_leave_live_untouched(self):
-        r = self.tw("merge", "tw/proj/ui", "--test", "exit 3", "--apply", ok=False)
+        r = self.m("--test", "exit 3", "--apply", ok=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("checks failed", r.stderr)
         self.assertEqual(self.head(), self.main0)
         self.no_temp_worktrees()
 
     def test_needs_a_check_and_a_squash_subject(self):
-        self.assertIn("no check to run", self.tw("merge", "tw/proj/ui", ok=False).stderr)
+        self.assertIn("no check to run", self.m(ok=False).stderr)
         self.assertIn("--squash needs --message", self.merge("--squash", ok=False).stderr)
         self.tw("prefs", "--set", "check_cmd=sh check.sh")
-        r = json.loads(self.tw("merge", "tw/proj/ui", "--squash", "--message", "T1: quixbar (squash)", "--apply").stdout)
+        r = json.loads(self.m("--squash", "--message", "T1: quixbar (squash)", "--apply").stdout)
         self.assertEqual(self.git("log", "-1", "--format=%s %P").stdout.split()[0:2], ["T1:", "quixbar"])
         self.assertEqual(len(self.git("log", "-1", "--format=%P").stdout.split()), 1)  # one parent: a squash
         self.assertTrue(r["applied"])
-        r = json.loads(self.tw("merge", "tw/proj/ui", "--no-test", "docs only").stdout)
-        self.assertIn("checks", r)
+        r = json.loads(self.m("--squash", "--message", "T1: again", "--no-test", "docs only").stdout)
+        self.assertIn("nothing to merge", r["note"])  # an empty squash is not a failure
 
     def test_dirty_live_base_refused(self):
         (self.proj / "zorb.py").write_text("a = 9\n")
@@ -3133,6 +3137,143 @@ class MergeRehearsal(LeasesGit):
         r = json.loads(self.merge("--apply").stdout)
         self.assertEqual(self.head("main"), r["merged"])
         self.assertEqual(self.head("HEAD"), self.main0)  # the checkout on another branch did not move
+
+    def test_only_the_reviewed_sha_merges(self):
+        reviewed = self.head("tw/proj/ui")
+        self.git("checkout", "-q", "tw/proj/ui")
+        (self.proj / "late.py").write_text("z = 1\n")
+        self.commit("T1: pushed after the review")
+        self.git("checkout", "-q", "main")
+        r = self.tw("merge", "tw/proj/ui", "--sha", reviewed[:9], "--test", "sh check.sh", "--apply", ok=False)
+        self.assertIn("not the reviewed", r.stderr)
+        self.assertIn("pushed after the review", json.loads(r.stdout)["extra_commits"][0])
+        self.assertEqual(self.head(), self.main0)
+        self.git("checkout", "-q", "-b", "stray")
+        (self.proj / "stray.py").write_text("s = 1\n")
+        self.commit("stray")
+        self.git("checkout", "-q", "main")
+        r = self.tw("merge", "tw/proj/ui", "--sha", self.head("stray"), "--test", "sh check.sh", ok=False)
+        self.assertIn("not on tw/proj/ui", r.stderr)
+        self.assertIn("no such commit", self.tw("merge", "tw/proj/ui", "--sha", "abcdef0", "--no-test", "x",
+                                                ok=False).stderr)
+        for name in ("tw/proj/ui", "stray", "HEAD", f"{reviewed}~0", "main", " "):  # names never stand for a review
+            r = self.tw("merge", "tw/proj/ui", "--sha", name, "--no-test", "x", ok=False)
+            self.assertIn("commit id", r.stderr, name)
+        self.git("branch", "deadbeef", "stray")  # a branch named like hex is still not that commit
+        self.assertIn("no such commit", self.tw("merge", "tw/proj/ui", "--sha", "deadbeef", "--no-test", "x",
+                                                ok=False).stderr)
+        self.assertTrue(json.loads(self.tw("merge", "tw/proj/ui", "--sha", f" {self.head('tw/proj/ui').upper()} ",
+                                           "--no-test", "x").stdout)["merged"])
+        self.assertNotEqual(self.tw("merge", "tw/proj/ui", "--no-test", "x", ok=False).returncode, 0)  # --sha required
+
+    def test_holder_switching_branch_during_checks_refused(self):
+        r = self.merge_with_check(f"git -C {self.proj} checkout -q -b zorblax", ok=False)
+        self.assertRegex(r.stderr, "changed meanwhile|no longer on main")
+        self.assertEqual(self.head(), self.main0)
+        self.assertEqual(self.head("zorblax"), self.main0)  # the other branch was not fast-forwarded
+        self.assertNotIn('"ev": "merge"', (self.proj / ".teamwork" / "log.jsonl").read_text())
+        self.no_temp_worktrees()
+
+    def test_base_checked_out_during_checks_refused(self):
+        self.git("checkout", "-q", "-b", "side")
+        r = self.merge_with_check(f"git -C {self.proj} checkout -q main", ok=False)
+        self.assertIn("changed meanwhile", r.stderr)
+        self.assertEqual(self.head(), self.main0)
+        self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no").stdout, "")
+
+    def test_holder_changing_during_checks_refused(self):
+        for cmd, why in ((f"echo junk > {self.proj / 'zorb.py'}", "uncommitted changes"),
+                         (f"git -C {self.proj} commit -q --allow-empty -m moved", "moved to")):
+            r = self.merge_with_check(cmd, ok=False)
+            self.assertIn(why, r.stderr)
+            self.assertFalse(json.loads(r.stdout)["applied"])
+            self.git("checkout", "-q", "--", "zorb.py")
+            self.no_temp_worktrees()
+        self.assertNotIn('"ev": "merge"', (self.proj / ".teamwork" / "log.jsonl").read_text())
+
+    def test_rebase_started_during_checks_refused(self):
+        r = self.merge_with_check(f"git -C {self.proj} rebase -q --exec false HEAD~1 >/dev/null 2>&1; true", ok=False)
+        self.assertRegex(r.stderr, "no longer on main|changed meanwhile")
+        self.git("rebase", "--abort")
+        self.assertEqual(self.head(), self.main0)
+
+    def test_ignored_local_file_in_the_way_refused(self):
+        self.git("checkout", "-q", "tw/proj/ui")
+        (self.proj / "quixbar.env").write_text("from the branch\n")
+        self.git("add", "-f", "quixbar.env")
+        self.commit("T1: env")
+        self.git("checkout", "-q", "main")
+        (self.proj / ".git" / "info" / "exclude").write_text("*.env\n")
+        (self.proj / "quixbar.env").write_text("MY LOCAL\n")
+        r = self.merge("--apply", ok=False)
+        self.assertIn("quixbar.env", json.loads(r.stdout)["untracked_in_the_way"])
+        self.assertEqual((self.proj / "quixbar.env").read_text(), "MY LOCAL\n")
+
+    def test_sigterm_during_checks_cleans_up(self):
+        flag = self.proj.parent / "started"
+        p = subprocess.Popen([sys.executable, str(TW), "-C", str(self.proj), "merge", "tw/proj/ui", "--sha",
+                              self.head("tw/proj/ui"), "--test", f"touch {flag}; sleep 30", "--apply"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(300):
+            if flag.exists():
+                break
+            time.sleep(0.05)
+        p.terminate()
+        out, err = p.communicate(timeout=20)
+        self.assertIn("nothing changed", err)
+        self.assertEqual(self.head(), self.main0)
+        self.no_temp_worktrees()
+        self.assertEqual([x for x in Path(tempfile.gettempdir()).glob("tw-merge-*/pid")
+                          if x.read_text() == str(p.pid)], [])  # its temp folder is gone too
+
+    def test_sigterm_during_fast_forward_waits_for_it(self):
+        flag = self.proj.parent / "ff-started"
+        hook = self.proj / ".git" / "hooks" / "post-merge"
+        hook.write_text(f'#!/bin/sh\ncase "$(pwd -P)" in "{self.proj.resolve()}") touch "{flag}"; sleep 2;; esac\n')
+        hook.chmod(0o755)
+        p = subprocess.Popen([sys.executable, str(TW), "-C", str(self.proj), "merge", "tw/proj/ui", "--sha",
+                              self.head("tw/proj/ui"), "--test", "sh check.sh", "--apply"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(400):
+            if flag.exists():
+                break
+            time.sleep(0.05)
+        self.assertTrue(flag.exists())
+        p.terminate()
+        out, err = p.communicate(timeout=20)
+        self.assertNotIn("nothing changed", err)
+        self.assertTrue(json.loads(out)["applied"])  # the report is printed before the waiting signal acts
+        self.assertNotEqual(self.head(), self.main0)
+        self.assertTrue((self.proj / "quix.py").exists())
+        self.assertIn('"ev": "merge"', (self.proj / ".teamwork" / "log.jsonl").read_text())
+        self.no_temp_worktrees()
+
+    def test_killed_run_leftover_is_cleaned_next_time(self):
+        tmp = Path(tempfile.mkdtemp(prefix="tw-merge-"))
+        self.git("worktree", "add", "-q", "--detach", str(tmp / "wt"), "main")
+        (tmp / "pid").write_text("999999999")  # no such process
+        self.merge()
+        self.assertFalse(tmp.exists())
+        self.no_temp_worktrees()
+
+    def merge_with_check(self, cmd, ok=True):
+        (self.proj / "race.sh").write_text(cmd + "\n")  # untracked: not in the rehearsal, so call it by path
+        return self.m("--test", f"sh {self.proj / 'race.sh'}", "--apply", ok=ok)
+
+    def test_check_cmd_is_text_and_no_test_wins(self):
+        self.tw("prefs", "--set", "check_cmd=true")
+        self.assertEqual(json.loads((self.proj / ".teamwork" / "state.json").read_text())["prefs"]["check_cmd"], "true")
+        self.tw("prefs", "--set", "check_cmd=exit 5")
+        r = json.loads(self.m("--no-test", "docs only").stdout)
+        self.assertEqual(r["checks"], "none (docs only)")
+
+    def test_untracked_file_in_the_way_refused_before_checks(self):
+        (self.proj / "quix.py").write_text("mine\n")
+        r = self.m("--test", "exit 7", "--apply", ok=False)
+        self.assertIn("untracked files", r.stderr)
+        self.assertEqual(json.loads(r.stdout)["untracked_in_the_way"], ["quix.py"])
+        self.assertEqual((self.proj / "quix.py").read_text(), "mine\n")
+        self.assertEqual(self.head(), self.main0)
 
 
 if __name__ == "__main__":

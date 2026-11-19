@@ -1814,7 +1814,9 @@ def cmd_prefs(a):
             if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
                 sys.exit("turning the review gate off is the user's decision: add --user-said \"<their words>\"")
         cur = st["prefs"].get(k)
-        if isinstance(cur, bool) or v.lower() in ("true", "false", "yes", "no", "on", "off"):
+        if k in ("check_cmd", "language", "short_name", "thread_permission_mode"):
+            st["prefs"][k] = v  # text, never coerced (check_cmd=true is a command)
+        elif isinstance(cur, bool) or v.lower() in ("true", "false", "yes", "no", "on", "off"):
             st["prefs"][k] = v.lower() in ("1", "true", "yes", "on")
         elif v.isdigit():
             st["prefs"][k] = int(v)
@@ -3513,10 +3515,32 @@ def cmd_context(a):
     )
 
 
+def _base_holder(git, base):
+    """The checkout that has `base` checked out (or is rebasing/bisecting it), and that checkout's HEAD; (None, None)
+    when nobody holds it."""
+    for blk in git("worktree", "list", "--porcelain").stdout.split("\n\n"):
+        lines = dict((ln.split(" ", 1) + [""])[:2] for ln in blk.splitlines() if ln.strip())
+        if not lines.get("worktree"):
+            continue
+        w = Path(lines["worktree"])
+        if lines.get("branch") == f"refs/heads/{base}":
+            return w, lines.get("HEAD", "")
+        gd = git("rev-parse", "--absolute-git-dir", cwd=w).stdout.strip()
+        for f in ("rebase-merge/head-name", "rebase-apply/head-name", "BISECT_START"):
+            try:
+                if Path(gd, f).read_text().strip() in (f"refs/heads/{base}", base):
+                    return w, lines.get("HEAD", "")
+            except OSError:
+                pass
+    return None, None
+
+
 def cmd_merge(a):
-    """Rehearse a merge into the base in a throwaway worktree, run the checks there, and only with --apply
-    fast-forward the base. The live checkout is never left half-merged: a conflict or a red check changes nothing."""
+    """Rehearse a merge of the reviewed commit into the base in a throwaway worktree, run the checks there, and only
+    with --apply fast-forward the base. The live checkout is never left half-merged: a conflict, a red check, or a
+    checkout that changed meanwhile changes nothing."""
     import shutil
+    import signal
     import tempfile
     d = need(find_dir())
     st = load(d)
@@ -3527,8 +3551,13 @@ def cmd_merge(a):
     if top.returncode != 0:
         sys.exit(f"{proj} is not a git repository")
     sub = git("rev-parse", "--show-prefix").stdout.strip()  # the project may be a subfolder of the repo
-    test = a.test if a.test is not None else st.get("prefs", {}).get("check_cmd") or ""
-    if not test.strip() and not a.no_test:
+    if a.no_test is not None:
+        test = ""  # said out loud: nothing to check, even if check_cmd is set
+        if not a.no_test.strip():
+            sys.exit("--no-test needs the reason (\"docs only\")")
+    else:
+        test = str(a.test if a.test is not None else st.get("prefs", {}).get("check_cmd") or "")
+    if not test.strip() and a.no_test is None:
         sys.exit("no check to run: pass --test \"<command>\", set prefs check_cmd=\"<command>\", or --no-test "
                  "\"<why>\" for a change with nothing to test")
     if a.squash and not (a.message or "").strip():
@@ -3536,39 +3565,77 @@ def cmd_merge(a):
                  "and leases find it")
     old = git("rev-parse", "--verify", "--quiet", f"refs/heads/{base}^{{commit}}").stdout.strip()
     tip = git("rev-parse", "--verify", "--quiet", f"{a.branch}^{{commit}}").stdout.strip()
+    given = (a.sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{7,40}", given):
+        sys.exit(f"--sha {a.sha!r}: give the reviewed commit id (7-40 hex digits from the owner's DONE), not a branch, "
+                 "tag or revision name")
+    sha = git("rev-parse", "--verify", "--quiet", f"{given}^{{commit}}").stdout.strip()
+    if sha and not sha.startswith(given):  # a ref that happens to look like hex is not the reviewed commit
+        sha = ""
     if not old:
         sys.exit(f"base branch {base} not found")
     if not tip:
         sys.exit(f"branch {a.branch} not found (git fetch first for a cloud branch)")
-    res = {"branch": a.branch, "base": base, "base_was": old, "tip": tip, "applied": False}
-    if git("merge-base", "--is-ancestor", tip, old).returncode == 0:
-        res["note"] = f"{a.branch} is already in {base}: nothing to merge"
+    if not sha:
+        sys.exit(f"--sha {given}: no such commit, or an ambiguous short id (use the full commit id the owner's DONE "
+                 "reported as reviewed)")
+    res = {"branch": a.branch, "sha": sha, "base": base, "base_was": old, "tip": tip, "applied": False}
+    if sha != tip:
+        res["extra_commits"] = git("log", "--oneline", "--no-decorate", f"{sha}..{tip}").stdout.splitlines()
+        res["missing_commits"] = git("log", "--oneline", "--no-decorate", f"{tip}..{sha}").stdout.splitlines()
+        print(json.dumps(res, ensure_ascii=False))
+        what = (f"{len(res['extra_commits'])} commit(s) after the reviewed one" if res["extra_commits"] else "")
+        if res["missing_commits"]:
+            what = (what + "; " if what else "") + f"the reviewed commit is not on {a.branch}"
+        sys.exit(f"{a.branch} is at {tip[:9]}, not the reviewed {sha[:9]} ({what}): nothing changed. Merge only what "
+                 "was reviewed: ask the owner for a review of the new commits, or for the right SHA")
+    if git("merge-base", "--is-ancestor", sha, old).returncode == 0:
+        res["note"] = f"{sha[:9]} is already in {base}: nothing to merge"
         print(json.dumps(res, ensure_ascii=False))
         return
-    holder = None  # the checkout (this one or another worktree) that has the base checked out, if any
-    for blk in git("worktree", "list", "--porcelain").stdout.split("\n\n"):
-        lines = dict((ln.split(" ", 1) + [""])[:2] for ln in blk.splitlines())
-        if lines.get("branch") == f"refs/heads/{base}":
-            holder = Path(lines["worktree"])
+    holder, held_at = _base_holder(git, base)
     if a.apply and holder and git("status", "--porcelain", "--untracked-files=no", cwd=holder).stdout.strip():
         sys.exit(f"{holder} has uncommitted changes on {base}: commit or move them first")
-    pre = git("merge-tree", "--write-tree", "--name-only", "--no-messages", old, tip)
+    pre = git("merge-tree", "--write-tree", "--name-only", "--no-messages", old, sha)
     if pre.returncode == 1:  # conflict found without touching any checkout (git >= 2.38; older git: skip)
         res["conflicts"] = [f for f in pre.stdout.splitlines()[1:] if f.strip()]
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(f"merge of {a.branch} into {base} conflicts: nothing changed; send the owner a FOLLOWUP to rebase")
+    for blk in git("worktree", "list", "--porcelain").stdout.split("\n\n"):  # leftovers of runs killed with -9
+        w = dict((ln.split(" ", 1) + [""])[:2] for ln in blk.splitlines() if ln.strip()).get("worktree", "")
+        if Path(w).name == "wt" and Path(w).parent.name.startswith("tw-merge-"):
+            try:
+                os.kill(int((Path(w).parent / "pid").read_text()), 0)
+                continue  # another merge is running
+            except (OSError, ValueError):
+                git("worktree", "remove", "--force", w)
+                shutil.rmtree(Path(w).parent, ignore_errors=True)
+    git("worktree", "prune")
     tmp = Path(tempfile.mkdtemp(prefix="tw-merge-"))
+    (tmp / "pid").write_text(str(os.getpid()))
     wt = tmp / "wt"
+    final = {"past": False}  # past the point of no return: a signal must not claim "nothing changed"
+
+    def stop(signum, _frame):  # a killed run still cleans up its worktree (finally below)
+        raise SystemExit(f"stopped by signal {signum}: nothing changed")
+    sigs = [signal.SIGTERM, signal.SIGINT] + ([signal.SIGHUP] if hasattr(signal, "SIGHUP") else [])
+    saved = {s_: signal.signal(s_, stop) for s_ in sigs}
+    can_block = hasattr(signal, "pthread_sigmask")
     try:
         r = git("worktree", "add", "--detach", str(wt), old)
         if r.returncode != 0:
             sys.exit(f"git worktree add failed: {r.stderr.strip()}")
         if a.squash:
-            r = git("merge", "--squash", tip, cwd=wt)
+            r = git("merge", "--squash", sha, cwd=wt)
+            if r.returncode == 0 and git("diff", "--cached", "--quiet", cwd=wt).returncode == 0:
+                res["note"] = f"the changes of {sha[:9]} are already in {base}: nothing to merge"
+                print(json.dumps(res, ensure_ascii=False))
+                return
             if r.returncode == 0:
                 r = git("commit", "-q", "-m", a.message.strip(), cwd=wt)
         else:
-            r = git("merge", "--no-ff", "-q", "-m", (a.message or "").strip() or f"Merge {a.branch}", tip, cwd=wt)
+            r = git("merge", "--no-ff", "-q", "-m", (a.message or "").strip() or f"Merge {a.branch} at {sha[:9]}",
+                    sha, cwd=wt)
         if r.returncode != 0:
             res["conflicts"] = [f for f in git("diff", "--name-only", "--diff-filter=U", cwd=wt).stdout.splitlines()]
             print(json.dumps(res, ensure_ascii=False))
@@ -3576,11 +3643,33 @@ def cmd_merge(a):
                      "; nothing changed")
         new = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
         res["merged"] = new
+        if a.apply and holder:  # untracked files the fast-forward would overwrite: say so before the checks run
+            changed = set(git("diff", "--name-only", old, new).stdout.splitlines())
+            pre_root = git("rev-parse", "--show-toplevel", cwd=holder).stdout.strip()
+            untracked = set(git("ls-files", "--others", "--exclude-standard", cwd=pre_root).stdout.splitlines())
+            untracked |= set(git("ls-files", "--others", "--ignored", "--exclude-standard", cwd=pre_root)
+                             .stdout.splitlines())  # ignored local files (.env) would be overwritten silently
+            if changed & untracked:
+                res["untracked_in_the_way"] = sorted(changed & untracked)
+                print(json.dumps(res, ensure_ascii=False))
+                sys.exit(f"untracked files in {holder} would be overwritten by the merge: move them, then run "
+                         "merge again; nothing changed")
         if test.strip():
-            t = subprocess.run(test, shell=True, cwd=str(wt / sub), capture_output=True, text=True)
-            res["checks"] = "pass" if t.returncode == 0 else "fail"
-            if t.returncode != 0:
-                res["check_output"] = (t.stdout + t.stderr)[-2000:]
+            env = {k: v for k, v in os.environ.items() if k != "TEAMWORK_DIR"}  # checks never touch the live ledger
+            pr = subprocess.Popen(test, shell=True, cwd=str(wt / sub), stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
+            try:
+                out, _ = pr.communicate()
+            except BaseException:  # stopped: take the whole check down with us, grandchildren included
+                try:
+                    os.killpg(pr.pid, signal.SIGKILL) if hasattr(os, "killpg") else pr.kill()
+                except OSError:
+                    pass
+                pr.wait()
+                raise
+            res["checks"] = "pass" if pr.returncode == 0 else "fail"
+            if pr.returncode != 0:
+                res["check_output"] = (out or "")[-2000:]
                 print(json.dumps(res, ensure_ascii=False))
                 sys.exit(f"checks failed on the rehearsed merge ({test}): nothing changed")
         else:
@@ -3589,20 +3678,57 @@ def cmd_merge(a):
             res["note"] = f"rehearsal only: rerun with --apply to fast-forward {base} to the merged commit"
             print(json.dumps(res, ensure_ascii=False))
             return
-        if holder:  # a checkout has the base: fast-forward it there, files and all (refused if base moved)
-            r = git("merge", "--ff-only", "-q", new, cwd=holder)
-        else:  # base not checked out here: move the ref, only if nobody moved it meanwhile
+        # The checks took a while: the checkouts may have changed. Fast-forward only what is still as we left it.
+        # From here to the log line a signal waits: a fast-forward is never cut in half, nor reported as not done.
+        if can_block:
+            signal.pthread_sigmask(signal.SIG_BLOCK, sigs)
+        else:
+            for s_ in sigs:
+                signal.signal(s_, signal.SIG_IGN)
+        final["past"] = True
+        now, now_at = _base_holder(git, base)
+        cur = git("rev-parse", "--verify", "--quiet", f"refs/heads/{base}^{{commit}}").stdout.strip()
+        moved = None
+        if cur != old:
+            moved = f"{base} moved to {cur[:9]} meanwhile"
+        elif (now and str(now) != str(holder)) or (holder and not now):
+            moved = f"the checkout that has {base} changed meanwhile ({holder or '-'} -> {now or '-'})"
+        elif now:
+            head = git("symbolic-ref", "-q", "HEAD", cwd=now).stdout.strip()
+            if head != f"refs/heads/{base}" or git("rev-parse", "HEAD", cwd=now).stdout.strip() != old:
+                moved = f"{now} is no longer on {base} at {old[:9]} (rebase or checkout in progress?)"
+            elif git("status", "--porcelain", "--untracked-files=no", cwd=now).stdout.strip():
+                moved = f"{now} got uncommitted changes on {base} meanwhile"
+        if moved:
+            res["refused"] = moved
+            print(json.dumps(res, ensure_ascii=False))
+            sys.exit(f"{moved}: nothing changed; run merge again")
+        if now:  # a checkout has the base: fast-forward it there, files and all (refused if base moved)
+            r = git("merge", "--ff-only", "-q", new, cwd=now)
+        else:  # base not checked out anywhere: move the ref, only if nobody moved it meanwhile
             r = git("update-ref", f"refs/heads/{base}", new, old)
         if r.returncode != 0:
-            sys.exit(f"fast-forward of {base} failed ({r.stderr.strip()[:200]}); {base} is unchanged: was it moved "
-                     "meanwhile? run merge again")
+            res["refused"] = (r.stderr or r.stdout).strip()[:300]
+            print(json.dumps(res, ensure_ascii=False))
+            sys.exit(f"fast-forward of {base} failed ({res['refused'][:200]}); {base} is unchanged")
         res["applied"] = True
-        log(d, {"ev": "merge", "branch": a.branch, "base": base, "from": old, "to": new, "checks": res["checks"]})
+        log(d, {"ev": "merge", "branch": a.branch, "sha": sha, "base": base, "from": old, "to": new,
+                "checks": res["checks"]})
         print(json.dumps(res, ensure_ascii=False))
     finally:
         git("worktree", "remove", "--force", str(wt))
         shutil.rmtree(tmp, ignore_errors=True)
         git("worktree", "prune")
+        sys.stdout.flush()
+        if final["past"]:  # a signal that waited acts now, after the report, and says what happened
+            def late(signum, _frame):
+                raise SystemExit(f"stopped by signal {signum} after the merge step finished: see the report above")
+            for s_ in sigs:
+                signal.signal(s_, late)
+            if can_block:
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, sigs)
+        for s_, h in saved.items():
+            signal.signal(s_, h)
 
 
 def main():
@@ -3757,6 +3883,8 @@ def main():
     x = s.add_parser("merge", help="rehearse merging a branch into the base in a temp worktree, run the checks, "
                      "and with --apply fast-forward the base (the live checkout never holds a half merge)")
     x.add_argument("branch")
+    x.add_argument("--sha", required=True, help="the reviewed commit from the owner's DONE; the branch head must be "
+                   "exactly this commit, and only it is merged")
     x.add_argument("--squash", action="store_true", help="one squash commit (needs --message starting with the task id)")
     x.add_argument("--message", help="merge or squash commit subject; keep the task id first (T3: ...)")
     x.add_argument("--test", help="check command, run in the rehearsal (default: prefs check_cmd)")

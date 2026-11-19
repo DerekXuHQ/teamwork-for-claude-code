@@ -560,6 +560,7 @@ def cmd_init(a):
             "stuck_minutes": STUCK_DEFAULT,  # working thread silent this long -> "possibly stuck"; 0 = off
             "language": "",  # conversation language code (zh, en, ...); empty = follow the user's latest message
             "thread_permission_mode": "",  # create_session permission_mode; empty = the lead's own mode
+            "check_cmd": "",  # the project's checks, run by `merge` on the rehearsed merge
         },
     }
     if not (d / "INSTRUCTIONS.md").exists():
@@ -670,6 +671,27 @@ def not_a_session(sid, st=None):
     return None
 
 
+def _branch_problem(st, name, b):
+    """Why b cannot be thread `name`'s branch, or None. Shell-safe characters only (the branch goes into printed
+    git commands), git's ref rules, never the base, and no clash with another thread's branch: same name in any
+    case (macOS refs ignore case) or one inside the other (`x` and `x/y` cannot both exist)."""
+    if not b or re.fullmatch(r"[A-Za-z0-9._/+-]+", b) is None:
+        return f"--branch {b!r}: use only letters, digits and . _ / + - (it goes into shell commands)"
+    parts = b.split("/")
+    if b.startswith("-") or b in ("@", "HEAD") or any(not c or c.startswith(".") or c.endswith((".", ".lock"))
+                                                       for c in parts) or ".." in b:
+        return f"--branch {b!r} is not a valid git branch name"
+    base = st.get("repo", {}).get("base") or "main"
+    if b.lower() == base.lower() or parts[0] in ("origin", "refs", "remotes"):
+        return f"--branch {b!r}: a thread works on its own branch, never the base or a remote one"
+    lb = b.lower()
+    for n, o in st["threads"].items():
+        ob = (o.get("branch") or "").lower()
+        if n != name and ob and (ob == lb or ob.startswith(lb + "/") or lb.startswith(ob + "/")):
+            return f"--branch {b}: clashes with {n}'s branch {o['branch']}; one branch per thread"
+    return None
+
+
 def cmd_thread(a):
     d = need(find_dir())
     st = load(d)
@@ -686,6 +708,25 @@ def cmd_thread(a):
                  "sessions, and once its trust card is approved rc sessions, the lead included, can no longer message "
                  "it or read its event log). If rc seats are full, ask "
                  "the user instead of switching to cloud")
+    if a.branch is not None:
+        a.branch = a.branch.strip()
+    if a.action != "add" and a.branch is not None and a.branch == (st["threads"].get(name) or {}).get("branch"):
+        a.branch = None  # already its branch: nothing to change
+    if a.action == "add" and name in st["threads"]:
+        pass  # "taken" below
+    elif a.action == "add" or a.branch is not None:
+        why = _branch_problem(st, name, a.branch if a.branch is not None else f"tw/{st['project']}/{name}")
+        if why:
+            sys.exit(why)
+    if a.action != "add" and a.branch is not None:
+        t0 = st["threads"].get(name) or {}
+        if a.action == "set" and t0 and t0.get("worktree") and Path(t0["worktree"]).exists():
+            sys.exit(f"--branch: {name}'s worktree {t0['worktree']} already exists on {t0['branch']}; the branch is "
+                     "fixed once its worktree is made")
+        if a.action != "set" or not t0 or t0.get("session_id") or t0.get("sessions") or t0.get("status") != "planned":
+            sys.exit("--branch changes only while the thread is planned and has never had a session (the user editing "
+                     "the plan); after that the branch is fixed: leases and trace follow it, so work there would stop "
+                     "counting. Add a new thread for a new branch")
     if a.action != "add" and (a.kind is not None or a.cloud_reason is not None):
         t0 = st["threads"].get(name) or {}
         if a.action != "set" or not t0 or t0.get("session_id") or t0.get("sessions") or t0.get("status") != "planned":
@@ -822,6 +863,9 @@ def cmd_thread(a):
     if a.focus is not None:
         t["focus"] = a.focus
         t["title"] = title_for(st, name)
+    if a.branch is not None and a.branch != t["branch"]:
+        t["branch"] = a.branch
+        bump_roster(st)  # the roster and worker prompt name the branch
     if (t.get("session_id"), t.get("owns"), t["status"] == "archived") != roster_before:
         bump_roster(st)  # peers need a new ROSTER; t itself learns it with the same broadcast
     if a.roster_sent:
@@ -1892,6 +1936,10 @@ def cmd_worktree(a):
     if path.exists():
         res["created"] = False
         res["note"] = "already exists"
+        r = git("-C", str(path), "symbolic-ref", "-q", "--short", "HEAD")
+        if r.returncode == 0 and r.stdout.strip() != t["branch"]:
+            sys.exit(f"{path} is on {r.stdout.strip()}, but {a.thread}'s branch is {t['branch']}: leases and trace "
+                     "follow the ledger's branch; switch the worktree or fix the ledger before the thread works")
     else:
         has_branch = git("show-ref", "--verify", "--quiet", f"refs/heads/{t['branch']}").returncode == 0
         cmd = (["worktree", "add", str(path), t["branch"]] if has_branch
@@ -3465,6 +3513,98 @@ def cmd_context(a):
     )
 
 
+def cmd_merge(a):
+    """Rehearse a merge into the base in a throwaway worktree, run the checks there, and only with --apply
+    fast-forward the base. The live checkout is never left half-merged: a conflict or a red check changes nothing."""
+    import shutil
+    import tempfile
+    d = need(find_dir())
+    st = load(d)
+    proj = Path(st.get("repo", {}).get("path") or ".")
+    base = st.get("repo", {}).get("base") or "main"
+    git = lambda *x, cwd=proj: subprocess.run(["git", "-C", str(cwd), *x], capture_output=True, text=True)
+    top = git("rev-parse", "--show-toplevel")
+    if top.returncode != 0:
+        sys.exit(f"{proj} is not a git repository")
+    sub = git("rev-parse", "--show-prefix").stdout.strip()  # the project may be a subfolder of the repo
+    test = a.test if a.test is not None else st.get("prefs", {}).get("check_cmd") or ""
+    if not test.strip() and not a.no_test:
+        sys.exit("no check to run: pass --test \"<command>\", set prefs check_cmd=\"<command>\", or --no-test "
+                 "\"<why>\" for a change with nothing to test")
+    if a.squash and not (a.message or "").strip():
+        sys.exit("--squash needs --message \"T3: <summary> (squash of <branch>)\": keep the task id first so trace "
+                 "and leases find it")
+    old = git("rev-parse", "--verify", "--quiet", f"refs/heads/{base}^{{commit}}").stdout.strip()
+    tip = git("rev-parse", "--verify", "--quiet", f"{a.branch}^{{commit}}").stdout.strip()
+    if not old:
+        sys.exit(f"base branch {base} not found")
+    if not tip:
+        sys.exit(f"branch {a.branch} not found (git fetch first for a cloud branch)")
+    res = {"branch": a.branch, "base": base, "base_was": old, "tip": tip, "applied": False}
+    if git("merge-base", "--is-ancestor", tip, old).returncode == 0:
+        res["note"] = f"{a.branch} is already in {base}: nothing to merge"
+        print(json.dumps(res, ensure_ascii=False))
+        return
+    holder = None  # the checkout (this one or another worktree) that has the base checked out, if any
+    for blk in git("worktree", "list", "--porcelain").stdout.split("\n\n"):
+        lines = dict((ln.split(" ", 1) + [""])[:2] for ln in blk.splitlines())
+        if lines.get("branch") == f"refs/heads/{base}":
+            holder = Path(lines["worktree"])
+    if a.apply and holder and git("status", "--porcelain", "--untracked-files=no", cwd=holder).stdout.strip():
+        sys.exit(f"{holder} has uncommitted changes on {base}: commit or move them first")
+    pre = git("merge-tree", "--write-tree", "--name-only", "--no-messages", old, tip)
+    if pre.returncode == 1:  # conflict found without touching any checkout (git >= 2.38; older git: skip)
+        res["conflicts"] = [f for f in pre.stdout.splitlines()[1:] if f.strip()]
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(f"merge of {a.branch} into {base} conflicts: nothing changed; send the owner a FOLLOWUP to rebase")
+    tmp = Path(tempfile.mkdtemp(prefix="tw-merge-"))
+    wt = tmp / "wt"
+    try:
+        r = git("worktree", "add", "--detach", str(wt), old)
+        if r.returncode != 0:
+            sys.exit(f"git worktree add failed: {r.stderr.strip()}")
+        if a.squash:
+            r = git("merge", "--squash", tip, cwd=wt)
+            if r.returncode == 0:
+                r = git("commit", "-q", "-m", a.message.strip(), cwd=wt)
+        else:
+            r = git("merge", "--no-ff", "-q", "-m", (a.message or "").strip() or f"Merge {a.branch}", tip, cwd=wt)
+        if r.returncode != 0:
+            res["conflicts"] = [f for f in git("diff", "--name-only", "--diff-filter=U", cwd=wt).stdout.splitlines()]
+            print(json.dumps(res, ensure_ascii=False))
+            sys.exit(f"merge of {a.branch} into {base} failed in the rehearsal: {(r.stderr or r.stdout).strip()[:300]}"
+                     "; nothing changed")
+        new = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+        res["merged"] = new
+        if test.strip():
+            t = subprocess.run(test, shell=True, cwd=str(wt / sub), capture_output=True, text=True)
+            res["checks"] = "pass" if t.returncode == 0 else "fail"
+            if t.returncode != 0:
+                res["check_output"] = (t.stdout + t.stderr)[-2000:]
+                print(json.dumps(res, ensure_ascii=False))
+                sys.exit(f"checks failed on the rehearsed merge ({test}): nothing changed")
+        else:
+            res["checks"] = f"none ({a.no_test})"
+        if not a.apply:
+            res["note"] = f"rehearsal only: rerun with --apply to fast-forward {base} to the merged commit"
+            print(json.dumps(res, ensure_ascii=False))
+            return
+        if holder:  # a checkout has the base: fast-forward it there, files and all (refused if base moved)
+            r = git("merge", "--ff-only", "-q", new, cwd=holder)
+        else:  # base not checked out here: move the ref, only if nobody moved it meanwhile
+            r = git("update-ref", f"refs/heads/{base}", new, old)
+        if r.returncode != 0:
+            sys.exit(f"fast-forward of {base} failed ({r.stderr.strip()[:200]}); {base} is unchanged: was it moved "
+                     "meanwhile? run merge again")
+        res["applied"] = True
+        log(d, {"ev": "merge", "branch": a.branch, "base": base, "from": old, "to": new, "checks": res["checks"]})
+        print(json.dumps(res, ensure_ascii=False))
+    finally:
+        git("worktree", "remove", "--force", str(wt))
+        shutil.rmtree(tmp, ignore_errors=True)
+        git("worktree", "prune")
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="tw.py",
@@ -3614,6 +3754,16 @@ def main():
     x.add_argument("request")
     x.add_argument("--json", action="store_true")
     x.set_defaults(f=cmd_trace)
+    x = s.add_parser("merge", help="rehearse merging a branch into the base in a temp worktree, run the checks, "
+                     "and with --apply fast-forward the base (the live checkout never holds a half merge)")
+    x.add_argument("branch")
+    x.add_argument("--squash", action="store_true", help="one squash commit (needs --message starting with the task id)")
+    x.add_argument("--message", help="merge or squash commit subject; keep the task id first (T3: ...)")
+    x.add_argument("--test", help="check command, run in the rehearsal (default: prefs check_cmd)")
+    x.add_argument("--no-test", metavar="WHY", help="nothing to check (docs only): say why")
+    x.add_argument("--apply", action="store_true", help="fast-forward the base after a clean merge and green checks")
+    x.set_defaults(f=cmd_merge)
+
     x = s.add_parser("guard", help="fail if private words/paths (.teamwork/PRIVATE.md) are in commits or files")
     x.add_argument("--repo", help="git checkout to scan (default: current folder)")
     x.add_argument("--base", help="scan commits base..ref (default: origin/<base branch>)")

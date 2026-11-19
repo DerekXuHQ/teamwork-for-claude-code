@@ -7,6 +7,7 @@
 import datetime as dt
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2644,6 +2645,81 @@ class AuditFollowups(TwCase):
         self.assertNotIn("more permissive", self.tw("prefs", "--set", "thread_permission_mode=acceptEdits").stderr)
 
 
+class ThreadBranchAndPrivateScratch(TwCase):
+    """T32: `thread set --branch` no longer exits 0 while changing nothing; private scratch has a home."""
+
+    def branch(self, t="db"):
+        return self.state()["threads"][t]["branch"]
+
+    def test_set_branch_while_planned(self):
+        self.tw("thread", "add", "db")
+        v = self.state().get("roster_version", 0)
+        self.tw("thread", "set", "db", "--branch", "quix/zorblax")
+        self.assertEqual(self.branch(), "quix/zorblax")
+        self.assertGreater(self.state().get("roster_version", 0), v)
+
+    def test_set_branch_refused_once_seated(self):
+        self.tw("thread", "add", "db", "--session", "session_01Zorblax")
+        r = self.tw("thread", "set", "db", "--branch", "quix/zorblax", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("branch is fixed", r.stderr)
+        self.assertEqual(self.branch(), "tw/demo/db")
+        self.assertNotEqual(self.tw("thread", "reseat", "db", "--session", "session_01Quixbar", "--branch", "x/y",
+                                    ok=False).returncode, 0)
+
+    def test_branch_names_checked_and_not_shared(self):
+        self.tw("thread", "add", "db")
+        for bad in ("-x", "a..b", "a b", "x/", "x.lock", ""):
+            self.assertNotEqual(self.tw("thread", "set", "db", "--branch", bad, ok=False).returncode, 0, bad)
+        self.assertNotEqual(self.tw("thread", "add", "ui", "--branch", "tw/demo/db", ok=False).returncode, 0)
+        self.tw("thread", "add", "ui")
+        self.assertNotEqual(self.tw("thread", "set", "ui", "--branch", "tw/demo/db", ok=False).returncode, 0)
+        self.assertEqual(self.branch(), "tw/demo/db")
+
+    def test_branch_clashes_and_bad_names(self):
+        self.tw("thread", "add", "db")
+        self.tw("thread", "add", "web")
+        for bad in ("tw/demo/db", "TW/DEMO/DB", "tw/demo/db/x", "tw", "main", "origin/main", "HEAD", "a.lock/b",
+                    "a;b", "x/.y"):
+            r = self.tw("thread", "set", "web", "--branch", bad, ok=False)
+            self.assertNotEqual(r.returncode, 0, bad)
+        self.tw("thread", "set", "web", "--branch", "tw/demo/ui")  # ui's default name, before ui exists ...
+        self.assertNotEqual(self.tw("thread", "add", "ui", ok=False).returncode, 0)  # ... then ui cannot take it
+        self.assertNotEqual(self.tw("thread", "add", "q3", "--branch", "main", ok=False).returncode, 0)
+        self.tw("thread", "add", "s1", "--session", "session_01Zorblax")
+        self.tw("thread", "set", "s1", "--branch", "tw/demo/s1")  # its own branch again: a no-op, allowed
+
+    def test_branch_fixed_once_worktree_exists(self):
+        subprocess.run(["git", "-C", str(self.dir), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        self.tw("thread", "add", "db")
+        self.addCleanup(shutil.rmtree, str(Path(self.state()["threads"]["db"]["worktree"]).parent), True)
+        self.tw("worktree", "db")
+        r = self.tw("thread", "set", "db", "--branch", "quix/zorblax", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("worktree", r.stderr)
+        st = self.state()
+        st["threads"]["db"]["branch"] = "quix/zorblax"  # a ledger edited by hand
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        r = self.tw("worktree", "db", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("is on tw/demo/db", r.stderr)
+
+    def test_private_scratch_is_ignored_and_documented(self):
+        self.tw("thread", "add", "ui")
+        p = self.tw("worker-prompt", "ui").stdout
+        self.assertIn("**Private scratch never goes to `/tmp`**", p)
+        self.assertIn(f"{self.state()['repo']['path']}/.teamwork/private/ui/tmp/", p)
+        self.assertIn("never a `.teamwork/` inside your worktree", p)
+        subprocess.run(["git", "-C", str(self.dir), "init", "-q"], check=True)
+        f = self.dir / ".teamwork" / "private" / "ui" / "tmp" / "zorblax.txt"
+        f.parent.mkdir(parents=True)
+        f.write_text("x")
+        r = subprocess.run(["git", "-C", str(self.dir), "check-ignore", "-q", str(f)])
+        self.assertEqual(r.returncode, 0)  # ignored by .teamwork/.gitignore from init
+
+
 class Preconditions(TwCase):
     """T20 / framework I28: illegal transitions are rejected in code, not stored."""
 
@@ -2972,6 +3048,92 @@ class TopicsRosterAsk(TwCase):
         self.assertEqual(sorted(self.ready()["roster_not_sent"]), ["docs", "kit"])
         self.tw("thread", "set", "kit", "--status", "resolved")
         self.assertEqual(self.ready()["roster_not_sent"], ["docs"])  # same rule as `open`
+
+
+class MergeRehearsal(LeasesGit):
+    """T33: `merge` rehearses in a temp worktree; the live checkout only ever moves by fast-forward."""
+
+    test_branch_diff_blocks = None
+
+    def setUp(self):
+        super().setUp()
+        self.git("config", "user.name", "t")
+        self.git("config", "user.email", "t@example.invalid")
+        (self.proj / "zorb.py").write_text("a = 1\n")
+        (self.proj / "check.sh").write_text("grep -q 'a = ' zorb.py\n")
+        self.commit("base")
+        self.git("checkout", "-q", "-b", "tw/proj/ui")
+        (self.proj / "quix.py").write_text("q = 1\n")
+        self.commit("T1: quixbar")
+        self.git("checkout", "-q", "main")
+        self.main0 = self.head()
+
+    def head(self, ref="main"):
+        return self.git("rev-parse", ref).stdout.strip()
+
+    def merge(self, *x, ok=True):
+        return self.tw("merge", "tw/proj/ui", "--test", "sh check.sh", *x, ok=ok)
+
+    def no_temp_worktrees(self):
+        self.assertNotIn("tw-merge-", self.git("worktree", "list").stdout)
+
+    def test_rehearsal_changes_nothing(self):
+        r = json.loads(self.merge().stdout)
+        self.assertEqual((r["checks"], r["applied"]), ("pass", False))
+        self.assertEqual(self.head(), self.main0)
+        self.assertFalse((self.proj / "quix.py").exists())
+        self.no_temp_worktrees()
+
+    def test_apply_fast_forwards_live_checkout(self):
+        r = json.loads(self.merge("--apply").stdout)
+        self.assertTrue(r["applied"])
+        self.assertEqual(self.head(), r["merged"])
+        self.assertTrue((self.proj / "quix.py").exists())  # the live files moved with the ref
+        self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no").stdout, "")
+        self.assertIn('"ev": "merge"', (self.proj / ".teamwork" / "log.jsonl").read_text())
+        self.no_temp_worktrees()
+
+    def test_conflict_leaves_live_untouched(self):
+        (self.proj / "quix.py").write_text("q = 2\n")
+        self.commit("T2: other quix")
+        before = self.head()
+        r = self.merge("--apply", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("quix.py", r.stdout)
+        self.assertEqual(self.head(), before)
+        self.assertNotIn("<<<<<<<", (self.proj / "quix.py").read_text())
+        self.no_temp_worktrees()
+
+    def test_red_checks_leave_live_untouched(self):
+        r = self.tw("merge", "tw/proj/ui", "--test", "exit 3", "--apply", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("checks failed", r.stderr)
+        self.assertEqual(self.head(), self.main0)
+        self.no_temp_worktrees()
+
+    def test_needs_a_check_and_a_squash_subject(self):
+        self.assertIn("no check to run", self.tw("merge", "tw/proj/ui", ok=False).stderr)
+        self.assertIn("--squash needs --message", self.merge("--squash", ok=False).stderr)
+        self.tw("prefs", "--set", "check_cmd=sh check.sh")
+        r = json.loads(self.tw("merge", "tw/proj/ui", "--squash", "--message", "T1: quixbar (squash)", "--apply").stdout)
+        self.assertEqual(self.git("log", "-1", "--format=%s %P").stdout.split()[0:2], ["T1:", "quixbar"])
+        self.assertEqual(len(self.git("log", "-1", "--format=%P").stdout.split()), 1)  # one parent: a squash
+        self.assertTrue(r["applied"])
+        r = json.loads(self.tw("merge", "tw/proj/ui", "--no-test", "docs only").stdout)
+        self.assertIn("checks", r)
+
+    def test_dirty_live_base_refused(self):
+        (self.proj / "zorb.py").write_text("a = 9\n")
+        r = self.merge("--apply", ok=False)
+        self.assertIn("uncommitted changes", r.stderr)
+        self.assertEqual(self.head(), self.main0)
+
+    def test_base_not_checked_out_moves_ref(self):
+        self.git("checkout", "-q", "-b", "elsewhere")
+        r = json.loads(self.merge("--apply").stdout)
+        self.assertEqual(self.head("main"), r["merged"])
+        self.assertEqual(self.head("HEAD"), self.main0)  # the checkout on another branch did not move
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -362,7 +362,7 @@ def worktree_cmd(st, name):
     repo = st.get("repo", {}).get("path") or "."
     base = st.get("repo", {}).get("base") or "main"
     path = t.get("worktree") or str(worktree_path(st, name))
-    return f'git -C "{repo}" worktree add -b {t["branch"]} "{path}" {base}'
+    return f'git -C "{repo}" worktree add -b {branch_of(st, name)} "{path}" {base}'
 
 
 def session_args(st, name):
@@ -799,6 +799,23 @@ def not_a_session(sid, st=None):
     return None
 
 
+def _remotes(st):
+    """The repo's remote names (`upstream/x` is as much a remote branch as `origin/x`); none outside git."""
+    repo = st.get("repo", {}).get("path")
+    if not repo:
+        return ()
+    try:
+        r = subprocess.run(["git", "-C", repo, "remote"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    return tuple(x for x in r.stdout.split() if x) if r.returncode == 0 else ()
+
+
+def branch_of(st, name):
+    """A thread's branch; a hand-edited ledger without the field falls back to the default name."""
+    return st["threads"][name].get("branch") or f"tw/{st['project']}/{name}"
+
+
 def _branch_problem(st, name, b):
     """Why b cannot be thread `name`'s branch, or None. Shell-safe characters only (the branch goes into printed
     git commands), git's ref rules, never the base, and no clash with another thread's branch: same name in any
@@ -810,9 +827,17 @@ def _branch_problem(st, name, b):
                                                        for c in parts) or ".." in b:
         return f"--branch {b!r} is not a valid git branch name"
     base = st.get("repo", {}).get("base") or "main"
-    if b.lower() == base.lower() or parts[0] in ("origin", "refs", "remotes"):
-        return f"--branch {b!r}: a thread works on its own branch, never the base or a remote one"
-    lb = b.lower()
+    lb, lbase = b.lower(), base.lower()
+    ns = f"tw/{st.get('project', '')}".lower()  # the namespace of the default thread branches
+    remote = parts[0].lower() in ("origin", "refs", "remotes") or (
+        not lb.startswith(ns + "/") and parts[0].lower() in {x.lower() for x in _remotes(st)})
+    if lb == lbase or lb.startswith(lbase + "/") or lbase.startswith(lb + "/") or remote:
+        return f"--branch {b!r}: a thread works on its own branch, never the base (or one inside it) or a remote one"
+    if ns.startswith(lb + "/") or lb == ns:
+        return f"--branch {b!r}: holds every thread's default branch ({ns}/<thread>); no new thread could be added"
+    if lb.startswith(ns + "/") and lb != f"{ns}/{name}".lower():
+        return (f"--branch {b!r}: {ns}/<name> is the default branch of thread <name> (rebuild reads it that way); "
+                f"use {ns}/{name} or a name outside {ns}/")
     for n, o in st["threads"].items():
         ob = (o.get("branch") or "").lower()
         if n != name and ob and (ob == lb or ob.startswith(lb + "/") or lb.startswith(ob + "/")):
@@ -849,12 +874,19 @@ def cmd_thread(a):
     if a.action != "add" and a.branch is not None:
         t0 = st["threads"].get(name) or {}
         if a.action == "set" and t0 and t0.get("worktree") and Path(t0["worktree"]).exists():
-            sys.exit(f"--branch: {name}'s worktree {t0['worktree']} already exists on {t0['branch']}; the branch is "
-                     "fixed once its worktree is made")
+            sys.exit(f"--branch: {name}'s worktree {t0['worktree']} already exists on {branch_of(st, name)}; the "
+                     "branch is fixed once its worktree is made")
         if a.action != "set" or not t0 or t0.get("session_id") or t0.get("sessions") or t0.get("status") != "planned":
             sys.exit("--branch changes only while the thread is planned and has never had a session (the user editing "
                      "the plan); after that the branch is fixed: leases and trace follow it, so work there would stop "
                      "counting. Add a new thread for a new branch")
+        repo, old = st.get("repo", {}).get("path"), branch_of(st, name)
+        held = [ref for ref in (f"refs/heads/{old}", f"refs/remotes/origin/{old}") if repo and subprocess.run(
+            ["git", "-C", repo, "show-ref", "--verify", "--quiet", ref], capture_output=True).returncode == 0]
+        if held:
+            sys.exit(f"--branch: {old} already exists in the repo ({', '.join(held)}; its worktree was removed); "
+                     f"renaming the thread's branch would orphan that work. Rename the git branch yourself "
+                     f"(`git branch -m {old} {a.branch}`, and the pushed copy) and then set it here, or keep it")
     if a.action != "add" and (a.kind is not None or a.cloud_reason is not None):
         t0 = st["threads"].get(name) or {}
         if a.action != "set" or not t0 or t0.get("session_id") or t0.get("sessions") or t0.get("status") != "planned":
@@ -924,7 +956,7 @@ def cmd_thread(a):
         out = {
             "name": name,
             "title": t["title"],
-            "branch": t["branch"],
+            "branch": branch_of(st, name),
             "tags": [f"teamwork:{tag(st)}", f"teamwork-thread:{name}"],
             "environment_id": st["envs"].get(a.kind),
             "create_session": session_args(st, name),
@@ -999,7 +1031,7 @@ def cmd_thread(a):
     if a.focus is not None:
         t["focus"] = a.focus
         t["title"] = title_for(st, name)
-    if a.branch is not None and a.branch != t["branch"]:
+    if a.branch is not None and a.branch != t.get("branch"):
         t["branch"] = a.branch
         bump_roster(st)  # the roster and worker prompt name the branch
     if (t.get("session_id"), t.get("owns"), t["status"] == "archived") != roster_before:
@@ -1620,8 +1652,8 @@ def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None, task=Non
     Files changed on the owner's branch vs base ([] when not a git repo or no branch). Problems go to warnings.
     unmerged_only: leave out files that have already landed on the base (done or recalled tasks)."""
     # the current owner's branch, and every earlier owner's: work a handed-over task left unmerged there still counts
-    seats = [st["threads"][n] for n in dict.fromkeys([k.get("owner") or ""] + list(k.get("past_owners") or []))
-             if n in st["threads"]]
+    seats = [{**st["threads"][n], "branch": branch_of(st, n)}
+             for n in dict.fromkeys([k.get("owner") or ""] + list(k.get("past_owners") or [])) if n in st["threads"]]
     repo = st.get("repo", {}).get("path")
     if not seats or not repo:
         return []
@@ -2299,7 +2331,7 @@ def cmd_worker_prompt(a):
         "KIND": t["kind"],
         "FOCUS": t.get("focus") or "-",
         "OWNS": ", ".join(t.get("owns", [])) or "-",
-        "BRANCH": t["branch"],
+        "BRANCH": branch_of(st, a.thread),
         "BASE": st.get("repo", {}).get("base") or "main",
         "LEAD_SESSION": st["lead"].get("session_id") or "(unset)",
         "ROSTER": render_roster(st, a.thread),
@@ -2348,18 +2380,24 @@ def cmd_worktree(a):
     git = lambda *x: subprocess.run(["git", "-C", repo, *x], capture_output=True, text=True)
     if git("rev-parse", "--git-dir").returncode != 0:
         sys.exit(f"{repo} is not a git repository: no worktree needed; the thread works in the project folder")
-    res = {"thread": a.thread, "worktree": str(path), "branch": t["branch"]}
+    br = branch_of(st, a.thread)
+    res = {"thread": a.thread, "worktree": str(path), "branch": br}
     if path.exists():
         res["created"] = False
         res["note"] = "already exists"
-        r = git("-C", str(path), "symbolic-ref", "-q", "--short", "HEAD")
-        if r.returncode == 0 and r.stdout.strip() != t["branch"]:
-            sys.exit(f"{path} is on {r.stdout.strip()}, but {a.thread}'s branch is {t['branch']}: leases and trace "
+        top = git("-C", str(path), "rev-parse", "--show-toplevel")
+        own = top.returncode == 0 and Path(top.stdout.strip()).resolve() == path.resolve()
+        r = git("-C", str(path), "symbolic-ref", "-q", "--short", "HEAD") if own else top  # a plain folder: no checks
+        if own and r.returncode == 0 and r.stdout.strip() != br:
+            sys.exit(f"{path} is on {r.stdout.strip()}, but {a.thread}'s branch is {br}: leases and trace "
                      "follow the ledger's branch; switch the worktree or fix the ledger before the thread works")
+        if own and r.returncode != 0:
+            sys.exit(f"{path} is on a detached HEAD, but {a.thread}'s branch is {br}: commits there belong to no "
+                     f"branch, so leases and trace miss them. `git -C \"{path}\" switch {br}` before the thread works")
     else:
-        has_branch = git("show-ref", "--verify", "--quiet", f"refs/heads/{t['branch']}").returncode == 0
-        cmd = (["worktree", "add", str(path), t["branch"]] if has_branch
-               else ["worktree", "add", "-b", t["branch"], str(path), base])
+        has_branch = git("show-ref", "--verify", "--quiet", f"refs/heads/{br}").returncode == 0
+        cmd = (["worktree", "add", str(path), br] if has_branch
+               else ["worktree", "add", "-b", br, str(path), base])
         res["command"] = "git -C " + repo + " " + " ".join(cmd)
         if a.dry_run:
             res["created"] = False
@@ -3420,7 +3458,7 @@ def cmd_handover(a):
             commit_note = f" unknown (base branch {base_name} not found)"
         else:
             seen, heads = set(), {}
-            for br in (t["branch"], f"origin/{t['branch']}"):
+            for br in (branch_of(st, a.thread), f"origin/{branch_of(st, a.thread)}"):
                 h = git("rev-parse", "--verify", "--quiet", br)
                 if h.returncode != 0:
                     continue
@@ -3433,8 +3471,8 @@ def cmd_handover(a):
                         seen.add(c.split(" ", 1)[0])
                         commits.append(f"{c}  [{br}]")
             if len(set(heads.values())) > 1:
-                commit_note = (f" (local and origin differ: commits tagged only [{t['branch']}] are not pushed, "
-                               f"only [origin/{t['branch']}] not fetched)")
+                commit_note = (f" (local and origin differ: commits tagged only [{branch_of(st, a.thread)}] are not pushed, "
+                               f"only [origin/{branch_of(st, a.thread)}] not fetched)")
     hist = t.get("sessions", [])
     closed = [h for h in hist if h.get("to")]
     cur = next((h for h in reversed(hist) if h.get("session_id") == t.get("session_id") and not h.get("to")), None)
@@ -3462,7 +3500,7 @@ def cmd_handover(a):
          if leaving.get("session_id") else
          f"You start the {a.thread} seat (no earlier session). This brief is what the board knows."),
         f"- Owns: {', '.join(t.get('owns', [])) or '-'}",
-        f"- Branch: {t['branch']} (base {base_name})" + (f"; worktree {t['worktree']}" if t.get("worktree") else ""),
+        f"- Branch: {branch_of(st, a.thread)} (base {base_name})" + (f"; worktree {t['worktree']}" if t.get("worktree") else ""),
         f"- Last summary: {t.get('summary') or '-'}",
         "- Unmerged commits on the branch:" + (commit_note or ("" if commits else " none")),
     ] + [f"    {c}" for c in commits] + ["- Open tasks:" + ("" if open_tasks else " none")] + [

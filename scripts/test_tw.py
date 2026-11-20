@@ -3374,8 +3374,9 @@ class ThreadBranchAndPrivateScratch(TwCase):
                     "a;b", "x/.y"):
             r = self.tw("thread", "set", "web", "--branch", bad, ok=False)
             self.assertNotEqual(r.returncode, 0, bad)
-        self.tw("thread", "set", "web", "--branch", "tw/demo/ui")  # ui's default name, before ui exists ...
-        self.assertNotEqual(self.tw("thread", "add", "ui", ok=False).returncode, 0)  # ... then ui cannot take it
+        # ui's default name, before ui exists: refused (T38 M1), so ui can still be added later
+        self.assertNotEqual(self.tw("thread", "set", "web", "--branch", "tw/demo/ui", ok=False).returncode, 0)
+        self.tw("thread", "add", "ui")
         self.assertNotEqual(self.tw("thread", "add", "q3", "--branch", "main", ok=False).returncode, 0)
         self.tw("thread", "add", "s1", "--session", "session_01Zorblax")
         self.tw("thread", "set", "s1", "--branch", "tw/demo/s1")  # its own branch again: a no-op, allowed
@@ -3396,6 +3397,51 @@ class ThreadBranchAndPrivateScratch(TwCase):
         r = self.tw("worktree", "db", ok=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("is on tw/demo/db", r.stderr)
+
+    def test_t32_leftovers_namespace_base_remotes_missing_field(self):
+        """T38: M1 tw/<project>/<other>, M3 tw/<project> itself, M2 inside the base and other remotes, M6 no field."""
+        self.tw("thread", "add", "db")
+        for bad in ("tw/demo/zorb", "tw/demo/web/x", "tw/demo", "TW/Demo", "main/x"):
+            r = self.tw("thread", "set", "db", "--branch", bad, ok=False)
+            self.assertNotEqual(r.returncode, 0, bad)
+        self.tw("thread", "set", "db", "--branch", "tw/demo/db")  # its own default name is fine
+        self.tw("thread", "set", "db", "--branch", "quix/db")
+        subprocess.run(["git", "-C", str(self.dir), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "remote", "add", "upstream", "https://example.invalid/x.git"],
+                       check=True)
+        self.assertNotEqual(self.tw("thread", "set", "db", "--branch", "upstream/main", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("thread", "set", "db", "--branch", "Upstream/x", ok=False).returncode, 0)
+        subprocess.run(["git", "-C", str(self.dir), "remote", "add", "tw", "https://example.invalid/y.git"], check=True)
+        self.tw("thread", "add", "ui")  # a remote named tw does not block the default branches
+        stf = self.dir / ".teamwork" / "state.json"
+        st = json.loads(stf.read_text())
+        del st["threads"]["db"]["branch"]  # a ledger edited by hand
+        stf.write_text(json.dumps(st))
+        self.assertIn("tw/demo/db", self.tw("worker-prompt", "db").stdout)  # falls back to the default name
+        self.tw("thread", "set", "db", "--branch", "quix/db2")
+        self.assertEqual(self.branch(), "quix/db2")
+
+    def test_t32_leftovers_detached_head_and_orphaned_branch(self):
+        """T38: M4 a detached worktree is refused; M5 a removed worktree's branch is not orphaned by a rename."""
+        subprocess.run(["git", "-C", str(self.dir), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        self.tw("thread", "add", "web")
+        wt = self.state()["threads"]["web"]["worktree"]
+        self.addCleanup(shutil.rmtree, str(Path(wt).parent), True)
+        self.tw("worktree", "web")
+        subprocess.run(["git", "-C", wt, "checkout", "-q", "--detach"], check=True)
+        r = self.tw("worktree", "web", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("detached", r.stderr)
+        subprocess.run(["git", "-C", str(self.dir), "worktree", "remove", wt], check=True)
+        r = self.tw("thread", "set", "web", "--branch", "quix/web", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("orphan", r.stderr)
+        self.assertEqual(self.branch("web"), "tw/demo/web")
+        self.tw("thread", "set", "web", "--session", "session_01Zorblax")
+        r = self.tw("thread", "set", "web", "--branch", "quix/web", ok=False)
+        self.assertIn("planned", r.stderr)  # a seated thread hears the real reason
 
     def test_private_scratch_is_ignored_and_documented(self):
         self.tw("thread", "add", "ui")

@@ -625,6 +625,47 @@ class Requests(TwCase):
         self.assertEqual(self.req("R1")["user_said"][-1]["text"], "looks good")
         self.assertNotEqual(self.tw("req", "drop", "R1", "--user-said", "x", ok=False).returncode, 0)  # ended
 
+    def test_dropped_tasks_do_not_hold_a_request_back(self):
+        """T37: a request waits only on linked tasks that still count; all of them dropped is not a delivery."""
+        self.tw("task", "add", "T3", "--owner", "ui")
+        self.tw("req", "add", "make the button blue", "--tasks", "T1,T2")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.tw("task", "set", "T1", "--status", "review")
+        self.assertEqual(self.req("R1")["status"], "dispatched")  # T2 still open
+        r = self.tw("task", "set", "T2", "--status", "dropped", "--user-said", "not needed")
+        self.assertIn("request R1 delivered", r.stderr)  # dropping the last open task delivers the rest
+        self.assertEqual(self.req("R1")["status"], "delivered")
+        self.tw("req", "set", "R1", "--status", "reported")
+        self.tw("task", "set", "T1", "--accept", "x", "--review", "pass", "--reviewer", "rev")
+        self.tw("req", "close", "R1", "--user-said", "good")  # the dropped T2 does not block the close
+        self.assertEqual(self.req("R1")["status"], "closed")
+        # every linked task dropped: not delivered, by itself or by hand
+        self.tw("req", "add", "dark mode", "--tasks", "T3")
+        self.tw("task", "set", "T3", "--status", "dropped", "--user-said", "skip it")
+        self.assertEqual(self.req("R2")["status"], "dispatched")
+        r = self.tw("req", "set", "R2", "--status", "delivered", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("all linked tasks are dropped", r.stderr)
+        self.assertIn("dropped", self.tw("req", "link", "R2", "T3", ok=False).stderr)  # no linking dead work
+        self.assertNotEqual(self.tw("req", "add", "x", "--tasks", "T2", ok=False).returncode, 0)
+
+    def test_a_drop_that_delivers_an_unlinked_request_survives_rebuild(self):
+        """A move made by the scan over all requests is in the log, so rebuild keeps it."""
+        self.tw("req", "add", "blue", "--tasks", "T1,T2")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.tw("task", "set", "T1", "--status", "review")
+        stf = self.dir / ".teamwork" / "state.json"
+        st = json.loads(stf.read_text())
+        st["tasks"]["T2"]["status"] = "dropped"  # an older ledger: dropped before the rule, request left dispatched
+        stf.write_text(json.dumps(st))
+        self.tw("task", "add", "T3", "--owner", "ui")
+        self.tw("task", "set", "T3", "--status", "working")
+        self.tw("task", "set", "T3", "--status", "review")  # unrelated move; the scan delivers R1
+        self.assertEqual(self.req("R1")["status"], "delivered")
+        ev = [json.loads(x) for x in (self.dir / ".teamwork" / "log.jsonl").read_text().splitlines()][-1]
+        self.assertEqual(ev["snap_reqs"]["R1"]["status"], "delivered")
+        self.assertNotIn("_moved_reqs", self.state())
+
     def test_declined_closes_from_any_state(self):
         self.tw("req", "add", "maybe a dark mode")
         self.assertNotEqual(self.tw("req", "drop", "R1", ok=False).returncode, 0)

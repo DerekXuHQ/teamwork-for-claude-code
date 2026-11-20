@@ -235,6 +235,7 @@ def log(d, event):
 
 def save(d, st, event=None):
     touched = st.pop("_touched", [])
+    moved_reqs = st.pop("_moved_reqs", [])  # requests a task move delivered or re-dispatched (any request, linked or not)
     st["updated"] = now()
     tmp = d / "state.json.tmp"
     tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -242,7 +243,11 @@ def save(d, st, event=None):
     (d / "BOARD.md").write_text(render_board(st), encoding="utf-8")
     if event:
         more = {n: st["threads"][n] for n in touched if n in st["threads"] and n != event.get("thread")}
-        log(d, {**event, **snapshots(st, event), **({"snap_more_threads": more} if more else {})})
+        snap = snapshots(st, event)
+        if moved_reqs:
+            snap["snap_reqs"] = {**snap.get("snap_reqs", {}),
+                                 **{r: st["requests"][r] for r in moved_reqs if r in st.get("requests", {})}}
+        log(d, {**event, **snap, **({"snap_more_threads": more} if more else {})})
 
 
 def snapshots(st, ev):
@@ -1246,7 +1251,7 @@ def cmd_task(a):
                 if k.get("checks") == "pass" and a.checks is None:
                     k["checks"] = "none"  # green checks were for the old code
             k["status"] = a.status
-            if a.status in ("review", "done"):
+            if a.status in ("review", "done", "dropped"):  # dropping the last open task can deliver the rest
                 for r in deliver_ready(st):
                     print(f"request {r} delivered (all its tasks are in review or done): report it to the user, then "
                           f"`tw.py req set {r} --status reported`", file=sys.stderr)
@@ -2387,16 +2392,26 @@ def cmd_worktree(a):
     print(json.dumps(res, ensure_ascii=False))
 
 
+def live_tasks(st, q):
+    """A request's linked tasks that still count: a dropped task neither delivers it nor holds it back."""
+    return [t for t in (q.get("tasks") or []) if st["tasks"].get(t, {}).get("status") != "dropped"]
+
+
+def tasks_ready(st, q):
+    """True when the request has live linked work and all of it is in review or done (all dropped: not ready)."""
+    ts = live_tasks(st, q)
+    return bool(ts) and all(st["tasks"].get(t, {}).get("status") in ("review", "done") for t in ts)
+
+
 def deliver_ready(st):
-    """Requests whose linked tasks are all done move open/dispatched -> delivered. Returns the ids moved."""
+    """Requests whose live linked tasks are all in review or done move dispatched -> delivered. Returns the ids."""
     moved = []
     for r, q in st.get("requests", {}).items():
-        ts = q.get("tasks") or []
-        if q["status"] == "dispatched" and ts and all(
-                st["tasks"].get(t, {}).get("status") in ("review", "done") for t in ts):
+        if q["status"] == "dispatched" and tasks_ready(st, q):
             q["status"] = "delivered"
             q["updated"] = now()
             moved.append(r)
+    st.setdefault("_moved_reqs", []).extend(moved)
     return moved
 
 
@@ -2405,12 +2420,13 @@ def undeliver(st):
     what was delivered or told to the user is no longer the result (report the new one when it comes back)."""
     moved = []
     for r, q in st.get("requests", {}).items():
-        ts = q.get("tasks") or []
+        ts = live_tasks(st, q)  # every task dropped: the result already told stays told (not re-dispatched)
         if q["status"] in ("delivered", "reported") and not all(
                 st["tasks"].get(t, {}).get("status") in ("review", "done") for t in ts):
             q["status"] = "dispatched"
             q["updated"] = now()
             moved.append(r)
+    st.setdefault("_moved_reqs", []).extend(moved)
     return moved
 
 
@@ -2432,6 +2448,9 @@ def check_tasks(st, ids):
     bad = [t for t in ids if t not in st["tasks"]]
     if bad:
         sys.exit(f"unknown task(s) {', '.join(bad)}; add them with `task add` first")
+    gone = [t for t in ids if st["tasks"][t].get("status") == "dropped"]
+    if gone:
+        sys.exit(f"{', '.join(gone)} dropped: a request waits only on live work, link the task that replaces it")
 
 
 def set_req_status(st, r, q, new, by_import=False, user_said=None):
@@ -2454,11 +2473,13 @@ def set_req_status(st, r, q, new, by_import=False, user_said=None):
     if (cur, new) in REQ_NEEDS_USER and not user_said:
         sys.exit(f"{r} {cur} -> {new} is the user's decision: add --user-said \"<their words>\"")
     if new == "delivered":
-        ts = q.get("tasks") or []
+        ts = live_tasks(st, q)
         not_ready = [t for t in ts if st["tasks"].get(t, {}).get("status") not in ("review", "done")]
         if not ts or not_ready:
-            sys.exit(f"{r} is delivered only when every linked task is in review or done"
-                     + (f" (not yet: {', '.join(not_ready)})" if not_ready else " (no tasks linked)"))
+            sys.exit(f"{r} is delivered only when every linked task that is not dropped is in review or done"
+                     + (f" (not yet: {', '.join(not_ready)})" if not_ready else
+                        " (all linked tasks are dropped: link the new work, or ask the user to drop the request)"
+                        if q.get("tasks") else " (no tasks linked)"))
     q["status"] = new
     if user_said:
         q.setdefault("user_said", []).append({"t": now(), "to": new, "text": user_said})
@@ -2543,7 +2564,7 @@ def cmd_req(a):
                 why = accept_gate(st, t) if st["tasks"].get(t, {}).get("status") == "review" else None
                 if why:
                     sys.exit(f"{r}: {t} {why}; the user accepts only checked work")
-        back = [t for t in q.get("tasks") or [] if st["tasks"].get(t, {}).get("status") not in ("review", "done")]
+        back = [t for t in live_tasks(st, q) if st["tasks"].get(t, {}).get("status") not in ("review", "done")]
         if not drop and back:
             sys.exit(f"{r} was reported, but {', '.join(back)} went back to work since: report the new result "
                      "first (the user accepted an old one)")
@@ -2603,8 +2624,7 @@ def cmd_req_import(a, d, st):
         set_req_status(st, r, q, status, by_import=True)
         if status in REQ_END:
             q["closed_reason"] = "imported (ended in the old ledger; no user words recorded here)"
-        if q["status"] == "delivered" and tasks and not all(
-                st["tasks"].get(t, {}).get("status") in ("review", "done") for t in tasks):
+        if q["status"] == "delivered" and tasks and not tasks_ready(st, q):
             q["status"] = "dispatched"  # linked work is not finished (an old row without tasks keeps its status)
         out[r] = q
     if a.dry_run:

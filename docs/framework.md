@@ -340,7 +340,7 @@ questions: [ { from, text, t, answered } ]
 | `ANSWER` | lead → thread | Reply to a `QUESTION`. | The decision. | question answered; often a memory line. |
 | `ACK` | thread → sender (+ lead) | Received a TASK, FOLLOWUP or HANDOFF; starting. One line. | — | task → `working`. |
 | `UPDATE` | thread → lead | Real progress or change of plan, only when asked or important. | What changed. | thread summary. |
-| `DONE` | thread → lead | The task's "done when" is met. | What changed, where, how verified. | task, thread → `review`; request → `delivered` when all its tasks are `review` or `done`. |
+| `DONE` | thread → lead | The task's "done when" is met. | What changed, where, how verified. | task, thread → `review`; request → `delivered` when all its tasks that are not dropped are `review` or `done`. |
 | `BLOCKED` | thread → lead | Cannot continue. | What is needed, from whom. | task → `blocked`; thread → `waiting` if it needs the user. |
 | `QUESTION` | thread → lead | A decision only the user or another owner can make, including any consent-gated step. | The question, options, what is prepared. | question recorded; asked to the user. |
 | `HANDOFF` | thread → thread (+ lead) | Work that belongs to the receiver's area. | Original request, context, files, findings. | task owner moved; lead forwards if not ACKed. |
@@ -473,7 +473,7 @@ the user, the threads and the host.
 | `open` | Captured; intake not finished, or answered in place and about to be reported. |
 | `proposed` | Intake decided "propose first": the lead put a plan to the user and waits for a yes. |
 | `dispatched` | Linked to one or more tasks that have been sent to owners. |
-| `delivered` | Every linked task has reached `review` or `done`: the result exists. |
+| `delivered` | Every linked task that is not dropped has reached `review` or `done`: the result exists. A dropped task does not count; all of them dropped is no delivery. |
 | `reported` | The lead's report (what came back, where, how checked) is in the user's surface. If the host has a "seen" signal that only the user can trigger, record it; an unseen report is re-surfaced at the next sweep. |
 | `closed` | The user accepted it. |
 | `dropped` | The user said not to do it. |
@@ -488,7 +488,7 @@ stateDiagram-v2
     open --> reported: answered in place
     open --> delivered: work done directly in a thread, registered after
     open --> closed: split parent, all children ended
-    dispatched --> delivered: all linked tasks review/done
+    dispatched --> delivered: all live linked tasks review/done
     delivered --> reported: lead reports to the user
     reported --> closed: user accepts
     reported --> dispatched: user asks for changes

@@ -307,6 +307,67 @@ class LessonsFeatures(TwCase):
         self.assertEqual([x["id"] for x in rb["issues"]], ["I1"])
 
 
+class ThreadProtocolLessons(TwCase):
+    """T41: IL-18 the hook finds the board from a worktree and reminds the thread; IL-19 tasks first; IL-21/23/26."""
+
+    def test_context_from_a_worktree_picks_the_deepest_active_seat_and_survives_a_broken_board(self):
+        self.tw("thread", "add", "ui", "--focus", "pages")
+        self.tw("thread", "add", "old", "--focus", "pages")
+        base = self.dir.parent / f"{self.dir.name}-worktrees"
+        wt = base / "ui" / "inner"
+        wt.mkdir(parents=True)
+        stf = self.dir / ".teamwork" / "state.json"
+        st = json.loads(stf.read_text())
+        st["threads"]["ui"]["worktree"] = str(base / "ui")
+        st["threads"]["old"]["worktree"] = str(wt)
+        st["threads"]["old"]["status"] = "archived"
+        stf.write_text(json.dumps(st))
+        r = subprocess.run([sys.executable, str(TW), "context"], cwd=wt, env=self.env, capture_output=True, text=True)
+        self.assertIn("You are thread ui", r.stdout)  # the archived seat's deeper path does not win
+        st["threads"]["ui"]["worktree"] = 5
+        stf.write_text(json.dumps(st))
+        r = subprocess.run([sys.executable, str(TW), "context"], cwd=wt, env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0)  # a non-string path is skipped
+        stf.write_text("{not json")
+        r = subprocess.run([sys.executable, str(TW), "context"], cwd=wt, env=self.env, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+    def test_context_from_a_worktree(self):
+        self.tw("thread", "add", "ui", "--focus", "pages")
+        self.tw("issue", "add", "main is red", "--owner", "ui")
+        wt = self.dir.parent / f"{self.dir.name}-worktrees" / "ui" / "web"
+        wt.mkdir(parents=True)
+        r = subprocess.run([sys.executable, str(TW), "context"], cwd=wt, env=self.env, capture_output=True, text=True)
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("You are thread ui", ctx)
+        self.assertIn("] <TYPE> ui -> <recipient>", ctx)
+        self.assertIn("main is red", ctx)  # the known issues reach the thread
+        self.assertIn("the lead's view", ctx)
+        self.assertNotIn("req set", ctx.split("the lead's view")[0])  # no lead-only instructions above the board
+        nested = self.dir.parent / f"{self.dir.name}-worktrees" / "ui" / "sub-worktrees" / "x"
+        nested.mkdir(parents=True)
+        r = subprocess.run([sys.executable, str(TW), "context"], cwd=nested, env=self.env, capture_output=True, text=True)
+        self.assertIn("You are thread ui", r.stdout)  # keeps walking past an unrelated *-worktrees folder
+        self.tw("thread", "set", "ui", "--status", "archived")
+        r = subprocess.run([sys.executable, str(TW), "context"], cwd=wt, env=self.env, capture_output=True, text=True)
+        self.assertNotIn("You are thread", r.stdout)
+        other = self.dir.parent / f"{self.dir.name}-worktrees" / "nobody"
+        other.mkdir()
+        r = subprocess.run([sys.executable, str(TW), "context"], cwd=other, env=self.env, capture_output=True, text=True)
+        self.assertNotIn("You are thread", r.stdout)  # not a seat: board only, no reminder
+
+    def test_protocol_reads_tasks_first_and_has_the_rules(self):
+        self.tw("thread", "add", "ui", "--focus", "pages")
+        text = self.tw("worker-prompt", "ui").stdout
+        heads = [ln for ln in text.splitlines() if ln.startswith("## ")]
+        self.assertEqual(heads[0], "## Your tasks")
+        self.assertLess(heads.index("## Working rules"), heads.index("## Project instructions"))
+        self.assertLess(heads.index("## STATUS block (end EVERY turn with it)"), heads.index("## Project memory"))
+        for want in ("FIXED <branch>@<commit>", "processes closed", "waiting_on: limit", "re-read Language"):
+            self.assertIn(want, text)
+        self.assertNotIn("{{", text)
+
+
 class Language(TwCase):
     def setUp(self):
         super().setUp()

@@ -3905,9 +3905,42 @@ def cmd_projects(a):
               f"{x['tasks_done']} | {x['questions']} | {(x['updated'] or '-')[:16]} |")
 
 
+def thread_reminder(st, me):
+    """IL-18: after a compaction the SessionStart hook runs again; a thread gets its header and rules back first."""
+    if not me or me not in st.get("threads", {}) or st["threads"][me].get("status") in ("archived", "resolved"):
+        return ""
+    lead = (st.get("lead") or {}).get("session_id") or "(see roster)"
+    return (f"You are thread {me} of this project (lead session {lead}). If your context was just summarized, re-read "
+            "your thread protocol's Language, Messages and STATUS sections before your next message. Every message "
+            f"starts with `[tw:{tag(st)}] <TYPE> {me} -> <recipient> <task-id or ->`, and every turn ends with the "
+            "tw-status block.\n\n")
+
+
 def cmd_context(a):
     """SessionStart hook. Prints nothing outside a teamwork folder."""
     d = find_dir()
+    me, in_worktree = None, False
+    if d is None:  # an rc thread's worktree, <project>-worktrees/<thread>: the board lives in the project folder
+        cwd = Path.cwd().resolve()
+        for p in [cwd, *cwd.parents]:
+            if p.parent.name.endswith("-worktrees"):
+                proj = p.parent.parent / p.parent.name[:-len("-worktrees")]
+                if (proj / ".teamwork" / "state.json").exists():
+                    try:
+                        st0 = load(proj / ".teamwork")
+                        seats = st0.get("threads") or {}
+                    except Exception:
+                        return  # a broken board: say nothing rather than fail the thread's hook on every start
+                    d, in_worktree = proj / ".teamwork", True
+                    by_path = []  # the deepest recorded worktree holding cwd, active seats first
+                    for n, t in seats.items():
+                        w = t.get("worktree") if isinstance(t, dict) else None
+                        if isinstance(w, str) and w:
+                            wp = Path(w).resolve()
+                            if wp == cwd or wp in cwd.parents:
+                                by_path.append((t.get("status") not in ("archived", "resolved"), len(wp.parts), n))
+                    me = max(by_path)[2] if by_path else p.name
+                    break  # else keep walking: a nested `x-worktrees` folder is not the project's
     if d is None or not (d / "state.json").exists():
         # Served folder of a Remote Control environment: list projects below it, nothing more.
         cwd = Path.cwd()
@@ -3921,8 +3954,10 @@ def cmd_context(a):
                   "cd into its folder first (its own board then applies)."}}, ensure_ascii=False))
         return
     st = load(d)
-    pw = permission_warning(st)
-    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\n" + (f"Lead: permissions: {pw}\n\n" if pw else "") + language_rule(st) + "\n\n" + unreported_note(st) + render_board(
+    pw = permission_warning(st) if not in_worktree else ""
+    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\n" + (f"Lead: permissions: {pw}\n\n" if pw else "") + thread_reminder(st, me) + language_rule(st) + "\n\n" + (unreported_note(st) if not in_worktree else
+    "The board below is the lead's view: its requests, questions and commands are the lead's to act on, not yours. "
+    "Read it for the roster, your tasks and the known issues.\n\n") + render_board(
         st
     ) + "\n\nProject instructions (.teamwork/INSTRUCTIONS.md):\n" + read_file(
         d, "INSTRUCTIONS.md"

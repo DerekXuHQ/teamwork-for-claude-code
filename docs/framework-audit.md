@@ -66,15 +66,15 @@ Where each item of `docs/field-tests/2026-11-18-overnight-run-lessons.md` §6 la
 | IL-15 | T39 | SKILL §4 "Every ask, also from an interrupt or a document". |
 | IL-16 | T39 | `TW memory --never-raise` / `--user-owned` write sections in MEMORY.md (new projects get both headings); SKILL §5.5 checks reports against them. The `TW check-msg` flag is not adopted (IL-11). |
 | IL-17 | T39 | SKILL §4 "Ask or decide". |
-| IL-18 | T41 | worker protocol: re-read after compaction. |
-| IL-19 | T39, T41 | SKILL §3: `append_system_prompt` is the worker prompt itself, never a file pointer. Reordering the protocol (tasks first) is in T41, which owns the protocol IL items. |
+| IL-18 | T41 | Protocol header: re-read Language, Messages, STATUS after a summary; `tw.py context` (SessionStart, which fires after compaction) now finds the board from an rc worktree and adds the thread's header format; SKILL Rules for the lead. |
+| IL-19 | T39, T41 | SKILL §3: `append_system_prompt` is the worker prompt itself, never a file pointer. T41: the protocol now reads tasks first, then the rules, with instructions and memory last. |
 | IL-20 | T40 | `TW issue add/set/list` (fixed-on-branch needs `--ref`), board "Known issues", `INFO` in messages.md and the worker protocol; SKILL §5.11. |
-| IL-21 | T41 | worker protocol: fix states. |
+| IL-21 | T41 | Protocol Working rules "Fix states": `FIXED <branch>@<commit>`, merged, verified; QA re-tests only merged work or the lead's integration branch. |
 | IL-22 | T39 | SKILL §7 "QA after merge"; `TW route --path <file>` maps a file to its owner (owns and active leases). |
-| IL-23 | T41 | worker protocol: process and data hygiene. |
+| IL-23 | T41 | Protocol Working rules "Clean up what you start": DONE says `processes closed`; temp folders and made-up data, never the user's apps or data. |
 | IL-24 | T36 | Command shapes and the `bash-guard` hook (SKILL Rules, worker protocol, setup.md). |
 | IL-25 | T39 | SKILL §7 "Announce only what is merged". |
-| IL-26 | T41 | worker protocol: name the limit. |
+| IL-26 | T41 | Protocol Working rules "Name the limit": which limit, when it resets, `waiting_on: limit ...`. |
 | IL-27 | T39 | SKILL §2.4 "Skeleton first, then fan out". |
 | IL-28 | T39 | SKILL §2.4 "One owner per seam". |
 | IL-29 | T34 | SKILL §4 "The test between the two"; `route` suggests a new thread; `topic_mismatch`. |

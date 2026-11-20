@@ -1921,9 +1921,9 @@ def _stem(w):
     hous, bus/buses -> bus, policy/policies -> policy, status/statuses -> status, analysis/analyses -> analysis."""
     if len(w) > 4 and w.endswith("yses"):  # analyses
         return w[:-3] + "sis"
-    if len(w) > 4 and w.endswith("ies"):  # policies
+    if len(w) > 4 and w.endswith("ies") and not w.endswith(("kies", "vies")):  # policies (not cookies, movies)
         return w[:-3] + "y"
-    if len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is")):
+    if len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is", "vas", "ias", "gas")):  # canvas, alias, gas stay
         cut = w[:-2] if w.endswith("es") else ""  # boxes, buses, statuses, matches; frees, uses keep their e
         w = cut if len(cut) > 2 and cut.endswith(("s", "x", "z", "ch", "sh")) else w[:-1]
     if len(w) > 3 and w.endswith("e") and not w.endswith(("ee", "ie")):
@@ -2004,10 +2004,9 @@ def cmd_route(a):
             continue
         keys = [name, t.get("focus", "")] + t.get("owns", [])
         topic = _thread_topic(t, name)
-        s = 0
-        for k in st["tasks"].values():  # its tasks count a little, and only on its topic: a task routed there by
-            if k.get("owner") == name and k["status"] != "dropped":  # mistake does not pull more of the same
-                s += min(1, len(words & _tokens(k.get("title") or "") & topic))
+        s = min(2, sum(  # its tasks count a little (2 at most), only on its topic: a task routed there by mistake
+            min(1, len(words & _tokens(k.get("title") or "") & topic))  # does not pull more of the same
+            for k in st["tasks"].values() if k.get("owner") == name and k["status"] != "dropped"))
         for key in keys:
             key = key.lower().strip()
             if not key:
@@ -4080,10 +4079,11 @@ def _in_the_way(git, checkout, old, new):
     root = git("rev-parse", "--show-toplevel", cwd=checkout).stdout.strip()
     if not root:
         return []
-    changed = set(git("diff", "--name-only", "--no-renames", old, new).stdout.splitlines())
+    z = lambda r: {x for x in r.stdout.split("\0") if x}  # -z: paths as they are, not quoted (non-ASCII names)
+    changed = z(git("diff", "-z", "--name-only", "--no-renames", old, new))
     dirs = {"/".join(c.split("/")[:i]) for c in changed for i in range(1, c.count("/") + 1)}
-    local = set(git("ls-files", "--others", "--exclude-standard", cwd=root).stdout.splitlines())
-    local |= set(git("ls-files", "--others", "--ignored", "--exclude-standard", cwd=root).stdout.splitlines())
+    local = z(git("ls-files", "-z", "--others", "--exclude-standard", cwd=root))
+    local |= z(git("ls-files", "-z", "--others", "--ignored", "--exclude-standard", cwd=root))
     hit = set()
     for u in local:
         up = u.rstrip("/").split("/")
@@ -4218,9 +4218,12 @@ def cmd_merge(a):
                          "merge again; nothing changed")
         if test.strip():
             env = {k: v for k, v in os.environ.items() if k != "TEAMWORK_DIR"}  # checks never touch the live ledger
+            try:
+                limit = float(st.get("prefs", {}).get("check_timeout_minutes", 60) or 0)
+            except (TypeError, ValueError):
+                limit = 60.0  # a hand-edited ledger: the default, never no limit by accident
             pr = subprocess.Popen(test, shell=True, cwd=str(wt / sub), stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
                                   stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
-            limit = float(st.get("prefs", {}).get("check_timeout_minutes", 60) or 0)
             try:
                 out, _ = pr.communicate(timeout=limit * 60 if limit > 0 else None)
             except subprocess.TimeoutExpired:
@@ -4228,7 +4231,12 @@ def cmd_merge(a):
                     os.killpg(pr.pid, signal.SIGKILL) if hasattr(os, "killpg") else pr.kill()
                 except OSError:
                     pass
-                out, _ = pr.communicate()
+                try:
+                    out, _ = pr.communicate(timeout=10)
+                except subprocess.TimeoutExpired:  # a detached grandchild still holds the output pipe
+                    out = ""
+                    pr.kill()
+                    pr.wait()
                 res["checks"] = "fail"
                 res["check_output"] = (out or "")[-2000:]
                 print(json.dumps(res, ensure_ascii=False))
@@ -4273,8 +4281,8 @@ def cmd_merge(a):
                 moved = f"{now} is no longer on {base} at {old[:9]} (rebase or checkout in progress?)"
             elif git("status", "--porcelain", "--untracked-files=no", cwd=now).stdout.strip():
                 moved = f"{now} got uncommitted changes on {base} meanwhile"
-            elif _in_the_way(git, now, old, new):
-                res["untracked_in_the_way"] = _in_the_way(git, now, old, new)
+            elif (late := _in_the_way(git, now, old, new)):
+                res["untracked_in_the_way"] = late
                 moved = f"untracked or ignored files in {now} that the merge would overwrite appeared meanwhile"
         if moved:
             res["refused"] = moved
@@ -4289,12 +4297,17 @@ def cmd_merge(a):
             print(json.dumps(res, ensure_ascii=False))
             sys.exit(f"fast-forward of {base} failed ({res['refused'][:200]}); {base} is unchanged")
         after = git("rev-parse", "--verify", "--quiet", f"refs/heads/{base}^{{commit}}").stdout.strip()
-        if after != new:  # the checkout switched branches in the last instant: the fast-forward went elsewhere
+        if after != new and git("merge-base", "--is-ancestor", new, after).returncode == 0:
+            res["note"] = f"{base} moved on to {after[:9]} right after the fast-forward (it contains the merge)"
+        elif after != new:  # the checkout switched branches in the last instant: the fast-forward went elsewhere
             moved_to = git("symbolic-ref", "-q", "--short", "HEAD", cwd=now).stdout.strip() if now else ""
             res["refused"] = f"{base} is at {after[:9]}, not {new[:9]}, after the fast-forward"
             log(d, {"ev": "merge-misfired", "branch": a.branch, "sha": sha, "base": base, "to": new,
                     "checkout_branch": moved_to})
             print(json.dumps(res, ensure_ascii=False))
+            if not now:
+                sys.exit(f"{base} is at {after[:9]} right after it was moved to {new[:9]}: something else moved it; "
+                         f"check `git log -1 {base}` and run merge again")
             sys.exit(f"{now or 'the repo'} switched to {moved_to or 'another branch'} during the fast-forward: that "
                      f"branch may now be at {new[:9]}, and {base} is unchanged. Check {moved_to or 'it'} "
                      f"(`git -C \"{now}\" log -1`), then run merge again")
@@ -4345,6 +4358,9 @@ def _heredoc_word(cmd, i):
     out, start = [], i
     while i < n and cmd[i] not in " \t\n;&|()<>":
         c = cmd[i]
+        if c == "$" and i + 1 < n and cmd[i + 1] in "'\"":  # $'EOF' and $"EOF" close at EOF, like 'EOF'
+            i += 1
+            continue
         if c in "'\"":
             j = cmd.find(c, i + 1)
             if j < 0 or "\n" in cmd[i:j]:

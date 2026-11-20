@@ -90,6 +90,11 @@ class RouteByTopic(TwCase):
         self.tw("thread", "add", "infra", "--focus", "bus routes and house policies")
         for x in ("one bus", "the house", "a policy"):
             self.assertEqual(tok(x)["best"], "infra", x)
+        self.tw("thread", "add", "media", "--focus", "movies and cookies")
+        self.assertEqual(tok("the movie cookie")["best"], "media")
+        for i in range(2, 8):  # many tasks on one shared word do not outweigh a thread whose focus is the request
+            self.tw("task", "add", f"T{i}", "--owner", "docs", "--title", f"guide house {i}")
+        self.assertEqual(tok("house policies")["best"], "infra")
         self.tw("task", "add", "T1", "--owner", "docs", "--title", "partner outreach list")  # routed by mistake
         self.assertIsNone(tok("partner outreach list again")["best"])
 
@@ -3204,7 +3209,8 @@ class BashGuard(unittest.TestCase):
     def test_t42_heredoc_delimiters_read_as_the_shell_does(self):
         HARD = self.HARD
         for cmd in (f'cat <<E"O"F\nbody\nEOF\ngit reset {HARD}', f'cat <<"EO F"\nx\nEO F\ngit reset {HARD}',
-                    f"cat << EOF\ngit reset {HARD}", f'cat <<A <<B\na\nA\nb\nB\ngit reset {HARD}'):
+                    f"cat << EOF\ngit reset {HARD}", f'cat <<A <<B\na\nA\nb\nB\ngit reset {HARD}',
+                    f"cat <<$'EOF'\nbody\nEOF\ngit reset {HARD}\n$EOF", f'cat <<$"EOF"\nb\nEOF\ngit reset {HARD}'):
             self.assertEqual(self.judge(cmd), "ask", cmd)  # after the body, or an unclosed one: judged
         for cmd in (f"cat <<'EOF'\ngit reset {HARD}\nEOF\nls", f"cat <<-EOF\n\tgit reset {HARD}\n\tEOF\nls"):
             self.assertIsNone(self.judge(cmd), cmd)  # inside a closed body: data
@@ -4029,6 +4035,16 @@ class MergeRehearsal(LeasesGit):
         r = self.merge("--apply", ok=False)
         self.assertEqual(sorted(json.loads(r.stdout)["untracked_in_the_way"]), ["bld/x", "cfg"])
         self.assertEqual(((self.proj / "bld" / "x").read_text(), (self.proj / "cfg").read_text()), ("LOCAL\n",) * 2)
+
+    def test_t42_non_ascii_paths_in_the_way(self):
+        self.git("checkout", "-q", "tw/proj/ui")
+        (self.proj / "中文").write_text("tracked\n")
+        self.commit("T1: zh")
+        self.git("checkout", "-q", "main")
+        (self.proj / "中文").mkdir()
+        (self.proj / "中文" / "k").write_text("LOCAL\n")
+        r = self.merge("--apply", ok=False)
+        self.assertEqual(json.loads(r.stdout)["untracked_in_the_way"], ["中文/k"])
         self.assertEqual(self.head(), self.main0)
 
     def test_t42_ignored_file_appearing_during_checks_refused(self):

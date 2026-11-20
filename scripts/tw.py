@@ -951,6 +951,9 @@ def cmd_task(a):
             "created": now(),
         }
         save(d, st, {"ev": "task-add", "task": a.id, "owner": a.owner})
+        warn = topic_mismatch(st, a.owner, a.title)  # no --title: nothing to compare yet
+        if warn:
+            print(warn, file=sys.stderr)
     else:
         if a.id not in st["tasks"]:
             sys.exit(f"unknown task {a.id}")
@@ -1161,6 +1164,10 @@ def cmd_task(a):
                 **({"snap_more_tasks": stale} if stale else {}),
             },
         )
+        if a.owner or a.title:  # after the save: warn only about what was stored
+            warn = topic_mismatch(st, k.get("owner"), k.get("title") if k.get("title") != a.id else None)
+            if warn:
+                print(warn, file=sys.stderr)
     print(render_tasks(st))
 
 
@@ -1714,8 +1721,66 @@ def cmd_ready(a):
     )
 
 
-def _tokens(s):
-    return set(re.findall(r"[a-z0-9]+|[一-鿿]{2,}", s.lower()))
+_STOP = set("a an the and or of to in on at for with from by is are be it this that these those into as via per "
+             "new add fix update make do use get set run all any some more one two not no up out our your my "
+             "task tasks thread threads work please also then build write create implement draft prepare need want "
+             "help improve change start finish check review".split())
+
+
+# Chinese words that carry no topic: runs are cut at these multi-character function words before pairing, and pairs
+# with 的 are dropped, so `我的设计稿` and `用户的设置页面` share nothing through `的设`. Single characters are not cut:
+# they live inside real words (申请, 请求, 参与, 了解).
+_ZH_STOP = re.compile("我们|你们|他们|这个|那个|这些|那些|一个|一些|需要")
+
+
+def _stem(w):
+    """Plural to singular, roughly and the same on both sides: guides, statuses, processes, analyses."""
+    if len(w) <= 3 or not w.endswith("s") or w.endswith(("ss", "us", "is")):
+        return w
+    if w.endswith("yses"):  # analyses
+        return w[:-3] + "sis"
+    if w.endswith(("uses", "sses")) and len(w) > 5:  # statuses, processes (not databases, uses)
+        return w[:-2]
+    if w.endswith(("xes", "shes", "ches")):
+        return w[:-2]
+    return w[:-1]
+
+
+def _tokens(s, stop=True):
+    """Topic words: English words (stop words and single letters dropped, plural `s` cut) and Chinese character
+    pairs within words, so `请求台账` and `台账导出` share `台账`."""
+    s = s.lower()
+    out = {_stem(w) for w in re.findall(r"[a-z0-9]+", s) if len(w) > 1 and not (stop and w in _STOP)}
+    for run in re.findall(r"[一-鿿]+", s):
+        for part in _ZH_STOP.split(run):
+            out.update(x for x in (part[i:i + 2] for i in range(len(part) - 1)) if "的" not in x)
+    return out
+
+
+def _thread_topic(t, name):
+    """A thread's topic words; its own name always counts, even a stop word such as `review`."""
+    return _tokens(" ".join([t.get("focus", "")] + t.get("owns", []))) | _tokens(name, stop=False)
+
+
+def topic_mismatch(st, owner, title):
+    """R41: a warning when a task's title shares no topic word with its owner's name, focus and owns (never blocks)."""
+    t = st["threads"].get(owner or "")
+    if not t or not title:
+        return None
+    title_words = _tokens(title) | (_tokens(title, stop=False) & _tokens(owner, stop=False))
+    if title_words & _thread_topic(t, owner) or not title_words:
+        return None
+    if not t.get("focus") and not t.get("owns"):
+        return (f"topic_mismatch: thread {owner} has no focus or owns, so its topic is unknown: set them with "
+                f"`TW thread set {owner} --focus ... --owns ...` (one topic per thread). Kept as given.")
+    return (f"topic_mismatch: '{title[:60]}' shares no topic word with thread {owner} (focus: {t.get('focus') or '-'}; "
+            f"owns: {', '.join(t.get('owns', [])) or '-'}). One topic per thread: if this is a different topic, open "
+            "a new thread for it instead (no thread-count target; max_parallel 0 = no limit). Kept as given.")
+
+
+def _suggest_name(text):
+    words = [w for w in re.findall(r"[a-z][a-z0-9]*", text.lower()) if len(w) > 2 and w not in _STOP]
+    return "-".join(words[:2]) or None
 
 
 def cmd_route(a):
@@ -1734,7 +1799,8 @@ def cmd_route(a):
             key = key.lower().strip()
             if not key:
                 continue
-            if key in text:
+            if re.search(r"(?<![a-z0-9])" + re.escape(key) + (r"(?![a-z0-9])" if key[-1:].isalnum() else ""),
+                         text):  # `ui` is not in `build`; `docs/` is in `docs/intro.md`
                 s += 3
             s += len(words & _tokens(key))
         if s:
@@ -1748,6 +1814,11 @@ def cmd_route(a):
                     {"thread": n, "score": s, "status": st["threads"][n]["status"]}
                     for s, n in scores[:4]
                 ],
+                **({} if scores or not words else {
+                    "suggest": "new_thread", "suggest_name": _suggest_name(a.text) or "<short English name>",
+                    "why": "no thread owns this topic: open a new thread for it (step 2.5) rather than handing it "
+                           "to the closest one; one topic per thread, no thread-count target"}),
+                **({"topic_words": "none found: decide from the request itself"} if not words else {}),
                 "note": "a keyword hint only: confirm against each candidate's owns/summary before routing",
             },
             ensure_ascii=False,

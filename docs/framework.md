@@ -852,6 +852,10 @@ captured Rn, intake done
 - Prefer the existing owner over a new thread: the owner has the history.
 - A keyword hint (thread names, focus, `owns`, task titles) may narrow candidates; the lead confirms against `owns` and
   the thread's summary. The hint never decides alone.
+- One topic per thread: work inside some thread's focus or `owns` goes to that thread; work inside none gets a new
+  thread, never the closest or idlest one. There is no thread-count target (`max_parallel` 0 = no limit). With no
+  match the hint suggests a new thread and a name; a task whose title shares no topic word with its owner gets a
+  `topic_mismatch` warning that never blocks.
 - Threads apply the same rule from their side: in-area → do it; out-of-area → HANDOFF; unowned → QUESTION.
 - Messages typed by the user directly in a thread outrank lead and peer messages there. The thread still writes its
   status block, so the lead learns of the work at the next sweep and registers it as a request, already `delivered` if

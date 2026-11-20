@@ -70,6 +70,74 @@ class TwCase(unittest.TestCase):
         return json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
 
+class RouteByTopic(TwCase):
+    """T34 (R41): work inside a thread's focus/owns goes to it; work inside none suggests a new thread; a task whose
+    title shares no topic word with its owner gets a topic_mismatch warning (never a block)."""
+
+    def setUp(self):
+        super().setUp()
+        self.tw("thread", "add", "docs", "--focus", "user guide and API docs", "--owns", "docs/,guide")
+        self.tw("thread", "add", "ui", "--focus", "settings screen", "--owns", "web/")
+        self.tw("thread", "add", "ledger", "--focus", "请求台账 request ledger", "--owns", "ledger")
+
+    def route(self, text):
+        return json.loads(self.tw("route", text).stdout)
+
+    def test_inside_a_thread_goes_to_it(self):
+        self.assertEqual(self.route("write the install guide")["best"], "docs")
+        self.assertEqual(self.route("台账导出")["best"], "ledger")  # Chinese pairs match inside longer words
+        self.assertNotIn("suggest", self.route("write the install guide"))
+
+    def test_inside_none_suggests_a_new_thread(self):
+        r = self.route("build a partner list for outreach")
+        self.assertIsNone(r["best"])
+        self.assertEqual((r["suggest"], r["suggest_name"]), ("new_thread", "partner-list"))
+        r = self.route("build the zorblax")  # `ui` is not a word of `build`
+        self.assertEqual(r.get("suggest"), "new_thread")
+
+    def test_topic_mismatch_warns_never_blocks(self):
+        r = self.tw("task", "add", "T1", "--title", "partner list for outreach", "--owner", "docs")
+        self.assertIn("topic_mismatch", r.stderr)
+        self.assertIn("one topic per thread", r.stderr.lower())
+        self.assertEqual(self.state()["tasks"]["T1"]["owner"], "docs")  # kept as given
+        r = self.tw("task", "add", "T2", "--title", "update the user guide intro", "--owner", "docs")
+        self.assertNotIn("topic_mismatch", r.stderr)
+        r = self.tw("task", "add", "T3", "--title", "partner list for outreach")
+        self.assertNotIn("topic_mismatch", r.stderr)  # no owner yet
+        r = self.tw("task", "set", "T3", "--owner", "ui")
+        self.assertIn("topic_mismatch", r.stderr)
+        r = self.tw("task", "set", "T2", "--owner", "ledger")
+        self.assertIn("topic_mismatch", r.stderr)
+
+    def test_r1_noise_and_false_matches(self):
+        self.assertNotIn("topic_mismatch", self.tw("task", "add", "T1", "--owner", "docs").stderr)  # no title yet
+        self.tw("thread", "add", "review", "--focus", "code review")
+        self.assertNotIn("topic_mismatch", self.tw("task", "add", "T2", "--title", "review PR 12",
+                                                   "--owner", "review").stderr)  # its own name counts
+        self.tw("thread", "add", "quixbar", "--focus", "用户的设置页面")
+        self.tw("thread", "add", "zorblax", "--focus", "我们的合作伙伴名单")
+        for text in ("我的设计稿", "我们要发布新版本"):  # function words are not topics
+            self.assertEqual(self.route(text).get("suggest"), "new_thread", text)
+        self.assertEqual(self.route("设置页面加暗色")["best"], "quixbar")
+        self.assertEqual(self.route("我们需要一个合作伙伴名单")["best"], "zorblax")
+        self.assertIn("topic_mismatch", self.tw("task", "add", "T3", "--title", "我的设计", "--owner", "quixbar").stderr)
+        self.assertEqual(self.route("guides for onboarding")["best"], "docs")  # plural
+        self.tw("thread", "add", "forms", "--focus", "申请流程 请求台账 status analysis process")
+        for title in ("申请表单", "请求重试", "statuses page", "analyses export", "processes list"):
+            self.assertNotIn("topic_mismatch", self.tw("task", "add", "F" + str(len(title)) + title[:2].encode().hex(),
+                                                       "--title", title, "--owner", "forms").stderr, title)
+        r = self.route("fix it")  # no topic words: no suggestion either way
+        self.assertNotIn("suggest", r)
+        self.assertIn("topic_words", r)
+        self.tw("thread", "add", "blank")
+        self.assertIn("has no focus or owns", self.tw("task", "add", "T4", "--title", "pricing table", "--owner", "blank").stderr)
+        r = self.tw("task", "set", "T2", "--title", "partner list for outreach")  # a new title is checked too
+        self.assertIn("topic_mismatch", r.stderr)
+        r = self.tw("task", "set", "T2", "--owner", "docs", "--rounds", "2", ok=False)  # refused: no warning
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("topic_mismatch", r.stderr)
+
+
 class Language(TwCase):
     def setUp(self):
         super().setUp()

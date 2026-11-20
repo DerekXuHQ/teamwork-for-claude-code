@@ -106,7 +106,7 @@ Statuses that follow from events: a thread is `starting` (created, first turn no
 ## 2. Plan (propose, then wait)
 
 1. Explore enough to plan: read the repo, ask at most one round of questions. A read-only exploration thread is fine for a large repo.
-2. Split the goal into **threads by ownership area** (ui, api, data, docs, research, ...), not by individual task. Each thread owns paths or topics that do not overlap with another thread's. One thread per area keeps follow-ups and history in one place.
+2. Split the goal into **threads by ownership area** (ui, api, data, docs, research, ...), not by individual task. Each thread owns paths or topics that do not overlap with another thread's. One thread per area keeps follow-ups and history in one place. **One topic per thread** (R41): a thread holds one topic or deliverable; an unrelated one put into it pollutes its context and its history. There is no target for the number of threads: `max_parallel` 0 means no limit, so never merge topics to save threads.
 3. For each thread choose `rc` or `cloud`. **Default: rc.** Use `cloud` only when both hold:
    - the thread never touches the project folder (files, dev environment, tools, credentials), and
    - it never needs to message rc threads or you. A cloud thread can receive your messages but cannot send to rc sessions; it reports only through its STATUS block and git. Once its trust card is approved, rc sessions, you included, can no longer message it or read its event log, so you could not even sweep it (transport.md). Everything it needs must be in the TASK or the repo.
@@ -169,6 +169,7 @@ For each message from the user decide, and **say which in your reply**:
 - **Answer in place**: questions about the project, status, plans. Answer from the board and recent reports.
 - **Existing thread**: the request falls in an area a thread owns. `TW route "<request>"` gives a keyword hint; confirm against the thread's `owns` and summary. Send it a `FOLLOWUP` (or `TASK`) via `send_message`, add/update the task in the ledger. Prefer this over a new thread: the owner has the history.
 - **New thread**: new area nobody owns. Propose it (step 2.5 rules apply), then dispatch.
+- **The test between the two** (R41): the new work lies inside a thread's `focus`/`owns` → that thread. It lies inside no thread's → a new thread (`rc` by default), even when one thread is "closest" or idle. Same topic, new deliverable → the same thread; new topic → a new thread. When `TW route` finds no match it prints `suggest: new_thread` with a suggested name; `TW task add/set --owner` prints `topic_mismatch` when the title shares no topic word with the owner's name, focus or owns (a warning, never a block: check, then either open a thread or widen that thread's `owns` with `TW thread set` if the topic really is its). Counterexample: a docs thread writing the user guide is handed "build a partner list for outreach" because it is the only writing thread. That is a different topic: give it its own thread. An API thread asked to also write a pricing comparison is the same mistake.
 - **Several unrelated asks** in one message: split them; each goes to its owner.
 - If the target thread is `waiting` on the user or busy with something else, still send it: messages queue and are read at its next turn. Tell the user it is queued.
 

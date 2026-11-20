@@ -43,6 +43,7 @@ You change only: web/orders/**, web/shared/order-row.ts
 Not doing: pagination, the refund flow (api owns them)
 Done when: <what the DONE must contain to count: screenshots at two widths, tests green, the type committed>
 Review depth: full | one round | none (the user's standing decision for this phase)
+Model / method: <model, when not the thread's default; "by hand, no scripts" for judgment and precision writing> (IL-31)
 Report: ACK now, DONE or BLOCKED when finished, as in the short form.
 ```
 
@@ -70,6 +71,15 @@ Next: T9 from your deferred list (the empty-state text). Told: data (rebase on m
 ```
 
 A task that has to be reopened after it is closed gets a new task with a new id (`TW task add`); the closed one stays closed. Findings left by a passed or capped review become `T3-f1`, ... through `TW task followups`.
+
+## INFO: news for every thread, no reply needed
+
+For things every thread should know at once: a new known issue ("main is red"), a fix that landed, a rule that changed. No ACK, no task id. Threads check the board's "Known issues" before reporting a problem (IL-20).
+
+```
+[tw:shop] INFO lead -> all -
+I3 main is red since 4f2c9e1 (checkout test); data owns the fix. Do not report it again; rebase after the fix is merged.
+```
 
 ## RECALL: stop and hand back
 

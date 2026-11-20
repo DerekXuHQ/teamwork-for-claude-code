@@ -7,6 +7,7 @@ State lives in <project folder>/.teamwork/ :
   BOARD.md         human view of state.json, regenerated on every write
   INSTRUCTIONS.md  project instructions: sent to every new thread and to the lead (<=16k chars)
   MEMORY.md        project memory: facts, decisions, conventions (lead edits; threads propose)
+  SHARE.md         the user's phone view, a snapshot written by `board --share` (IL-13)
   log.jsonl        append-only event log
 
 Stdlib only. `tw.py <command> -h` for details.
@@ -76,6 +77,13 @@ LABELS = {
         "t_created": "created", "t_updated": "updated", "t_reported": "reported", "t_closed": "closed",
         "t_where": "where", "t_thread": "thread", "t_session": "session", "t_branch": "branch", "t_log": "log",
         "t_other": "other unmerged work on", "t_no_tasks": "no tasks linked",
+        "s_title": "where things stand", "s_updated": "Updated", "s_deliverables": "Deliverables",
+        "s_none_yet": "(none yet)", "s_requests": "Your requests", "s_none_open": "(none open)",
+        "s_waiting": "Waiting on you", "s_issues": "Known issues", "s_missing": "missing",
+        "s_all": "Every requirement (strike out what is stale)", "s_ungrouped": "(no phase or category)",
+        "merge_waiting": "Waiting to merge: {n} branch(es), oldest {m} min ({tasks})", "owner": "owner",
+        "d_draft": "draft", "d_final": "final", "i_open": "open", "i_fixed-on-branch": "fixed on a branch",
+        "i_merged": "merged", "i_verified": "verified",
     },
     "zh": {
         "planned": "建议中（还没有会话）", "starting": "已创建，第一轮还没结束",
@@ -92,13 +100,19 @@ LABELS = {
         "t_created": "创建", "t_updated": "更新", "t_reported": "回报", "t_closed": "关闭",
         "t_where": "落到哪里", "t_thread": "线程", "t_session": "会话", "t_branch": "分支", "t_log": "日志",
         "t_other": "分支上其他未合并的工作", "t_no_tasks": "没有关联任务",
+        "s_title": "进展一览", "s_updated": "更新于", "s_deliverables": "交付物", "s_none_yet": "（还没有）",
+        "s_requests": "你提的事", "s_none_open": "（没有未完成的）", "s_waiting": "等你处理", "s_issues": "已知问题",
+        "s_missing": "还缺", "s_all": "全部需求（过时的划掉）", "s_ungrouped": "（未分阶段或类别）",
+        "merge_waiting": "等待合并：{n} 个分支，最早的已等 {m} 分钟（{tasks}）", "owner": "负责",
+        "d_draft": "草稿", "d_final": "定稿", "i_open": "未修", "i_fixed-on-branch": "已在分支上修好",
+        "i_merged": "已合并", "i_verified": "已验证",
     },
 }
 
 
 def lab(st, key, **kw):
     code = (st.get("prefs", {}).get("language") or "en").strip().lower().split("-")[0]
-    return LABELS.get(code, LABELS["en"]).get(key, LABELS["en"][key]).format(**kw)
+    return LABELS.get(code, LABELS["en"]).get(key, LABELS["en"].get(key, key)).format(**kw)  # unknown: the key
 
 
 REQ_STATUSES = ["open", "proposed", "dispatched", "delivered", "reported", "closed", "dropped"]
@@ -252,6 +266,10 @@ def snapshots(st, ev):
     if ev.get("ev", "").startswith("plan-"):
         snap["snap_plan_approved"] = st.get("plan_approved")
         snap["snap_tasks"] = st.get("tasks", {})  # approve/reopen changes every task's status
+    if ev.get("ev", "").startswith("issue-"):
+        snap["snap_issues"] = st.get("issues", [])
+    if ev.get("ev", "").startswith("deliverable-"):
+        snap["snap_deliverables"] = st.get("deliverables", [])
     if "roster_version" in st:
         snap["snap_roster_version"] = st["roster_version"]
     return snap
@@ -345,6 +363,8 @@ def worktree_cmd(st, name):
 def session_args(st, name):
     """Extra create_session arguments for a thread: permission mode and pre-approved tools."""
     out = {"extra_allowed_tools": THREAD_TOOLS, "permission_mode": thread_mode(st)}
+    if (st["threads"].get(name) or {}).get("model"):
+        out["model"] = st["threads"][name]["model"]  # IL-31: the thread's default model
     w = permission_warning(st)
     if w:
         out["permission_warning"] = w
@@ -534,8 +554,75 @@ def render_board(st):
         out += ["", f"## {lab(st, 'questions')}", ""] + [
             f"- [{i + 1}] ({q['from']}) {q['text']}" for i, q in open_q
         ]
+    w = merge_waiting(st)
+    if w:
+        out += ["", lab(st, "merge_waiting", n=len(w), m=w[0]["minutes"] if w[0]["minutes"] is not None else "?",
+                        tasks=", ".join(x["task"] for x in w))]
+    iss = [i for i in st.get("issues", []) if i.get("status") != "verified"]
+    if iss:
+        out += ["", f"## {lab(st, 's_issues')}", ""] + [render_issue(i, st) for i in iss]
     out += ["", f"## {lab(st, 'roster')}", "", render_roster(st), "", f"## {lab(st, 'plan')}", "", render_tasks(st)]
     return "\n".join(out) + "\n"
+
+
+ISSUE_STATUSES = ("open", "fixed-on-branch", "merged", "verified")
+DELIVERABLE_STATUSES = ("draft", "final")
+
+
+def render_issue(i, st=None):
+    st = st or {}
+    return (f"- {i['id']} [{lab(st, 'i_' + i['status'])}] {_md(i['text'])} ({lab(st, 'owner')}: {i.get('owner') or '-'}"
+            + (f"; {i['ref']}" if i.get("ref") else "") + ")")
+
+
+def _where(x):
+    """A link or path stays as typed (escaping would break it when the text is pasted); other text is escaped."""
+    x = " ".join(str(x or "").split())
+    return f"<{x}>" if re.fullmatch(r"https?://\S+", x) else f"`{x}`" if x and " " not in x and "`" not in x else _md(x)
+
+
+def _md(x):
+    """User text inside markdown: one line, and ~ * _ ` escaped, so it never strikes, bolds or breaks a list item."""
+    return re.sub(r"([~*_`\\])", r"\\\1", " ".join(str(x or "").split()))
+
+
+def render_share(st):
+    """IL-13, IL-38: what the user opens on a phone, in their language. Deliverables first, then their requests,
+    waiting items, issues, then every requirement by phase and category so stale ones can be struck out."""
+    L = lambda k, **kw: lab(st, k, **kw)
+    out = [f"# {st['project']}: {L('s_title')}", "", f"{L('s_updated')} {st.get('updated', '-')[:16].replace('T', ' ')}",
+           ""]
+    dl = st.get("deliverables", [])
+    out += [f"## {L('s_deliverables')}", ""] + ([f"{i + 1}. **{_md(x['name'])}** — {L('d_' + x['status'])}"
+                                                 + (f" — {x['link']}" if x.get("link") else "")
+                                                 + (f" ({L('s_missing')}: {_md(x['missing'])})" if x.get("missing")
+                                                    else "")
+                                                 for i, x in enumerate(dl)] or [L("s_none_yet")]) + [""]
+    reqs = st.get("requests", {})
+    live = [(r, q) for r, q in reqs.items() if q["status"] not in REQ_END]
+    out += [f"## {L('s_requests')}", ""] + ([f"- {r} — {L('req_' + q['status'])}: {_md(q['text'])}"
+                                             + (f" → {_where(q['where'])}" if q.get("where") else "")
+                                             + (f" ({L('followup')}: {_md(q['followup'])})" if q.get("followup")
+                                                else "")
+                                             for r, q in live] or [L("s_none_open")]) + [""]
+    qs = [q for q in st.get("questions", []) if not q.get("answered")]
+    if qs:
+        out += [f"## {L('s_waiting')}", ""] + [f"- {_md(q['text'])} ({q['from']})" for q in qs] + [""]
+    iss = [i for i in st.get("issues", []) if i.get("status") != "verified"]
+    if iss:
+        out += [f"## {L('s_issues')}", ""] + [render_issue(i, st) for i in iss] + [""]
+    if reqs:
+        out += [f"## {L('s_all')}", ""]
+        groups = {}
+        for r, q in reqs.items():  # phases in the order the user first used them
+            groups.setdefault((q.get("phase") or "", q.get("category") or ""), []).append((r, q))
+        for (ph, cat), items in groups.items():
+            out += [f"### {_md(ph or '-')} / {_md(cat or '-')}" if ph or cat else f"### {L('s_ungrouped')}"]
+            for r, q in items:
+                body = f"{r}: {_md(q['text'])}"
+                out.append(f"- {'~~' + body + '~~' if q['status'] in REQ_END else body} — {L('req_' + q['status'])}")
+            out.append("")
+    return "\n".join(out).rstrip() + "\n"
 
 
 # ------------------------------------------------------------------ commands
@@ -817,6 +904,8 @@ def cmd_thread(a):
             st["threads"][name]["cloud_reason"] = a.cloud_reason.strip()
         if a.mode:
             st["threads"][name]["permission_mode"] = a.mode
+        if (a.model or "").strip():
+            st["threads"][name]["model"] = a.model.strip()
         if a.kind == "rc":
             st["threads"][name]["worktree"] = str(worktree_path(st, name))
         st["threads"][name]["title"] = title_for(st, name)
@@ -896,6 +985,8 @@ def cmd_thread(a):
         t["summary"] = a.summary
     if a.mode:
         t["permission_mode"] = a.mode
+    if a.model is not None:
+        t["model"] = a.model.strip()  # IL-31; empty = the lead's model
     if a.from_status:
         t["last_status_at"] = now()
     if a.owns is not None:
@@ -950,6 +1041,8 @@ def cmd_task(a):
             "accept": a.accept or "",
             "touches": check_touches(a.touches),
             "topics": norm_topics(a.topics),
+            **({"model": a.model.strip()} if (a.model or "").strip() else {}),
+            **({"no_scripts": True} if a.no_scripts else {}),
             "status": "approved" if st["plan_approved"] else "planned",
             "notes": "",
             "created": now(),
@@ -1015,6 +1108,15 @@ def cmd_task(a):
             k["title"] = a.title
         if a.touches is not None:
             k["touches"] = check_touches(a.touches)
+        if a.model is not None:
+            if a.model.strip():
+                k["model"] = a.model.strip()
+            else:
+                k.pop("model", None)
+        if a.no_scripts:
+            k["no_scripts"] = True
+        if a.scripts_ok:
+            k.pop("no_scripts", None)
         if a.topics is not None:
             k["topics"] = norm_topics(a.topics)
         if a.notes is not None:
@@ -1689,6 +1791,41 @@ def bump_roster(st, name=None):
         st["threads"][name]["roster_seen"] = st["roster_version"]
 
 
+def _minutes_since(ts):
+    from datetime import datetime
+    try:
+        t = datetime.fromisoformat(ts)
+        cur = datetime.fromisoformat(now())
+        if t.tzinfo is None:  # an old or hand-edited stamp: read it in the clock's zone
+            t = t.replace(tzinfo=cur.tzinfo)
+        return max(0, int((cur - t).total_seconds() // 60))
+    except (TypeError, ValueError):
+        return None
+
+
+def merge_waiting(st):
+    """IL-3: tasks in review with a passing or capped verdict, not merged yet, oldest first."""
+    out = []
+    for t, k in st["tasks"].items():
+        rv = k.get("review") or {}
+        if k.get("status") == "review" and rv.get("result") in PASSING:
+            out.append({"task": t, "owner": k.get("owner"), "branch": (st["threads"].get(k.get("owner") or "") or {})
+                        .get("branch"), "minutes": _minutes_since(rv.get("at") or k.get("created"))})
+    return sorted(out, key=lambda x: -(x["minutes"] or 0))
+
+
+def merge_overdue(st):
+    limit = st.get("prefs", {}).get("stuck_minutes", STUCK_DEFAULT)
+    w = merge_waiting(st)
+    return bool(limit and w and (w[0]["minutes"] or 0) > limit)
+
+
+def task_model(st, t):
+    k = st["tasks"][t]
+    m = k.get("model") or (st["threads"].get(k.get("owner") or "") or {}).get("model") or ""
+    return " ".join(x for x in (m, "(by hand, no scripts)" if k.get("no_scripts") else "") if x)
+
+
 def cmd_ready(a):
     d = need(find_dir())
     st = load(d)
@@ -1717,6 +1854,10 @@ def cmd_ready(a):
                 "max_parallel": st["prefs"].get("max_parallel", 0) or "unlimited",
                 "slots": (max(0, st["prefs"]["max_parallel"] - busy) if st["prefs"].get("max_parallel") else "unlimited"),
                 "stuck": stuck_threads(st),
+                "merge_waiting": merge_waiting(st),
+                **({"merge_overdue": "the oldest reviewed branch has waited longer than stuck_minutes: merge it, or "
+                                     "tell the user why it waits"} if merge_overdue(st) else {}),
+                "models": {t: m for t in ready for m in [task_model(st, t)] if m},
                 "unreported_requests": {r: q["text"] for r, q in unreported(st).items()},
                 "rc_capacity_note": "a Remote Control server holds 32 sessions by default, shared by every project and lead on it; cloud threads do not count",
                 **({"permission_warning": permission_warning(st)} if permission_warning(st) else {}),
@@ -1946,7 +2087,83 @@ def cmd_board(a):
     d = need(find_dir())
     st = load(d)
     (d / "BOARD.md").write_text(render_board(st), encoding="utf-8")
+    if getattr(a, "share", False):
+        text = render_share(st)
+        (d / "SHARE.md").write_text(text, encoding="utf-8")
+        print(text)
+        print("SHARE.md written: put this text into a doc visible only in the user's own account and update it on "
+              "each report (IL-13, IL-14); sharing it further is the user's decision", file=sys.stderr)
+        return
     print(render_board(st))
+
+
+def cmd_issue(a):
+    """IL-20: one shared known-issues list. Threads check it before reporting a problem."""
+    d = need(find_dir())
+    st = load(d)
+    iss = st.setdefault("issues", [])
+    if a.action == "list":
+        rows = [i for i in iss if a.all or i.get("status") != "verified"]
+        print("\n".join(render_issue(i, st) for i in rows) or "(no known issues)")
+        return
+    if a.action == "add":
+        if not a.text.strip():
+            sys.exit('usage: issue add "<what is wrong>" --owner <thread>')
+        if a.owner and a.owner not in st["threads"]:
+            sys.exit(f"unknown owner {a.owner}")
+        i = {"id": f"I{len(iss) + 1}", "text": " ".join(a.text.split()), "owner": a.owner or None, "status": "open",
+             "ref": "", "created": now(), "updated": now()}
+        iss.append(i)
+    else:
+        i = next((x for x in iss if x["id"] == a.text), None)
+        if not i:
+            sys.exit(f"unknown issue {a.text}; known: {', '.join(x['id'] for x in iss) or '-'}")
+        if a.status:
+            if a.status not in ISSUE_STATUSES:
+                sys.exit(f"status: one of {', '.join(ISSUE_STATUSES)}")
+            if a.status == "fixed-on-branch" and not (a.ref or i.get("ref") if a.ref is None else a.ref):
+                sys.exit("fixed-on-branch needs --ref <branch>@<commit>: QA tests only what is merged")
+            if a.status == "verified" and i["status"] != "merged":
+                sys.exit(f"{i['id']} is {i['status']}: QA verifies only a merged fix (set it to merged first)")
+            if a.status == "open":
+                i["ref"] = ""  # a reopened issue has no fix yet
+            i["status"] = a.status
+        if a.ref is not None:
+            i["ref"] = a.ref
+        if a.owner is not None:
+            if a.owner and a.owner not in st["threads"]:
+                sys.exit(f"unknown owner {a.owner}")
+            i["owner"] = a.owner or None
+        i["updated"] = now()
+    save(d, st, {"ev": f"issue-{a.action}", "issue": i["id"], "status": i["status"]})
+    print(render_issue(i, st))
+
+
+def cmd_deliverable(a):
+    """IL-13, IL-14: the index of what the user can open, in delivery order."""
+    d = need(find_dir())
+    st = load(d)
+    dl = st.setdefault("deliverables", [])
+    if a.action == "add":
+        if not a.name.strip():
+            sys.exit('usage: deliverable add "<name>" --link <url> [--status draft|final] [--missing "<what>"]')
+        x = {"id": f"D{len(dl) + 1}", "name": a.name.strip(), "status": a.status or "draft", "link": a.link or "",
+             "missing": a.missing or "", "req": a.req or "", "at": now()}
+        dl.append(x)
+    else:
+        x = next((y for y in dl if y["id"] == a.name), None)
+        if not x:
+            sys.exit(f"unknown deliverable {a.name}; known: {', '.join(y['id'] for y in dl) or '-'}")
+        for k in ("status", "link", "missing", "req"):
+            if getattr(a, k) is not None:
+                x[k] = getattr(a, k)
+        x["at"] = now()
+    if x["status"] not in DELIVERABLE_STATUSES:
+        sys.exit(f"status: one of {', '.join(DELIVERABLE_STATUSES)}")
+    if x.get("req") and x["req"] not in st.get("requests", {}):
+        sys.exit(f"unknown request {x['req']}")
+    save(d, st, {"ev": f"deliverable-{a.action}", "deliverable": x["id"]})
+    print(json.dumps(x, ensure_ascii=False))
 
 
 def cmd_roster(a):
@@ -2269,7 +2486,8 @@ def cmd_req(a):
         tasks = csv(a.tasks)
         check_tasks(st, tasks)
         q = {"text": " ".join(a.args), "status": "open", "tasks": tasks, "where": a.where or "",
-             "followup": a.followup or "", "created": now(), "updated": now()}
+             "followup": a.followup or "", "created": now(), "updated": now(),
+             **{k: getattr(a, k) for k in ("phase", "category") if getattr(a, k)}}
         reqs[r] = q
         if tasks:
             q["status"] = "dispatched"
@@ -2305,7 +2523,7 @@ def cmd_req(a):
             set_req_status(st, r, q, a.status, user_said=a.user_said)
         if a.status == "dispatched" and not q.get("tasks"):
             sys.exit(f"{r} has no tasks: link the work first (`req link {r} T<n>`), which dispatches it")
-        for k in ("where", "followup", "text"):
+        for k in ("where", "followup", "text", "phase", "category"):
             v = getattr(a, k)
             if v is not None:
                 q[k] = v
@@ -3399,6 +3617,9 @@ def _replay(st, e, project, notes, d):
                 st["questions"][i]["answered"] = True
         if e.get("snap_plan_approved") is not None:
             st["plan_approved"] = e["snap_plan_approved"]
+        for k in ("issues", "deliverables"):
+            if e.get(f"snap_{k}") is not None:
+                st[k] = e[f"snap_{k}"]
         return st
 
 
@@ -4284,6 +4505,7 @@ def main():
     x.add_argument("--session")
     x.add_argument("--branch")
     x.add_argument("--mode", choices=PERMISSION_MODES, help="the mode the thread's session actually runs in")
+    x.add_argument("--model", help="the thread's default model (create_session `model`); empty = the lead's (IL-31)")
     x.add_argument("--status")
     x.add_argument("--summary")
     x.add_argument("--roster-sent", action="store_true",
@@ -4304,6 +4526,9 @@ def main():
     x.add_argument("--topics", help="comma list of concepts/deliverables (e.g. mechanism,request-ledger): related "
                    "tasks must not run in parallel")
     x.add_argument("--touches", help="comma list of paths/globs the task will change (file lease), e.g. 'web/**,api/x.py'")
+    x.add_argument("--model", help="model for this task, over the thread's default (IL-31); empty clears it")
+    x.add_argument("--no-scripts", action="store_true", help="write this by hand, no generating scripts (IL-31)")
+    x.add_argument("--scripts-ok", action="store_true", help="set: clear --no-scripts")
     x.add_argument("--status")
     x.add_argument("--notes")
     x.add_argument("--review", choices=["pass", "fail", "capped"],
@@ -4350,7 +4575,26 @@ def main():
     x = s.add_parser("log", help="append a note to log.jsonl")
     x.add_argument("text")
     x.set_defaults(f=cmd_log)
-    s.add_parser("board", help="render and print BOARD.md").set_defaults(f=cmd_board)
+    x = s.add_parser("board", help="render and print BOARD.md; --share: the user's phone view (SHARE.md)")
+    x.add_argument("--share", action="store_true", help="deliverables, requests, waiting items, issues and every "
+                   "requirement by phase/category, for a doc the user opens (IL-13, IL-38)")
+    x.set_defaults(f=cmd_board)
+    x = s.add_parser("issue", help="known issues: add / set / list (IL-20)")
+    x.add_argument("action", choices=["add", "set", "list"])
+    x.add_argument("text", nargs="?", default="", help='add: "<what is wrong>"; set: I<n>')
+    x.add_argument("--owner")
+    x.add_argument("--status", help=f"set: one of {', '.join(ISSUE_STATUSES)}")
+    x.add_argument("--ref", help="branch@commit of the fix")
+    x.add_argument("--all", action="store_true", help="list: include verified")
+    x.set_defaults(f=cmd_issue)
+    x = s.add_parser("deliverable", help="index of what the user can open: add / set (IL-13, IL-14)")
+    x.add_argument("action", choices=["add", "set"])
+    x.add_argument("name", help='add: "<name>"; set: D<n>')
+    x.add_argument("--link")
+    x.add_argument("--status", help="draft or final")
+    x.add_argument("--missing", help="what is still missing")
+    x.add_argument("--req", help="the request it answers")
+    x.set_defaults(f=cmd_deliverable)
     x = s.add_parser("roster", help="print the roster block")
     x.add_argument("--thread")
     x.set_defaults(f=cmd_roster)
@@ -4376,6 +4620,8 @@ def main():
     x.add_argument("--tasks", help="comma list of task ids to link")
     x.add_argument("--status", help="set: proposed | dispatched | delivered | reported (ending only via close/drop)")
     x.add_argument("--where"); x.add_argument("--followup"); x.add_argument("--text")
+    x.add_argument("--phase", help="add/set: the phase it belongs to, for the full requirement list (IL-38)")
+    x.add_argument("--category", help="add/set: e.g. goal, constraint, feature (IL-38)")
     x.add_argument("--user-said", metavar="WORDS", help="close/drop, and moves that are the user's decision: "
                    "the user's own words (recorded)")
     x.add_argument("--confirmed", action="store_true", help="close: kept for compatibility (needs --user-said)")

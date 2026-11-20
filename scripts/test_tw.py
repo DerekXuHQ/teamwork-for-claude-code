@@ -215,6 +215,98 @@ class LessonsCommands(TwCase):
         self.assertEqual(self.state()["prefs"]["default_after_minutes"], 45)
 
 
+class LessonsFeatures(TwCase):
+    """T40: IL-3 merge queue, IL-13/38 the user's view, IL-20 known issues, IL-31 models."""
+
+    def setUp(self):
+        super().setUp()
+        self.tw("thread", "add", "ui", "--focus", "pages", "--model", "model-q")
+        self.tw("plan", "approve", "--user-said", "ok")
+
+    def test_models_per_thread_and_task(self):
+        st = self.state()
+        self.assertEqual(st["threads"]["ui"]["model"], "model-q")
+        self.tw("task", "add", "T1", "--title", "pages one", "--owner", "ui")
+        self.tw("task", "add", "T2", "--title", "pages two", "--owner", "ui", "--model", "model-z", "--no-scripts")
+        models = json.loads(self.tw("ready").stdout)["models"]
+        self.assertEqual(models, {"T1": "model-q", "T2": "model-z (by hand, no scripts)"})
+        self.tw("task", "set", "T2", "--model", "")
+        self.assertEqual(json.loads(self.tw("ready").stdout)["models"]["T2"], "model-q (by hand, no scripts)")
+        sa = json.loads(self.tw("thread", "add", "api", "--model", "model-a").stdout)["create_session"]
+        self.assertEqual(sa["model"], "model-a")
+        self.tw("thread", "set", "api", "--model", "")
+        self.assertNotIn("model", json.loads(self.tw("thread", "add", "web").stdout)["create_session"])
+
+    def test_merge_queue(self):
+        self.tw("task", "add", "T1", "--title", "pages", "--owner", "ui", "--accept", "renders")
+        for st_ in ("dispatched", "working", "review"):
+            self.tw("task", "set", "T1", "--status", st_)
+        self.assertEqual(json.loads(self.tw("ready").stdout)["merge_waiting"], [])
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "ui/subagent", "--checks", "pass")
+        w = json.loads(self.tw("ready").stdout)
+        self.assertEqual([x["task"] for x in w["merge_waiting"]], ["T1"])
+        self.assertNotIn("merge_overdue", w)
+        self.assertIn("Waiting to merge: 1 branch", self.tw("board").stdout)
+        self.env["TW_NOW"] = "2099-01-01T00:00:00+00:00"
+        self.assertIn("merge_overdue", json.loads(self.tw("ready").stdout))
+
+    def test_issues(self):
+        self.tw("issue", "add", "main is red", "--owner", "ui")
+        self.assertIn("Known issues", self.tw("board").stdout)
+        r = self.tw("issue", "set", "I1", "--status", "fixed-on-branch", ok=False)
+        self.assertNotEqual(r.returncode, 0)  # a fix names its branch and commit
+        self.tw("issue", "set", "I1", "--status", "fixed-on-branch", "--ref", "tw/demo/ui@abc123")
+        self.assertNotEqual(self.tw("issue", "set", "I1", "--status", "verified", ok=False).returncode, 0)  # not merged
+        self.tw("issue", "set", "I1", "--status", "open")
+        self.assertEqual(self.state()["issues"][0]["ref"], "")  # reopened: no fix yet
+        self.tw("issue", "set", "I1", "--status", "fixed-on-branch", "--ref", "tw/demo/ui@abc124")
+        self.tw("issue", "set", "I1", "--status", "merged")
+        self.tw("issue", "set", "I1", "--status", "verified")
+        self.assertNotIn("I1", self.tw("issue", "list").stdout)
+        self.assertIn("I1", self.tw("issue", "list", "--all").stdout)
+        self.assertNotEqual(self.tw("issue", "add", "x", "--owner", "nobody", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("issue", "set", "I1", "--status", "gone", ok=False).returncode, 0)
+
+    def test_share_view_in_the_users_language_and_escaped(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("req", "add", "做一个 ~~登录~~ 页", "--phase", "测试版", "--category", "功能")
+        self.tw("deliverable", "add", "**定价** 文档", "--link", "https://example.invalid/d2")
+        out = self.tw("board", "--share").stdout
+        for word in ("进展一览", "## 交付物", "## 你提的事", "## 全部需求", "待办", "草稿", "### 测试版 / 功能"):
+            self.assertIn(word, out)
+        self.assertIn("\\~\\~登录\\~\\~", out)  # the user's ~~ is text, not a strike-through
+        self.assertIn("\\*\\*定价\\*\\*", out)
+        self.tw("req", "set", "R1", "--where", "https://x.example/a_b")
+        self.assertIn("<https://x.example/a_b>", self.tw("board", "--share").stdout)  # links stay whole
+        self.tw("task", "add", "T1", "--title", "pages", "--owner", "ui", "--no-scripts")
+        self.tw("task", "set", "T1", "--scripts-ok")
+        self.assertNotIn("no_scripts", self.state()["tasks"]["T1"])
+
+    def test_share_view_and_rebuild_keeps_them(self):
+        self.tw("req", "add", "a login page", "--phase", "beta", "--category", "feature")
+        self.tw("req", "add", "no ads", "--category", "constraint")
+        self.tw("req", "drop", "R2", "--user-said", "never mind")
+        self.tw("deliverable", "add", "Pricing doc", "--link", "https://example.invalid/d1", "--missing", "charts",
+                "--req", "R1")
+        self.tw("deliverable", "set", "D1", "--status", "final")
+        self.assertNotEqual(self.tw("deliverable", "set", "D1", "--status", "done", ok=False).returncode, 0)
+        self.tw("issue", "add", "slow page")
+        out = self.tw("board", "--share").stdout
+        self.assertTrue(out.index("## Deliverables") < out.index("## Your requests") < out.index("## Every requirement"))
+        self.assertIn("**Pricing doc** — final — https://example.invalid/d1 (missing: charts)", out)
+        self.assertIn("### beta / feature", out)
+        self.assertIn("~~R2: no ads~~ — dropped", out)
+        self.assertNotIn("R2 — ", out.split("## Your requests")[1].split("##")[0])  # ended: not an open request
+        self.assertTrue((self.dir / ".teamwork" / "SHARE.md").exists())
+        (self.dir / ".teamwork" / "state.json").unlink()
+        sess = self.dir / "sessions.json"
+        sess.write_text("[]")
+        self.tw("rebuild", "--sessions", str(sess))
+        rb = json.loads((self.dir / ".teamwork" / "state.json.rebuilt").read_text())
+        self.assertEqual([x["status"] for x in rb["deliverables"]], ["final"])
+        self.assertEqual([x["id"] for x in rb["issues"]], ["I1"])
+
+
 class Language(TwCase):
     def setUp(self):
         super().setUp()

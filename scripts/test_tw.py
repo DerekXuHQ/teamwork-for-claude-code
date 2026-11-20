@@ -3210,7 +3210,8 @@ class BashGuard(unittest.TestCase):
         HARD = self.HARD
         for cmd in (f'cat <<E"O"F\nbody\nEOF\ngit reset {HARD}', f'cat <<"EO F"\nx\nEO F\ngit reset {HARD}',
                     f"cat << EOF\ngit reset {HARD}", f'cat <<A <<B\na\nA\nb\nB\ngit reset {HARD}',
-                    f"cat <<$'EOF'\nbody\nEOF\ngit reset {HARD}\n$EOF", f'cat <<$"EOF"\nb\nEOF\ngit reset {HARD}'):
+                    f"cat <<$'EOF'\nbody\nEOF\ngit reset {HARD}\n$EOF", f'cat <<$"EOF"\nb\nEOF\ngit reset {HARD}',
+                    f"cat <<$'E\\x4fF'\nhi\nEOF\ngit reset {HARD}\nE\\x4fF", f'cat <<"E\\$F"\nhi\nE$F\ngit reset {HARD}\nE\\$F'):
             self.assertEqual(self.judge(cmd), "ask", cmd)  # after the body, or an unclosed one: judged
         for cmd in (f"cat <<'EOF'\ngit reset {HARD}\nEOF\nls", f"cat <<-EOF\n\tgit reset {HARD}\n\tEOF\nls"):
             self.assertIsNone(self.judge(cmd), cmd)  # inside a closed body: data

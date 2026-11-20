@@ -4222,6 +4222,8 @@ def cmd_merge(a):
                 limit = float(st.get("prefs", {}).get("check_timeout_minutes", 60) or 0)
             except (TypeError, ValueError):
                 limit = 60.0  # a hand-edited ledger: the default, never no limit by accident
+            if limit != limit or limit in (float("inf"), float("-inf")) or limit < 0:
+                limit = 60.0  # nan, inf, negative
             pr = subprocess.Popen(test, shell=True, cwd=str(wt / sub), stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
                                   stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
             try:
@@ -4234,9 +4236,11 @@ def cmd_merge(a):
                 try:
                     out, _ = pr.communicate(timeout=10)
                 except subprocess.TimeoutExpired:  # a detached grandchild still holds the output pipe
-                    out = ""
+                    out = "(output not read: a process the check detached still holds it)"
                     pr.kill()
                     pr.wait()
+                    if pr.stdout:
+                        pr.stdout.close()
                 res["checks"] = "fail"
                 res["check_output"] = (out or "")[-2000:]
                 print(json.dumps(res, ensure_ascii=False))
@@ -4363,8 +4367,8 @@ def _heredoc_word(cmd, i):
             continue
         if c in "'\"":
             j = cmd.find(c, i + 1)
-            if j < 0 or "\n" in cmd[i:j]:
-                return "", start  # unclosed or multi-line quote: not a delimiter we can trust
+            if j < 0 or "\n" in cmd[i:j] or "\\" in cmd[i:j]:
+                return "", start  # unclosed, multi-line, or escapes the shell decodes ($'E\x4fF', "E\$F"): untrusted
             out.append(cmd[i + 1:j])
             i = j + 1
         elif c == "\\" and i + 1 < n:

@@ -290,6 +290,35 @@ def title_for(st, name):
 
 
 PERMISSION_MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions")
+# How loose each mode is: create_session refuses a thread looser than its creator (auto needs an auto parent).
+PERMISSION_RANK = {"default": 0, "dontAsk": 0, "acceptEdits": 1, "auto": 2, "bypassPermissions": 3}
+THREAD_MODE_DEFAULT = "auto"  # threads that do real work; ordinary calls never ask (R44)
+STANDING_GRANTS = ("archive", "schedule", "merge")  # what the user may allow once for the lead (IL-30)
+
+
+def thread_mode(st):
+    return (st.get("prefs", {}).get("thread_permission_mode") or "").strip() or THREAD_MODE_DEFAULT
+
+
+def permission_warning(st):
+    """One line for the user when threads cannot get the mode they need, or None. Never a silent downgrade."""
+    want = thread_mode(st)
+    lead = (st.get("lead", {}).get("permission_mode") or "").strip()
+    live = [n for n, t in st["threads"].items() if t.get("status") not in ("archived", "resolved")]
+    if not lead:
+        return ("the lead's own permission mode is not recorded: check it (get_session, or the mode menu under this "
+                f"session's message box) and run `tw.py lead --mode <mode>`; threads are opened with {want}")
+    if PERMISSION_RANK.get(lead, 0) >= PERMISSION_RANK.get(want, 0):
+        behind = [n for n in live if st["threads"][n].get("session_id") and st["threads"][n].get("permission_mode")
+                  and PERMISSION_RANK.get(st["threads"][n]["permission_mode"], 0) < PERMISSION_RANK.get(want, 0)]
+        if behind:
+            return (f"threads running below {want}: {', '.join(behind)}; they ask for ordinary calls. Tell the user "
+                    f"to switch each to {want} in its mode menu, or reseat them with permission_mode={want}")
+        return None
+    return (f"Tell the user: this lead session runs in {lead} mode, so create_session refuses {want} for threads and "
+            f"they would ask before ordinary calls. Switch this session to {want} (claude.ai: the mode menu under the "
+            f"message box; or reopen the lead with permission_mode={want}), then run `tw.py lead --mode {want}`. "
+            f"Threads affected: {', '.join(live) or 'none yet'}")
 # Pre-approved in every thread (create_session extra_allowed_tools) so reporting never stalls on a prompt.
 # The lead can only grant what it has pre-approved itself (install.py adds these allow rules).
 THREAD_TOOLS = [
@@ -315,10 +344,10 @@ def worktree_cmd(st, name):
 
 def session_args(st, name):
     """Extra create_session arguments for a thread: permission mode and pre-approved tools."""
-    out = {"extra_allowed_tools": THREAD_TOOLS}
-    mode = (st.get("prefs", {}).get("thread_permission_mode") or "").strip()
-    if mode:
-        out["permission_mode"] = mode
+    out = {"extra_allowed_tools": THREAD_TOOLS, "permission_mode": thread_mode(st)}
+    w = permission_warning(st)
+    if w:
+        out["permission_warning"] = w
     return out
 
 
@@ -559,7 +588,8 @@ def cmd_init(a):
             "review_max_rounds": REVIEW_MAX_DEFAULT,  # at this many review rounds: no blocking + checks pass -> capped
             "stuck_minutes": STUCK_DEFAULT,  # working thread silent this long -> "possibly stuck"; 0 = off
             "language": "",  # conversation language code (zh, en, ...); empty = follow the user's latest message
-            "thread_permission_mode": "",  # create_session permission_mode; empty = the lead's own mode
+            "thread_permission_mode": THREAD_MODE_DEFAULT,  # create_session permission_mode for every thread
+            "standing_grants": [],  # archive, schedule, merge: the user allowed these once (IL-30), each by --user-said
             "check_cmd": "",  # the project's checks, run by `merge` on the rehearsed merge
         },
     }
@@ -612,6 +642,8 @@ def cmd_lead(a):
             bump_roster(st)  # the roster names the lead: every thread needs the new id
             _close_archived(st, a.session, "the lead", now())
         st["lead"]["session_id"] = a.session
+    if a.mode:
+        st["lead"]["permission_mode"] = a.mode
     if a.rc_env:
         st["envs"]["rc"] = a.rc_env
     if a.cloud_env:
@@ -620,13 +652,13 @@ def cmd_lead(a):
         st["repo"]["url"] = a.repo_url
     if a.base:
         st["repo"]["base"] = a.base
-    save(d, st, {"ev": "lead", "session": a.session, "envs": st["envs"]})
-    print(
-        json.dumps(
-            {"lead": st["lead"], "envs": st["envs"], "repo": st["repo"]},
-            ensure_ascii=False,
-        )
-    )
+    save(d, st, {"ev": "lead", "session": a.session, "envs": st["envs"],
+                 **({"mode": a.mode} if a.mode else {})})
+    out = {"lead": st["lead"], "envs": st["envs"], "repo": st["repo"], "thread_permission_mode": thread_mode(st)}
+    w = permission_warning(st)
+    if w:
+        out["permission_warning"] = w
+    print(json.dumps(out, ensure_ascii=False))
 
 
 def _after(a, b):
@@ -779,6 +811,8 @@ def cmd_thread(a):
             _close_archived(st, a.session, name, now())
         if a.kind == "cloud":
             st["threads"][name]["cloud_reason"] = a.cloud_reason.strip()
+        if a.mode:
+            st["threads"][name]["permission_mode"] = a.mode
         if a.kind == "rc":
             st["threads"][name]["worktree"] = str(worktree_path(st, name))
         st["threads"][name]["title"] = title_for(st, name)
@@ -856,6 +890,8 @@ def cmd_thread(a):
         t["status"] = a.status
     if a.summary is not None:
         t["summary"] = a.summary
+    if a.mode:
+        t["permission_mode"] = a.mode
     if a.from_status:
         t["last_status_at"] = now()
     if a.owns is not None:
@@ -1672,6 +1708,7 @@ def cmd_ready(a):
                 "stuck": stuck_threads(st),
                 "unreported_requests": {r: q["text"] for r, q in unreported(st).items()},
                 "rc_capacity_note": "a Remote Control server holds 32 sessions by default, shared by every project and lead on it; cloud threads do not count",
+                **({"permission_warning": permission_warning(st)} if permission_warning(st) else {}),
             }
         )
     )
@@ -1823,12 +1860,25 @@ def cmd_prefs(a):
         else:
             st["prefs"][k] = v
         if k == "thread_permission_mode" and v and v not in PERMISSION_MODES:
-            sys.exit(f"thread_permission_mode: one of {', '.join(PERMISSION_MODES)}, or empty for the lead's own mode")
+            sys.exit(f"thread_permission_mode: one of {', '.join(PERMISSION_MODES)}, or empty for the default "
+                     f"({THREAD_MODE_DEFAULT})")
         if k == "thread_permission_mode" and v in ("auto", "bypassPermissions"):
-            # tw.py cannot see the lead's own mode: say the rule out loud instead of recording a mode that fails
-            print(f"note: threads get {v} only if the lead runs at least as loose a mode; create_session refuses a "
-                  "thread more permissive than its creator, and bypassPermissions lets a thread run everything without "
-                  "asking except the ask rules", file=sys.stderr)
+            print(f"note: threads get {v} only if the lead runs at least as loose a mode (`tw.py lead --mode`); "
+                  "create_session refuses a thread more permissive than its creator, and bypassPermissions lets a "
+                  "thread run everything without asking except the ask rules", file=sys.stderr)
+        if k == "thread_permission_mode" and (v or THREAD_MODE_DEFAULT) != THREAD_MODE_DEFAULT \
+                and not (a.user_said or "").strip():
+            sys.exit(f"threads run in {THREAD_MODE_DEFAULT} (R45): a tighter mode asks the user for ordinary calls, a "
+                     "looser one skips the checks; either is the user's decision, add --user-said \"<their words>\"")
+        if k == "standing_grants":
+            g = [x for x in csv(v) if x]
+            bad = [x for x in g if x not in STANDING_GRANTS]
+            if bad:
+                sys.exit(f"standing_grants: any of {', '.join(STANDING_GRANTS)} (comma list); not {', '.join(bad)}")
+            if set(g) - set(cur or []) and not (a.user_said or "").strip():
+                sys.exit("a standing grant lets the lead act without asking each time: only the user gives it, add "
+                         "--user-said \"<their words>\"")
+            st["prefs"][k] = g
         if k == "review_max_rounds":
             if not re.fullmatch(r"[0-9]{1,2}", v):
                 sys.exit("review_max_rounds: a whole number of review rounds, 0-99 (default 3; 0 = no limit)")
@@ -1956,6 +2006,20 @@ def cmd_worktree(a):
             if r.returncode != 0:
                 sys.exit(f"git worktree add failed: {r.stderr.strip()}")
             res["created"] = True
+            src = Path(repo) / ".claude" / "settings.local.json"
+            dst = path / ".claude" / "settings.local.json"
+            if src.is_file() and not dst.exists():  # the project's permission rules follow the thread (T36)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(src.read_bytes())
+                common = git("rev-parse", "--git-common-dir").stdout.strip()
+                ex = (Path(repo) / common / "info" / "exclude") if common else None
+                if ex is not None:
+                    ex.parent.mkdir(parents=True, exist_ok=True)
+                    cur = ex.read_text(encoding="utf-8") if ex.exists() else ""
+                    if ".claude/settings.local.json" not in cur.splitlines():
+                        ex.write_text(cur + ("" if cur.endswith("\n") or not cur else "\n")
+                                      + ".claude/settings.local.json\n", encoding="utf-8")
+                res["settings"] = str(dst)
     if t.get("worktree") != str(path):
         t["worktree"] = str(path)
         save(d, st, {"ev": "worktree", "thread": a.thread, "path": str(path)})
@@ -3032,6 +3096,10 @@ def cmd_handover(a):
         + "then reply ACK with what you think is done and what is next. Do not redo committed work.",
     ]
     print("\n".join(lines))
+    args = session_args(st, a.thread)
+    print(f"open the new session with create_session(..., permission_mode={args['permission_mode']!r}, "
+          f"extra_allowed_tools={args['extra_allowed_tools']!r})"
+          + (f"; {args['permission_warning']}" if args.get("permission_warning") else ""), file=sys.stderr)
 
 
 def _blank_state(project, folder):
@@ -3490,7 +3558,8 @@ def cmd_context(a):
                   "cd into its folder first (its own board then applies)."}}, ensure_ascii=False))
         return
     st = load(d)
-    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\n" + language_rule(st) + "\n\n" + unreported_note(st) + render_board(
+    pw = permission_warning(st)
+    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\n" + (f"Lead: permissions: {pw}\n\n" if pw else "") + language_rule(st) + "\n\n" + unreported_note(st) + render_board(
         st
     ) + "\n\nProject instructions (.teamwork/INSTRUCTIONS.md):\n" + read_file(
         d, "INSTRUCTIONS.md"
@@ -3731,6 +3800,307 @@ def cmd_merge(a):
             signal.signal(s_, h)
 
 
+# ------------------------------------------------------------------ bash guard (T36)
+# A PreToolUse hook for Bash: asks the user before big decisions, denies wiping / or ~, says nothing otherwise.
+# Permission rules match the raw command text with `*` spanning spaces, so a rule can never tell a command from a
+# word in a commit message; this reads the argv of each command instead (heredoc bodies and quoted text are data).
+
+_SHELL_OPS = {"&&", "||", ";", "|", "&", "(", ")", "|&", ";;", "{", "}"}
+_WRAPPERS = {"command", "exec", "env", "nohup", "time", "nice", "xargs", "builtin", "timeout", "gtimeout", "watch",
+             "caffeinate", "stdbuf", "doas"}
+_KEYWORDS = {"if", "then", "elif", "else", "fi", "do", "done", "while", "until", "for", "case", "esac", "!", "in"}
+_WRAPPER_VALUE_OPTS = {"-n", "-u", "-I", "-L", "-P", "-d", "-s", "-k", "-S", "-o", "-e", "-i", "--signal",
+                       "--kill-after", "--interval", "-E", "-a"}
+_GUARD_MAX = 1 << 20  # parse at most 1 MB of a command line
+_PLAIN = re.compile(r"[^\s'\"\\$`<>;&|(){}#]+")
+_HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([^\s'\"<>;&|()]+)\2")
+_REDIR = re.compile(r"[<>]+&?-?\d*|&>>?")
+_TARGET = re.compile(r"\s*(\"[^\"]*\"|'[^']*'|[^\s;&|()<>]+)")
+_OP = re.compile(r"&&|\|\||;;|\|&|&>>?|[;&|(){}]")
+
+
+def _segments(cmd):
+    """The commands in a shell line, each as an argv list: quotes kept together across lines, heredoc bodies dropped,
+    `\\`+newline joined, operators and newlines split commands, `$( )` and backtick bodies judged as commands too."""
+    cmd, out, cur, word, i, n, heredocs = cmd[:_GUARD_MAX], [], [], None, 0, 0, []
+    n = len(cmd)
+
+    def end_word():
+        nonlocal word
+        if word is not None:
+            cur.append(word)
+        word = None
+
+    def end_cmd():
+        nonlocal cur
+        end_word()
+        if cur:
+            out.append(cur)
+        cur = []
+
+    def sub_body(j, closer):  # the text of $( ... ) or ` ... ` from j, and the index after it
+        depth, k = 1, j
+        while k < n:
+            c = cmd[k]
+            if c == "\\":
+                k += 2
+                continue
+            if closer == ")" and c == "(":
+                depth += 1
+            elif c == closer:
+                depth -= 1
+                if depth == 0:
+                    return cmd[j:k], k + 1
+            k += 1
+        return cmd[j:], n
+
+    while i < n:
+        c = cmd[i]
+        if c == "\\" and i + 1 < n:
+            if cmd[i + 1] == "\n":
+                i += 2
+                continue
+            word = (word or "") + cmd[i + 1]
+            i += 2
+        elif c == "'":
+            j = cmd.find("'", i + 1)
+            j = n if j < 0 else j
+            word = (word or "") + cmd[i + 1:j]
+            i = j + 1
+        elif c == '"':
+            j, buf = i + 1, []
+            while j < n and cmd[j] != '"':
+                if cmd[j] == "\\" and j + 1 < n:
+                    buf.append(cmd[j + 1])
+                    j += 2
+                    continue
+                if cmd.startswith("$(", j) or cmd[j] == "`":
+                    body, j2 = sub_body(j + 2 if cmd[j] == "$" else j + 1, ")" if cmd[j] == "$" else "`")
+                    out.extend(_segments(body))
+                    buf.append(cmd[j:j2])
+                    j = j2
+                    continue
+                buf.append(cmd[j])
+                j += 1
+            word = (word or "") + "".join(buf)
+            i = j + 1
+        elif cmd.startswith("$(", i) or c == "`":
+            body, i = sub_body(i + 2 if c == "$" else i + 1, ")" if c == "$" else "`")
+            out.extend(_segments(body))
+            word = (word or "") + "$(...)"
+        elif c == "\n":
+            end_cmd()
+            i += 1
+            for tag, strip in heredocs:  # heredoc bodies are data
+                while i < n:
+                    j = cmd.find("\n", i)
+                    j = n if j < 0 else j
+                    line, i = cmd[i:j], j + 1
+                    if (line.lstrip("\t") if strip else line) == tag:
+                        break
+            heredocs = []
+        elif c in " \t\r":
+            end_word()
+            i += 1
+        elif c in "<>":
+            if word is not None and word.isdigit():
+                word = None
+            end_word()
+            m = _HEREDOC.match(cmd, i)
+            if m and not cmd.startswith("<<<", i):
+                heredocs.append((m.group(3), bool(m.group(1))))
+                i = m.end()
+                continue
+            i = _REDIR.match(cmd, i).end()
+            m = _TARGET.match(cmd, i)  # the redirect target is not an argument
+            i = m.end() if m else i
+        elif c in ";&|()" or (c in "{}" and word is None and (i + 1 >= n or cmd[i + 1] in " \t\n;")):
+            m = _OP.match(cmd, i)
+            if m.group(0).startswith("&>"):  # &>file redirects, it does not end the command
+                end_word()
+                m = _TARGET.match(cmd, m.end())
+                i = m.end() if m else i + 2
+                continue
+            end_cmd()
+            i = m.end()
+        elif c == "#" and word is None:
+            j = cmd.find("\n", i)
+            i = n if j < 0 else j
+        else:
+            m = _PLAIN.match(cmd, i)
+            word = (word or "") + (m.group(0) if m else c)
+            i = m.end() if m else i + 1
+    end_cmd()
+    return out
+
+
+def _flags(args):
+    """Short flags (combined `-fu` -> f, u) and long flags of an argv tail, up to `--`."""
+    short, long_ = set(), set()
+    for x in args:
+        if x == "--":
+            break
+        if x.startswith("--"):
+            long_.add(x.split("=", 1)[0])
+        elif x.startswith("-") and len(x) > 1:
+            short.update(x[1:])
+    return short, long_
+
+
+def _wipe_target(x):
+    x = x.rstrip("/") or "/"
+    return x in ("/", "~", "$HOME", "${HOME}", "/*", "~/*", "$HOME/*", "${HOME}/*") or x == str(Path.home())
+
+
+def big_decision(cmd, _depth=0):
+    """("deny"|"ask", why) for a big decision in a Bash command line, else None."""
+    worst = None
+    for argv in _segments(cmd):
+        hit = _judge(argv, _depth)
+        if hit and hit[0] == "deny":
+            return hit
+        worst = worst or hit
+    return worst
+
+
+def _judge(argv, depth=0):
+    """The decision for one command's argv (wrappers, keywords and VAR=x stripped; `sh -c`, `eval`, `find -exec`
+    bodies judged as commands)."""
+    worst, sudo = None, False
+    while True:
+        while argv and (argv[0] in _KEYWORDS or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", argv[0])):
+            argv = argv[1:]
+        if not argv or not (Path(argv[0]).name in _WRAPPERS or Path(argv[0]).name in ("sudo",)):
+            break
+        w = Path(argv[0]).name
+        sudo = sudo or w in ("sudo", "doas")
+        argv = argv[1:]
+        while argv and argv[0].startswith("-") and argv[0] != "-":  # wrapper options and their values
+            opt = argv.pop(0)
+            if opt in _WRAPPER_VALUE_OPTS and argv and w != "sudo":
+                argv = argv[1:]
+            elif w == "sudo" and opt in ("-u", "-g", "-C", "-D", "-h", "-p", "-U", "-r", "-t") and argv:
+                argv = argv[1:]
+        if w in ("timeout", "gtimeout") and argv:  # the duration
+            argv = argv[1:]
+    if sudo:
+        worst = ("ask", "sudo")
+    if not argv:
+        return worst
+    name, args = Path(argv[0]).name, argv[1:]
+    short, long_ = _flags(args)
+    why = None
+    if name in ("bash", "sh", "zsh", "dash", "ksh") and depth < 4:
+        for k, x in enumerate(args):
+            if x.startswith("-") and not x.startswith("--") and "c" in x[1:]:
+                rest = [y for y in args[k + 1:] if not y.startswith("-")]
+                if rest:
+                    hit = big_decision(rest[0], depth + 1)
+                    if hit:
+                        return hit if hit[0] == "deny" or not worst else worst
+                break
+    elif name == "eval" and depth < 4:
+        hit = big_decision(" ".join(args), depth + 1)
+        if hit:
+            return hit if hit[0] == "deny" or not worst else worst
+    if name == "rm":
+        rec = bool(short & {"r", "R"}) or "--recursive" in long_
+        if rec and any(_wipe_target(x) for x in args if not x.startswith("-")):
+            return "deny", "wiping the root or home folder"
+        if rec:
+            why = "recursive delete"
+    elif name == "find":
+        if "-delete" in args:
+            why = "find deleting files"
+        for k, x in enumerate(args):
+            if x in ("-exec", "-execdir", "-ok", "-okdir") and depth < 4:
+                sub = []
+                for y in args[k + 1:]:
+                    if y in (";", "+"):
+                        break
+                    sub.append(y)
+                hit = _judge(sub, depth + 1)
+                if hit and hit[0] == "deny":
+                    return hit
+                why = why or (hit and hit[1]) or (sub and Path(sub[0]).name == "rm" and "find deleting files")
+    elif name == "git":
+        i = 0
+        while i < len(args) and args[i].startswith("-"):  # global options: -C <path>, -c k=v, --git-dir=...
+            i += 2 if args[i] in ("-C", "-c", "--git-dir", "--work-tree", "--namespace") else 1
+        sub, rest = (args[i], args[i + 1:]) if i < len(args) else ("", [])
+        s_, l_ = _flags(rest)
+        pos = [x for x in rest if not x.startswith("-")]
+        if sub == "push":
+            if "f" in s_ or "--force" in l_ or "--mirror" in l_ or "--delete" in l_ or "d" in s_ \
+                    or "--prune" in l_ or any(x.startswith(("+", ":")) for x in pos[1:]):
+                why = "forced or deleting push"
+        elif sub == "reset" and l_ & {"--hard", "--merge"}:
+            why = "hard reset"
+        elif sub == "clean" and not ("n" in s_ or "--dry-run" in l_):
+            why = "git clean"
+        elif sub == "branch" and ("D" in s_ or "M" in s_ or "f" in s_ or "--force" in l_):
+            why = "forced branch delete or move"
+        elif sub == "checkout" and ("--" in rest or "." in pos or "f" in s_ or "--force" in l_):
+            why = "checkout discarding changes"
+        elif sub == "switch" and ("--discard-changes" in l_ or "f" in s_ or "--force" in l_):
+            why = "switch discarding changes"
+        elif sub == "restore" and not (("S" in s_ or "--staged" in l_) and not ("W" in s_ or "--worktree" in l_)):
+            why = "restore discarding changes"
+        elif sub == "stash" and pos[:1] in (["drop"], ["clear"]):
+            why = "dropping a stash"
+        elif sub == "worktree" and pos[:1] == ["remove"]:
+            why = "removing a worktree"
+        elif sub == "update-ref" and "d" in s_ or sub in ("filter-branch", "filter-repo"):
+            why = "rewriting refs or history"
+        elif sub == "reflog" and pos[:1] in (["expire"], ["delete"]):
+            why = "expiring the reflog"
+    elif name in ("shutdown", "reboot", "halt", "diskutil", "killall", "pkill", "dropdb", "mkfs") \
+            or name.startswith("mkfs."):
+        why = name
+    elif name == "launchctl" and args[:1] and args[0] in ("unload", "bootout", "remove", "kill", "stop",
+                                                          "kickstart", "disable", "reboot"):
+        why = f"launchctl {args[0]}"
+    elif name == "brew" and (args[:1] in (["uninstall"], ["reinstall"], ["remove"], ["rm"]) or
+                             args[:2] in (["services", "stop"], ["services", "restart"], ["services", "kill"])):
+        why = "brew " + " ".join(args[:2])
+    elif name in ("npm", "pnpm", "yarn") and args[:1] and args[0] in ("uninstall", "remove", "rm", "un") \
+            and ("g" in short or "--global" in long_ or args[:2] == ["global", "remove"]):
+        why = "global uninstall"
+    elif name in ("psql", "mysql", "sqlite3") and re.search(r"\b(DROP|TRUNCATE)\b", " ".join(args), re.I):
+        why = "dropping data"
+    elif name == "gh" and (args[:2] in (["repo", "delete"], ["repo", "archive"], ["repo", "rename"]) or
+                           (args[:2] == ["repo", "edit"] and long_ & {"--visibility", "--default-branch"}) or
+                           (args[:1] == ["api"] and re.search(r"(?i)(-X\s*=?\s*DELETE|--method[ =]DELETE|"
+                                                              r"visibility=|private=|default_branch=|"
+                                                              r"deleteRepository)", " ".join(args)))):
+        why = "gh " + " ".join(args[:2])
+    if why and not worst:
+        worst = ("ask", why)
+    return worst
+
+
+def cmd_bash_guard(a):
+    """PreToolUse hook: read the tool call on stdin, print a decision only for big decisions. Never fails: odd input
+    or an internal error prints nothing, so ordinary work is never blocked by the guard itself."""
+    try:
+        if a.command is not None:
+            cmd = a.command
+        else:
+            ev = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
+            if not isinstance(ev, dict) or ev.get("tool_name") not in ("Bash", None):
+                return
+            ti = ev.get("tool_input")
+            cmd = ti.get("command") if isinstance(ti, dict) else None
+        if not isinstance(cmd, str):
+            return
+        hit = big_decision(cmd)
+    except Exception:  # noqa: BLE001 - a guard bug must not stop the user's work
+        return
+    if hit:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": hit[0],
+                                                 "permissionDecisionReason": f"teamwork: big decision ({hit[1]})"}}))
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="tw.py",
@@ -3758,6 +4128,8 @@ def main():
     x.add_argument("--repo-url")
     x.add_argument("--base", help="change the base branch (merges, leases, trace and handover diff against it)")
     x.add_argument("--force", action="store_true", help="take over from a previous lead session")
+    x.add_argument("--mode", choices=PERMISSION_MODES, help="the lead session's own permission mode (check it at "
+                   "start): threads cannot be looser, so a lead below auto is reported, never silently downgraded")
     x.set_defaults(f=cmd_lead)
 
     x = s.add_parser("thread", help="add, update or reseat a thread (a seat that outlives its sessions)")
@@ -3769,6 +4141,7 @@ def main():
     x.add_argument("--owns")
     x.add_argument("--session")
     x.add_argument("--branch")
+    x.add_argument("--mode", choices=PERMISSION_MODES, help="the mode the thread's session actually runs in")
     x.add_argument("--status")
     x.add_argument("--summary")
     x.add_argument("--roster-sent", action="store_true",
@@ -3892,6 +4265,10 @@ def main():
     x.add_argument("--apply", action="store_true", help="fast-forward the base after a clean merge and green checks")
     x.set_defaults(f=cmd_merge)
 
+    x = s.add_parser("bash-guard", help="PreToolUse hook for Bash (install.py installs it): ask before big "
+                     "decisions (removals, history rewrites, discards, shutdowns), deny wiping / or ~, else silent")
+    x.add_argument("--command", help="check this command line instead of reading the hook event on stdin")
+    x.set_defaults(f=cmd_bash_guard)
     x = s.add_parser("guard", help="fail if private words/paths (.teamwork/PRIVATE.md) are in commits or files")
     x.add_argument("--repo", help="git checkout to scan (default: current folder)")
     x.add_argument("--base", help="scan commits base..ref (default: origin/<base branch>)")

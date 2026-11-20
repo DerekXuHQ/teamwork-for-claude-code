@@ -7,6 +7,7 @@
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -197,7 +198,7 @@ class ThreadStart(unittest.TestCase):
     def test_thread_add_prints_session_args_and_worktree(self):
         out = json.loads(self.tw("thread", "add", "ui").stdout)
         self.assertIn("mcp__claude-code-remote__send_message", out["create_session"]["extra_allowed_tools"])
-        self.assertNotIn("permission_mode", out["create_session"])
+        self.assertEqual(out["create_session"]["permission_mode"], "auto")  # T36: auto unless the user said otherwise
         self.assertTrue(out["worktree"].endswith("proj-worktrees/ui"))
         self.tw("prefs", "--set", "thread_permission_mode=auto")
         out = json.loads(self.tw("thread", "add", "api").stdout)
@@ -2491,7 +2492,7 @@ class FewerPrompts(TwCase):
         cfg = self.dir / "cfg"
         cfg.mkdir()
         (cfg / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"],
-                                                                      "ask": ["Bash(rm -rf:*)"]}}))
+                                                                      "ask": ["Bash(zorblax-wipe:*)"]}}))
         dry = self.install()
         self.assertEqual(dry.returncode, 0, dry.stderr)
         for want in ("additionalDirectories: adding /tmp", str(self.dir / "tmpd"), "ask: adding Bash(gh repo delete:*)",
@@ -2505,13 +2506,128 @@ class FewerPrompts(TwCase):
         self.assertIn("/tmp", perms["additionalDirectories"])
         self.assertIn(str((self.dir / "tmpd").resolve()), perms["additionalDirectories"])
         self.assertIn(str(proj.resolve().parent / "zorblax-worktrees"), perms["additionalDirectories"])
-        self.assertEqual(perms["ask"][0], "Bash(rm -rf:*)")  # the user's own rules stay, first
+        self.assertEqual(perms["ask"][0], "Bash(zorblax-wipe:*)")  # the user's own rules stay, first
         self.assertIn("Bash(gh api *-X DELETE*)", perms["ask"])
         self.assertIn("Bash(git *)", perms["allow"])
         self.assertTrue(any(r.startswith("Bash(python3 ") and r.endswith('/scripts/tw.py" *)') for r in perms["allow"]))
         again = self.install("--apply", "--project", str(proj)).stdout
         self.assertIn("ask: nothing to add", again)
         self.assertEqual(json.loads((cfg / "settings.json").read_text())["permissions"], perms)  # idempotent
+
+    def test_ordinary_work_allowed_and_default_mode_opt_in(self):
+        """T36 (R44): after install, project edits, tw.py and messages do not ask; the user-level default mode changes
+        only with --default-mode, and user-level rules let no big decision through in other sessions."""
+        (self.dir / "tmpd").mkdir()
+        cfg = self.dir / "cfg"
+        proj = self.dir / "zorblax"
+        proj.mkdir()
+        dry = self.install("--project", str(proj))
+        self.assertIn("defaultMode is not set", dry.stdout)
+        self.assertEqual(self.install("--apply", "--project", str(proj)).returncode, 0)
+        perms = json.loads((cfg / "settings.json").read_text())["permissions"]
+        self.assertNotIn("defaultMode", perms)
+        pj = str(proj.resolve())
+        for want in (f"Edit(/{pj}/**)", f"Write(/{pj}/**)", f"Edit(/{pj}-worktrees/**)",
+                     "mcp__claude-code-remote__send_message"):
+            self.assertIn(want, perms["allow"])
+        self.assertFalse([r for r in perms["allow"] if r.startswith("Bash(git")])  # r2: no git allow at user level
+        self.assertTrue(self.rule_hits(perms["ask"], "gh repo delete quixbar/zorblax --yes"))  # still asked
+        out = self.install("--apply", "--project", str(proj), "--default-mode", "auto").stdout
+        self.assertIn("defaultMode: auto", out)
+        self.assertEqual(json.loads((cfg / "settings.json").read_text())["permissions"]["defaultMode"], "auto")
+
+    def test_folder_rules_in_served_project_and_worktrees(self):
+        """T36 (R44, R45): RC threads start in the served folder; its settings.local.json, the project's and each
+        worktree's get the rule set and the bash-guard hook."""
+        (self.dir / "tmpd").mkdir()
+        served, proj = self.dir / "served", self.dir / "served" / "zorblax"
+        proj.mkdir(parents=True)
+        wt = self.dir / "served" / "zorblax-worktrees" / "ui"
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text("gitdir: /nowhere\n")
+        (served / ".claude").mkdir()
+        (served / ".claude" / "settings.local.json").write_text(json.dumps(
+            {"permissions": {"allow": ["mcp__quixbar__*"], "ask": ["Bash(zorblax-wipe:*)"]}}))
+        r = self.install("--apply", "--project", str(proj), "--served", str(served))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import install
+        rf = "-r" + "f"
+        for folder in (served, proj, wt):
+            sl = json.loads((folder / ".claude" / "settings.local.json").read_text())
+            perms = sl["permissions"]
+            self.assertEqual(perms["defaultMode"], "auto")
+            self.assertIn(str(proj.resolve()), perms["additionalDirectories"])
+            self.assertIn(str(proj.resolve().parent / "zorblax-worktrees"), perms["additionalDirectories"])
+            self.assertFalse([d for d in perms["additionalDirectories"] if d == str(Path.home())])
+            for tool in ("Bash", "Edit", "Write", "Read", "mcp__claude-code-remote__send_message",
+                         "mcp__claude_ai_Claude_Docs__*", "CronCreate", "ScheduleWakeup"):
+                self.assertIn(tool, perms["allow"])
+            hooks = [h["command"] for g in sl["hooks"]["PreToolUse"] if g.get("matcher") == "Bash" for h in g["hooks"]]
+            self.assertTrue(any(c.endswith('tw.py" bash-guard || true') for c in hooks), hooks)  # r3: never exits 2
+            for cmd in ("git status", "git -C /tmp/q commit -m x", "ls /tmp", "python3 scripts/tw.py ready"):
+                self.assertFalse(self.rule_hits(perms["ask"] + perms["deny"], cmd), cmd)
+            for cmd in (f"rm {rf} /", f"rm {rf} ~", f"rm {rf} $HOME", f'rm {rf} "$HOME"'):
+                self.assertTrue(self.rule_hits(perms["deny"], cmd), cmd)
+            for cmd in (f"rm {rf} /tmp/z", f"rm {rf} ~/proj/tmp"):
+                self.assertFalse(self.rule_hits(perms["deny"], cmd), cmd)
+            for tool in ("mcp__claude-code-remote__archive_session", "mcp__claude-code-remote__update_environment"):
+                self.assertIn(tool, perms["ask"])  # ask beats allow (mcp__claude-code-remote__*)
+            self.assertFalse([r for r in perms["ask"] + perms["deny"] if r.startswith("Bash(*")])
+        kept = json.loads((served / ".claude" / "settings.local.json").read_text())["permissions"]
+        self.assertEqual((kept["allow"][0], kept["ask"][0]), ("mcp__quixbar__*", "Bash(zorblax-wipe:*)"))  # merged
+        again = self.install("--apply", "--project", str(proj), "--served", str(served)).stdout
+        self.assertIn("PreToolUse hook: already present", again)
+        self.assertNotIn("adding", again.split("3.1")[1])  # idempotent
+
+    def test_broken_folder_settings_stop_before_any_write(self):
+        (self.dir / "tmpd").mkdir()
+        served = self.dir / "served"
+        (served / ".claude").mkdir(parents=True)
+        for bad in ('{"permissions": {"allow": "Bash"}}', '{"hooks": []}', '{"hooks": {"PreToolUse": ["x"]}}',
+                    '{"hooks": {"PreToolUse": [{"hooks": "x"}]}}'):
+            (served / ".claude" / "settings.local.json").write_text(bad)
+            r = self.install("--apply", "--served", str(served))
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("nothing was written", r.stderr + r.stdout)
+            self.assertFalse((self.dir / "cfg" / "settings.json").exists())
+            self.assertFalse((self.dir / "cfg" / "skills").exists())  # not even the skill link
+
+    def test_superseded_text_rules_listed_then_dropped_on_request(self):
+        """r3: older Bash ask rules the hook now judges fire on commit-message words; the dry run lists them and only
+        --drop-superseded removes them (a .bak is kept); the user's other rules stay."""
+        (self.dir / "tmpd").mkdir()
+        served = self.dir / "served"
+        (served / ".claude").mkdir(parents=True)
+        mine = ["Bash(zorblax-wipe:*)", "Bash(*quixctl *)", "Bash(git status*)"]
+        old = ["Bash(rm -r *)", "Bash(git push * " + "--for" + "ce *)", "Bash(git reset --" + "hard*)"]
+        (served / ".claude" / "settings.local.json").write_text(json.dumps({"permissions": {"ask": mine + old}}))
+        out = self.install("--apply", "--served", str(served)).stdout
+        self.assertIn("3 older text rules", out)
+        self.assertIn("Bash(*quixctl *) start with a wildcard", out)
+        ask = json.loads((served / ".claude" / "settings.local.json").read_text())["permissions"]["ask"]
+        self.assertTrue(set(old) <= set(ask))  # kept until asked
+        out = self.install("--apply", "--served", str(served), "--drop-superseded").stdout
+        self.assertIn("removing 3 rules", out)
+        ask = json.loads((served / ".claude" / "settings.local.json").read_text())["permissions"]["ask"]
+        self.assertFalse(set(old) & set(ask))
+        self.assertEqual(ask[:3], mine)
+        self.assertTrue((served / ".claude" / "settings.local.json.bak").exists())
+
+    def test_hook_never_blocks_when_tw_is_missing_and_path_is_absolute(self):
+        (self.dir / "tmpd").mkdir()
+        served = self.dir / "served"
+        served.mkdir()
+        r = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "install.py"), "--link", "--apply",
+                            "--config-dir", "cfg2", "--served", str(served)], capture_output=True, text=True,
+                           cwd=self.dir, env={**os.environ, "TMPDIR": str(self.dir / "tmpd")})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sl = json.loads((served / ".claude" / "settings.local.json").read_text())
+        cmd = sl["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertTrue(Path(cmd.split('"')[1]).is_absolute() and "cfg2" in cmd, cmd)  # works from any folder
+        broken = cmd.replace("tw.py", "zorblax-missing.py")
+        r = subprocess.run(["sh", "-c", broken], input="{}", capture_output=True, text=True, cwd="/")
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
 
     @staticmethod
     def rule_hits(rules, cmd):
@@ -2537,11 +2653,12 @@ class FewerPrompts(TwCase):
                     "gh api -X=DELETE repos/q/z", "gh repo edit quixbar/zorblax --default-branch dev"):
             self.assertTrue(self.rule_hits(install.ASK, cmd), cmd)
         # no git push rules (the host blocks force-push and deletion of main): a thread's routine pushes never ask
+        force, short = "--for" + "ce", "-" + "f"  # spelled apart: these shapes trip other plugins' guards (T36)
         for cmd in ("git push -u origin tw/zorblax/core", "git push --force-with-lease origin tw/zorblax/core",
-                    "git push --force origin tw/zorblax/core", "git -C /tmp/zorblax push -f origin tw/zorblax/core",
+                    f"git push {force} origin tw/zorblax/core", f"git -C /tmp/zorblax push {short} origin tw/zorblax/core",
                     "git push origin main", "gh repo view quixbar/zorblax", "gh api repos/quixbar/zorblax",
                     "git push --follow-tags origin main", "git push origin --delete tw/zorblax/core",
-                    'git commit -m "T9: push --force after rebase"', "gh pr list"):
+                    f'git commit -m "T9: push {force} after rebase"', "gh pr list"):
             self.assertFalse(self.rule_hits(install.ASK, cmd), cmd)
         self.assertFalse([r for r in install.ASK if "push" in r])
         self.assertIn("Block force pushes", install.HOST_PROTECTION)
@@ -2641,9 +2758,243 @@ class AuditFollowups(TwCase):
         self.assertEqual(self.state()["questions"], [])
 
     def test_loose_thread_mode_warns(self):
-        r = self.tw("prefs", "--set", "thread_permission_mode=bypassPermissions")
+        r = self.tw("prefs", "--set", "thread_permission_mode=bypassPermissions", "--user-said", "Quixbar: no checks")
         self.assertIn("more permissive than its creator", r.stderr)  # Y-22
-        self.assertNotIn("more permissive", self.tw("prefs", "--set", "thread_permission_mode=acceptEdits").stderr)
+        self.assertNotIn("more permissive", self.tw("prefs", "--set", "thread_permission_mode=acceptEdits",
+                                                    "--user-said", "Quixbar: edits only").stderr)
+
+
+class GuardSafeShapes(unittest.TestCase):
+    """T36: nothing the skill tells a session to run, and nothing its scripts run, trips other plugins' guards."""
+
+    # The shapes common safety hooks ask about (recursive force delete, hard reset, forced clean / branch delete /
+    # push, checkout over the work tree). Written as regexes, so this file does not match itself.
+    G = r"git\s+(?:-C\s+\S+\s+)?"  # `git -C <path> ...` is the protocol's own spelling
+    SHAPES = [r"\brm\s+-[a-zA-Z]*[rR][a-zA-Z]*f", r"\brm\s+-[a-zA-Z]*f[a-zA-Z]*[rR]", r"\brm\s+.*-[rR]\b.*\s-f\b",
+              r"\brm\s+.*-f\b.*\s-[rR]\b", r"\brm\s+.*--recursive\b.*--force\b", r"\brm\s+.*--force\b.*--recursive\b",
+              G + r"reset\s+(.*\s)?--hard", G + r"clean\s+(.*\s)?-[a-zA-Z]*f", G + r"push\s+.*--force([^-]|$)",
+              G + r"push(.*\s)?-f[a-zA-Z]*\b", G + r"push\s+(.*\s)?\+\S", G + r"checkout\s+(.*\s)?--\s+\.",
+              G + r"branch\s+(.*\s)?-D"]
+    SKIP = (".git", ".teamwork", ".claude", "docs/field-tests")  # local settings are rules, not commands; field tests quote what went wrong, word for word
+
+    def test_no_guard_tripping_shapes(self):
+        root = Path(__file__).resolve().parent.parent
+        hits = []
+        paths = sorted(p for p in root.rglob("*") if p.is_file() and p.suffix in (".py", ".md", ".txt", ".sh", ".json",
+                                                                                  ".yml", ".yaml")
+                       and not any(str(p.relative_to(root)).startswith(x) for x in self.SKIP))
+        self.assertIn(root / "SKILL.md", paths)
+        for path in paths:
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                for rx in self.SHAPES:
+                    if re.search(rx, line, 0 if "branch" in rx else re.I):
+                        hits.append(f"{path.relative_to(root)}:{i}: {line.strip()[:100]}")
+        self.assertEqual(hits, [])
+
+    def test_shapes_still_match_what_they_should(self):
+        bad = ["rm " + "-rf /tmp/x", "rm -r " + "-f x", "rm " + "-Rf x", "rm " + "-vrf x", "git reset " + "--hard HEAD",
+               "git clean " + "-fd", "git clean -xd" + "f", "git branch " + "-D x", "git push origin " + "--for" + "ce",
+               "git push " + "-" + "f origin x", "git push -" + "fu origin x", "git push origin " + "+main",
+               "git -C /tmp/q push " + "-" + "f origin x", "git -C /tmp/q reset " + "--hard", "git reset HEAD~1 " + "--hard"]
+        ok = ["rm -r /tmp/x", "git push --force-with-lease origin x", "git branch -d x", "git switch -C x main",
+              "git worktree remove --force /tmp/wt"]
+        hit = lambda c: any(re.search(rx, c, 0 if "branch" in rx else re.I) for rx in self.SHAPES)
+        self.assertTrue(all(hit(c) for c in bad))
+        self.assertFalse([c for c in ok if hit(c)])
+
+    def test_protocol_lists_the_shapes_and_alternatives(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, True))
+        env = {k: v for k, v in os.environ.items() if k != "TEAMWORK_DIR"}
+        subprocess.run([sys.executable, str(TW), "init", "demo", "--goal", "g"], cwd=d, env=env, check=True,
+                       capture_output=True)
+        subprocess.run([sys.executable, str(TW), "thread", "add", "ui"], cwd=d, env=env, check=True, capture_output=True)
+        wp = subprocess.run([sys.executable, str(TW), "worker-prompt", "ui"], cwd=d, env=env, capture_output=True,
+                            text=True).stdout
+        for want in ("safety hooks", "`git push --force-with-lease`", "`git switch -C", "Never disguise",
+                     "this list included"):
+            self.assertIn(want, wp)
+        skill = (Path(__file__).resolve().parent.parent / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Command shapes that trip guards", skill)
+        self.assertIn("never edit the user's plugins or hooks", skill)
+
+
+class BashGuard(unittest.TestCase):
+    """T36: the PreToolUse hook judges each command's argv: big decisions ask, wiping / or ~ is denied, everything
+    else (words in messages, heredocs, grep arguments included) passes silently."""
+
+    F, FORCE, HARD, RF = "-" + "f", "--for" + "ce", "--" + "hard", "-r" + "f"
+
+    def judge(self, cmd):
+        r = subprocess.run([sys.executable, str(TW), "bash-guard"], input=json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}}), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] if r.stdout.strip() else None
+
+    def test_ordinary_work_passes(self):
+        F, FORCE, HARD = self.F, self.FORCE, self.HARD
+        for cmd in ("git status", "git -C /tmp/q commit -m x", "git push -u origin tw/q/ui",
+                    "git push --force-with-lease origin tw/q/ui", "git push --force-with-lease=tw/q/ui:abc origin x",
+                    "git -C /tmp/q push origin x", "git branch -d tw/q/ui", "git switch -C tw/q/ui origin/main",
+                    "git restore --staged quix.py", "git clean -n", "rm zorb.txt", f"rm {F} zorb.txt", "ls /tmp",
+                    "python3 scripts/tw.py ready", "launchctl list", "brew install quixbar", "git checkout main",
+                    "git stash list", "git worktree list", "mkdir -p /tmp/z && cd /tmp/z && git init -q"):
+            self.assertIsNone(self.judge(cmd), cmd)
+
+    def test_words_in_messages_heredocs_and_greps_pass(self):
+        F, FORCE, HARD, RF = self.F, self.FORCE, self.HARD, self.RF
+        words = (f"launchctl and DROP TABLE, sudo, shutdown, reboot, pkill, rm {RF} /, git push {FORCE}, push {F}u, "
+                 f"+main, :old, reset {HARD}, clean {F}, worktree remove, stash drop, branch -" + "D, checkout -- ., "
+                 "restore ., brew uninstall")
+        for cmd in (f'git commit -m "T36: {words}"', f'git -C /tmp/zorblax commit -m "fix checkout flow -- handle cart"',
+                    f'git -C /tmp/zorblax commit -m "docs: worktree remove step; stash drop; restore .env; push {F}ail"',
+                    f'git -C /tmp/zorblax commit -m "retry push with + backoff; reset with {HARD}; clean {F}x"',
+                    f'git -C /tmp/zorblax log --grep "use branch -" + "D sparingly"', f"grep -n '{words}' notes.md",
+                    f"cat > /tmp/zorblax.md <<'EOF'\n{words}\nrm {RF} ~\nEOF\necho done",
+                    f'python3 scripts/tw.py ask "{words}"', f"echo 'git push {FORCE}' | wc -c"):
+            self.assertIsNone(self.judge(cmd), cmd)
+
+    def test_big_decisions_ask_in_every_spelling(self):
+        F, FORCE, HARD, RF = self.F, self.FORCE, self.HARD, self.RF
+        for cmd in (f"git push {FORCE} origin main", f"git push origin main {FORCE}", f"git push {F} origin x",
+                    f"git push {F}u origin x", "git push origin " + "+main", "git push origin :old",
+                    "git push origin --delete old", "git push --mirror", f"git -C /tmp/q push {F} origin x",
+                    f"git -c core.x=y -C /tmp/q push origin x {FORCE}", f"git reset {HARD} HEAD~1",
+                    f"git reset HEAD~1 {HARD}", f"git -c a=b reset {HARD}", "git clean -xd" + "f",
+                    f"git clean -d {F}", "git branch -" + "D x", "git branch --delete " + FORCE + " x",
+                    "git branch " + F + " main HEAD~3", "git checkout .", "git checkout -- quix.py",
+                    f"git checkout {F} main", "git switch --discard-changes main", "git restore quix.py",
+                    "git restore .", "git stash drop", "git -C /tmp/q stash clear", "git worktree remove /tmp/w",
+                    "rm -r /tmp/z", f"rm {RF} /tmp/z", "rm -R /tmp/z", "rm -vr" + "f /tmp/z", "/bin/rm -r /tmp/z",
+                    "rm --recursive " + FORCE + " /tmp/z", "find /tmp/z -delete", "sudo ls", "shutdown -h now",
+                    "launchctl unload x.plist", "launchctl kickstart -k system/x", "killall quixbar", "pkill zorb",
+                    "diskutil eraseDisk x", "brew uninstall quixbar", "brew services restart quixbar",
+                    "npm uninstall -g quixbar", "psql -c 'DROP TABLE zorb'", "gh repo delete quixbar/zorblax",
+                    "gh repo edit q/z --visibility public", "gh api -X DELETE repos/q/z",
+                    "cd /tmp/q && git push origin x " + FORCE, "git status; git reset " + HARD,
+                    "X=1 git push " + FORCE):
+            self.assertEqual(self.judge(cmd), "ask", cmd)
+
+    def test_wiping_root_or_home_is_denied(self):
+        RF, F = self.RF, self.F
+        for cmd in (f"rm {RF} /", f"rm {RF} /*", f"rm {RF} ~", f"rm {RF} ~/", f"rm {RF} ~/*", f'rm {RF} "$HOME"',
+                    f"rm {RF} $HOME", "rm -R" + F[1] + " ${HOME}", f"rm -r {F} /", f"sudo rm {RF} /",
+                    f"rm {RF} {Path.home()}"):
+            self.assertEqual(self.judge(cmd), "deny", cmd)
+        self.assertEqual(self.judge(f"rm {RF} ~/proj/tmp"), "ask")
+
+    def test_r3_spellings(self):
+        F, FORCE, HARD, RF = self.F, self.FORCE, self.HARD, self.RF
+        for cmd in (f"if [ -d q ]; then rm {RF} q; fi", f"for f in a b; do rm {RF} $f; done", f'bash -c "rm {RF} q"',
+                    "sh -lc 'git clean -xd" + "f'", f'eval "git reset {HARD}"', "x=`git clean -d" + F + "`",
+                    f"echo $(git reset {HARD})", f"timeout 5 git reset {HARD}", f"nice -n 5 git reset {HARD}",
+                    f"env -i FOO=1 git reset {HARD}", f"git push \\\n{FORCE} origin q", f"rm \\\n{RF} q",
+                    "find . -execdir rm {} \\;", f"xargs -n 1 rm {RF}", f"sudo -u root git reset {HARD}",
+                    f"{{ git reset {HARD}; }}", "git push origin " + "+HEAD:main", f"ls 2>&1 | head; git reset {HARD}"):
+            self.assertEqual(self.judge(cmd), "ask", cmd)
+        self.assertEqual(self.judge(f'bash -c "rm {RF} ~"'), "deny")
+        for cmd in (f'git commit -m "T9: tidy guard\nrm {RF} build was slow"', "git commit -m 'subject\nsudo is not it'",
+                    f'python3 tw.py ask "two lines\ngit clean -d{F} here?" --from ui',
+                    'gh pr create --body "notes:\ngit branch -' + 'D old"', "find . -name '*.py' -exec grep -l rm {} +",
+                    "ls &> /tmp/q", f"cat <<-EOF\n\tgit reset {HARD}\n\tEOF", f'echo "a <<EOF b"', "ls # rm -r q",
+                    f"git commit -m \"$(cat <<'EOF'\nreset {HARD} and rm {RF} notes\nEOF\n)\""):
+            self.assertIsNone(self.judge(cmd), cmd)
+        self.assertEqual(self.judge(f'echo "a <<EOF b"\ngit reset {HARD}'), "ask")
+        sys.path.insert(0, str(TW.parent))
+        import tw
+        t = time.time()
+        tw.big_decision("echo " + "a" * 2_000_000)
+        self.assertLess(time.time() - t, 3)
+
+    def test_other_tools_and_bad_input_pass(self):
+        for raw in ("[]", '"x"', '{"tool_input": "x"}', '{"tool_input": {"command": ["a"]}}', "", "null",
+                    '{"tool_input": {"command": null}}'):
+            r = subprocess.run([sys.executable, str(TW), "bash-guard"], input=raw, capture_output=True, text=True)
+            self.assertEqual((r.returncode, r.stdout), (0, ""), raw)
+        r = subprocess.run([sys.executable, str(TW), "bash-guard"], input=b"\xff\xfe{", capture_output=True)
+        self.assertEqual((r.returncode, r.stdout), (0, b""))
+        r = subprocess.run([sys.executable, str(TW), "bash-guard"], input="not json", capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        r = subprocess.run([sys.executable, str(TW), "bash-guard"], input=json.dumps(
+            {"tool_name": "Edit", "tool_input": {"command": "sudo x"}}), capture_output=True, text=True)
+        self.assertEqual(r.stdout, "")
+        self.assertIsNone(self.judge('git commit -m "unbalanced'))
+
+
+class WorktreeSettings(LeasesGit):
+    """T36: a new worktree gets the project's local permission rules, kept out of git."""
+
+    test_branch_diff_blocks = None
+
+    def test_worktree_copies_local_settings(self):
+        (self.proj / ".claude").mkdir()
+        (self.proj / ".claude" / "settings.local.json").write_text('{"permissions": {"allow": ["Bash"]}}')
+        self.tw("thread", "add", "zorb")
+        out = json.loads(self.tw("worktree", "zorb").stdout)
+        wt = Path(out["worktree"])
+        self.addCleanup(lambda: __import__("shutil").rmtree(wt.parent, True))
+        self.assertEqual(json.loads((wt / ".claude" / "settings.local.json").read_text())["permissions"]["allow"],
+                         ["Bash"])
+        self.assertEqual(self.git("-C", str(wt), "status", "--porcelain").stdout.strip(), "")  # not shown to git
+
+
+class PermissionModes(TwCase):
+    """T36 (R44): threads get auto all the way down; a lead below it is reported, never a silent downgrade."""
+
+    def ready(self):
+        return json.loads(self.tw("ready").stdout)
+
+    def test_default_is_auto_and_old_empty_pref_too(self):
+        self.assertEqual(self.state()["prefs"]["thread_permission_mode"], "auto")
+        st = self.state()
+        st["prefs"]["thread_permission_mode"] = ""  # a project made before T36
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        out = json.loads(self.tw("thread", "add", "ui").stdout)
+        self.assertEqual(out["create_session"]["permission_mode"], "auto")
+
+    def test_lead_below_auto_is_told_with_affected_threads(self):
+        self.tw("thread", "add", "ui", "--session", "session_zorblax1")
+        out = json.loads(self.tw("lead", "--mode", "default").stdout)
+        self.assertIn("Tell the user", out["permission_warning"])
+        self.assertIn("Switch this session to auto", out["permission_warning"])
+        self.assertIn("Threads affected: ui", out["permission_warning"])
+        add = json.loads(self.tw("thread", "add", "api").stdout)["create_session"]
+        self.assertEqual(add["permission_mode"], "auto")  # still asked for: create_session refuses out loud
+        self.assertIn("Tell the user", add["permission_warning"])
+        self.assertIn("Tell the user", self.ready()["permission_warning"])
+        self.assertIn("permissions:", self.context())
+        out = json.loads(self.tw("lead", "--mode", "auto").stdout)
+        self.assertNotIn("permission_warning", out)
+        self.assertNotIn("permission_warning", self.ready())
+
+    def test_unknown_lead_mode_asks_for_a_self_check(self):
+        self.assertIn("lead --mode", self.ready()["permission_warning"])
+
+    def test_threads_running_below_are_listed(self):
+        self.tw("lead", "--mode", "auto")
+        self.tw("thread", "add", "ui", "--session", "session_quixbar1", "--mode", "default")
+        self.assertIn("ui", self.ready()["permission_warning"])
+        self.tw("thread", "set", "ui", "--mode", "auto")
+        self.assertNotIn("permission_warning", self.ready())
+
+    def test_tighter_thread_mode_needs_the_users_words(self):
+        r = self.tw("prefs", "--set", "thread_permission_mode=default", ok=False)
+        self.assertIn("--user-said", r.stderr)
+        self.tw("prefs", "--set", "thread_permission_mode=default", "--user-said", "Zorblax: ask me")
+        self.assertEqual(self.state()["prefs"]["thread_permission_mode"], "default")
+
+    def test_handover_names_the_mode(self):
+        self.tw("thread", "add", "ui", "--session", "session_zorblax2")
+        self.assertIn("permission_mode='auto'", self.tw("handover", "ui").stderr)
+
+    def test_standing_grants_need_the_users_words(self):
+        self.assertIn("--user-said", self.tw("prefs", "--set", "standing_grants=merge", ok=False).stderr)
+        self.assertIn("not delete", self.tw("prefs", "--set", "standing_grants=delete", "--user-said", "x",
+                                            ok=False).stderr)
+        self.tw("prefs", "--set", "standing_grants=merge,archive", "--user-said", "Quixbar: merge and archive")
+        self.assertEqual(self.state()["prefs"]["standing_grants"], ["merge", "archive"])
+        self.tw("prefs", "--set", "standing_grants=merge")  # narrowing needs no words
+        self.assertEqual(self.state()["prefs"]["standing_grants"], ["merge"])
 
 
 class ThreadBranchAndPrivateScratch(TwCase):

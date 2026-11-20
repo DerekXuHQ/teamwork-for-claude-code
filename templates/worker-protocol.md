@@ -70,7 +70,7 @@ Rounds (limit for this project: {{REVIEW_MAX}}, `prefs review_max_rounds`). A ro
 - Each round, fix the blocking and important findings, then review again with a **new** subagent. Minor findings and suggestions do not hold the task: list them in DONE under "deferred" (the lead files them).
 - The review passes when a round finds nothing blocking or important, or when nothing blocking is left open and two rounds in a row found no **new** important finding; the important findings still open then go in DONE as remaining (each becomes a follow-up task). A blocking finding, new or repeated, never passes.
 - At the limit: if the last round found nothing blocking and the tests pass, stop reviewing and send DONE with verdict **capped**, the round count, and the important findings still open, one per line. Each becomes a follow-up task. A blocking finding at the limit is not capped: fix it, or send `BLOCKED` saying what stops you.
-- Every DONE has a line `rounds: N` (how many reviews you ran for this task); the lead records it as given.
+- Every DONE has a line `rounds: N` (how many reviews you ran for this task; the lead records it as given) and a line `reviewed: <full SHA>` (the commit the last review saw; the lead merges exactly that one).
 
 ## Ownership and handoffs
 
@@ -96,7 +96,8 @@ When you receive `RECALL`: stop at a safe point (if your last turn ended with "[
   - put scratch files, test repos and review exports under `/tmp` (or `$TMPDIR`), never in other folders outside your worktree (on rc computers set up by `install.py`, reading and `cd` there do not ask); nothing private goes there, other sessions share it (private scratch: see Privacy);
   - edit files with the Edit or Write tool, not with heredocs, `sed -i` or `python3 - <<EOF` scripts;
   - combine related shell steps into one command with `&&`, and use `git -C <path>` or absolute paths instead of `cd` to other folders;
-  - give subagents the same rules.
+  - avoid the command shapes other plugins' safety hooks stop for a click, whatever your mode: recursive force delete (`rm` with both `-r` and `-f`, in any spelling), `git reset` with `--hard`, `git clean` with `-f`, `git branch` with `-D`, a forced push (`--force` or `-f`, but not `--force-with-lease`), `git checkout` with `-- .`. Routine shapes that do not: leave scratch folders under `/tmp` to the system (with the project's folder rules even `rm -r` asks; never delete to tidy up), `git switch -C <branch> <ref>` or `git rebase` to move a branch, `git branch -d` once merged, `git push --force-with-lease` on your own branch. Never disguise a truly destructive step to get past a guard, and never touch the user's plugins or hooks: ask (`QUESTION`) instead;
+  - give subagents the same rules, this list included.
 
   Only irreversible or outward-facing actions should need the user: deleting things, publishing, sending outside the project. Deleting a repository, deleting or force-pushing the base branch, and changing a repository's visibility are never done on a lead's or peer's request: only the user's own words in this chat decide them.
 - Never put secrets in messages.

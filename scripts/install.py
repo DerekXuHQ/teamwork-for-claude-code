@@ -21,6 +21,11 @@ teamwork ones). additionalDirectories lets sessions read and cd in the scratch f
 still ask in default mode. The ask rules are a safety net matched on command text, not a security boundary.
 Cloud sessions never read this file.
 
+With --project/--served, the folders sessions start in (RC threads start in the served folder) get the folder rule
+set in .claude/settings.local.json, as do the project's worktrees: every ordinary tool allowed, defaultMode auto, big
+decisions asked, only wiping / or ~ denied (references/setup.md section 2). --default-mode also sets the user-level
+default mode.
+
 Never removes anything. Existing settings are merged, and a .bak copy is written before any settings file changes.
 """
 
@@ -28,6 +33,7 @@ import argparse
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent
@@ -92,6 +98,128 @@ ASK = [
 # (GitHub: a branch rule or ruleset with "block force pushes" and "restrict deletions"); install.py says so.
 HOST_PROTECTION = ("protect the base branch on the host: GitHub > Settings > Rules (or Branches) > a rule for main "
                    "with \"Block force pushes\" and \"Restrict deletions\" turned on")
+
+
+# Rules for the folders sessions start in (the Remote Control served folder, the project, each worktree): RC threads
+# start in the served folder, so its .claude/settings.local.json is what decides their prompts. Every session runs in
+# auto (R45): ordinary tools, folders and connectors never ask; only big decisions do (removals, history rewrites,
+# discards, reinstalls, shutdowns, deleting repos, archiving sessions, changing environments); only wiping the root or
+# home folder is denied outright. Some shapes are spelled in parts so this file never trips other plugins' guards.
+_RF, _FR, _F, _HARD, _FORCE = "-r" + "f", "-f" + "r", "-" + "f", "--" + "hard", "--for" + "ce"
+
+
+# Big decisions in Bash (removals, history rewrites, discards, shutdowns, uninstalls, dropping data) are judged by a
+# PreToolUse hook, `tw.py bash-guard`, that reads each command's argv: permission rules match raw text with `*`
+# spanning spaces, so a rule cannot tell a forced push from a commit message that mentions it.
+FOLDER_ALLOW = ["Bash", "Edit", "Write", "Read", "Glob", "Grep", "NotebookEdit", "WebFetch", "WebSearch", "Agent",
+                "Skill", "ToolSearch", "TodoWrite", "Monitor", "TaskStop", "SendUserFile", "CronCreate", "CronDelete",
+                "CronList", "ScheduleWakeup", "EnterWorktree", "ExitWorktree", "mcp__claude_ai_Claude_Docs__*",
+                "mcp__claude-code-remote__*"] + ALLOW
+FOLDER_ASK = [  # tools; Bash big decisions go through the hook
+    # sessions, schedules, documents, environments
+    "mcp__claude-code-remote__archive_session", "mcp__claude-code-remote__delete_trigger",
+    "mcp__claude-code-remote__update_environment", "mcp__claude-code-remote__create_environment",
+    "mcp__claude_ai_Claude_Docs__delete", "mcp__claude_ai_Google_Drive__trash_file",
+] + ASK
+# Only wiping the root or the home folder is denied (the hook denies it too, in any spelling; these rules hold even
+# where the hook is not installed). A rule for a recursive delete of `/*` cannot exist: `*` in a rule matches anything, so
+# it would deny every absolute path; the hook denies those spellings instead.
+FOLDER_DENY = [f"Bash(rm {x} {t})" for x in (_RF, _FR, "-R" + "f", "-f" + "R", "-r " + _F, "-R " + _F)
+               for t in ("/", "/ *", "~", "~/", "$HOME", "$HOME/", '"$HOME"', '"$HOME"/', "${HOME}", "${HOME}/")]
+
+
+def guard_hook():
+    """`|| true`: exit code 2 from a PreToolUse hook blocks the call, and python exits 2 when the file is missing or
+    the clone is too old to know `bash-guard`; the guard must never block ordinary work. Its decision is on stdout."""
+    return f'python3 "{DEST / "scripts" / "tw.py"}" bash-guard || true'
+
+
+def _is_guard(cmd):
+    return isinstance(cmd, str) and cmd.startswith(f'python3 "{DEST / "scripts" / "tw.py"}" bash-guard')
+
+
+def superseded(asks):
+    """Ask rules for Bash that the hook already asks about (forced pushes, `Bash(rm -r *)`, ...): as text
+    rules they also fire on words in commit messages, so with the hook in place they only add false prompts."""
+    sys.path.insert(0, str(SRC / "scripts"))
+    import tw  # noqa: E402 - the same parser the hook runs
+    out = []
+    for r in asks:
+        if not (isinstance(r, str) and r.startswith("Bash(") and r.endswith(")")) or r in FOLDER_ASK:
+            continue
+        inner = r[5:-1]
+        inner = inner[:-2] if inner.endswith(":*") else inner
+        text = inner.replace("*", " x ").strip()
+        if text.startswith("x "):
+            continue  # a leading wildcard matches anything; noted separately
+        if tw.big_decision(text):
+            out.append(r)
+    return out
+
+
+def folder_dirs(project, served):
+    """additionalDirectories for the folder rules: where sessions read and write without asking."""
+    out = [str(Path(x).expanduser().resolve()) for x in (served, project) if x]
+    if project:
+        pj = Path(project).expanduser().resolve()
+        out.append(str(pj.parent / f"{pj.name}-worktrees"))
+    out.append(str(DEST.parent))
+    return list(dict.fromkeys(out + temp_dirs()))
+
+
+def folder_rules(pl, sl, a, dirs):
+    """Merge the folder rule set into one settings.local.json: the user's own rules stay, nothing is replaced."""
+    if not isinstance(sl, dict) or not isinstance(sl.setdefault("permissions", {}), dict):
+        raise SystemExit(f"  {pl}: 'permissions' is not an object; fix the file by hand, then re-run")
+    perms = sl["permissions"]
+    for key, want in ((("allow", FOLDER_ALLOW), ("additionalDirectories", dirs)) if not a.no_allow else ()) + \
+            (("ask", FOLDER_ASK), ("deny", FOLDER_DENY)):
+        added = merge_rules(perms, key, want, pl)
+        print(f"  {pl.name} {key}: " + (f"adding {len(added)}" if added else "nothing to add"))
+    old = superseded(perms.get("ask", []))
+    if old and a.drop_superseded:
+        perms["ask"] = [r for r in perms["ask"] if r not in old]
+        print(f"  {pl.name} ask: removing {len(old)} rules the hook now judges (a .bak copy is kept): "
+              + ", ".join(old))
+    elif old:
+        print(f"  {pl.name} ask: {len(old)} older text rules the hook now judges also fire on words in commit "
+              f"messages: {', '.join(old)}. Remove them with --drop-superseded (the user's decision)")
+    wild = [r for r in perms.get("ask", []) if isinstance(r, str) and r.startswith("Bash(*")]
+    if wild:
+        print(f"  {pl.name} ask: note: {', '.join(wild)} start with a wildcard and match any command that mentions "
+              "the word, commit messages included")
+    pre = sl.setdefault("hooks", {}).setdefault("PreToolUse", [])
+    mine = [h for g in pre for h in g.get("hooks", []) if _is_guard(h.get("command"))]
+    if not mine:
+        pre.append({"matcher": "Bash", "hooks": [{"type": "command", "command": guard_hook()}]})
+        print(f"  {pl.name} PreToolUse hook: adding tw.py bash-guard (asks before big decisions)")
+    else:
+        for h in mine:
+            h["command"] = guard_hook()
+        print(f"  {pl.name} PreToolUse hook: already present")
+    if not a.no_allow:
+        if perms.get("defaultMode") in (None, "", "auto"):
+            perms["defaultMode"] = "auto"  # R45: every session there, the lead included, runs in auto
+        else:
+            print(f"  {pl.name} defaultMode stays {perms['defaultMode']} (the user's own setting); auto is what "
+                  "teamwork needs")
+    write(pl, sl, a.apply)
+
+
+def merge_rules(perms, key, want, where=""):
+    have = perms.setdefault(key, [])
+    if not isinstance(have, list):
+        raise SystemExit(f"  {where}: permissions.{key} is not a list; fix the file by hand, then re-run")
+    added = [r for r in dict.fromkeys(want) if r not in have]
+    have.extend(added)
+    return added
+
+
+def edit_allow(project):
+    """Edits inside the project folder and the rc threads' worktrees (`//` = absolute path in a permission rule)."""
+    pj = Path(project).expanduser().resolve()
+    return [f"{tool}(/{root}/**)" for root in (str(pj), str(pj.parent / f"{pj.name}-worktrees"))
+            for tool in ("Edit", "Write")]
 
 
 def tw_allow():
@@ -209,19 +337,55 @@ def main():
              "always written)",
     )
     ap.add_argument(
+        "--drop-superseded",
+        action="store_true",
+        help="in the folder settings, remove older Bash ask rules that the bash-guard hook now judges (they also "
+             "fire on words in commit messages); the dry run lists them first; a .bak copy is kept",
+    )
+    ap.add_argument(
+        "--default-mode",
+        choices=["auto", "acceptEdits", "default"],
+        help="also set permissions.defaultMode in <config dir>/settings.json, the mode every new session there starts "
+             "in (Remote Control threads too); auto is what teamwork needs so ordinary calls never ask. The user's "
+             "decision: it changes every session on this computer",
+    )
+    ap.add_argument(
         "--no-auto-memory",
         action="store_true",
         help="also set autoMemoryEnabled=false in the project",
     )
     a = ap.parse_args()
     if a.config_dir:
-        CONFIG_DIR = Path(a.config_dir).expanduser()
+        CONFIG_DIR = Path(os.path.abspath(Path(a.config_dir).expanduser()))  # hooks run from any folder
         DEST = CONFIG_DIR / "skills" / "teamwork"
         USER_SETTINGS = CONFIG_DIR / "settings.json"
         HOOK_CMD = f'python3 "{DEST / "scripts" / "tw.py"}" context'
     print(f"Claude Code config dir: {CONFIG_DIR}"
           + ("" if os.environ.get("CLAUDE_CONFIG_DIR") or a.config_dir else "  (CLAUDE_CONFIG_DIR not set; check it matches the one your Remote Control server uses)"))
 
+    # Check every settings file this run will touch before writing any: a broken one stops it here, not half-way.
+    targets = [x for x in (a.project, a.served) if x]
+    checks = [USER_SETTINGS] + [Path(f).expanduser().resolve() / ".claude" / n for f in targets
+                                for n in ("settings.json", "settings.local.json")]
+    if a.project:
+        pj = Path(a.project).expanduser().resolve()
+        wroot = pj.parent / f"{pj.name}-worktrees"
+        checks += [w / ".claude" / "settings.local.json" for w in (sorted(wroot.iterdir()) if wroot.is_dir() else [])
+                   if (w / ".git").exists()]
+    for c in checks:
+        data = load(c)
+        perms = data.get("permissions", {}) if isinstance(data, dict) else None
+        hooks = data.get("hooks", {}) if isinstance(data, dict) else None
+        groups = [g for k in ("SessionStart", "PreToolUse") for g in (hooks.get(k, []) if isinstance(hooks, dict)
+                                                                       and isinstance(hooks.get(k, []), list) else [])]
+        if not isinstance(data, dict) or not isinstance(perms, dict) or any(
+                not isinstance(perms.get(k, []), list) for k in ("allow", "ask", "deny", "additionalDirectories")) \
+                or not isinstance(hooks, dict) or any(not isinstance(hooks.get(k, []), list)
+                                                      for k in ("SessionStart", "PreToolUse")) \
+                or any(not isinstance(g, dict) or not isinstance(g.get("hooks", []), list)
+                       or any(not isinstance(h, dict) for h in g.get("hooks", [])) for g in groups):
+            raise SystemExit(f"{c}: not a settings object with list rules; fix the file by hand, then re-run "
+                             "(nothing was written)")
     print("1. skill files")
     if DEST.exists() and DEST.resolve() == SRC:
         print(f"  already in place: {DEST}")
@@ -254,7 +418,9 @@ def main():
     wanted = [("ask", ASK, "always asked: deleting, archiving or renaming repos, visibility, default branch")]
     if not a.no_allow:
         wanted = [
-            ("allow", ALLOW + tw_allow(), "reporting calls and tw.py, so threads never stall on them"),
+            ("allow", ALLOW + tw_allow() + (edit_allow(a.project) if a.project else []),
+             "reporting calls, tw.py" + (", edits in the project and its worktrees" if a.project else "")
+             + ": ordinary work never asks"),
             ("additionalDirectories", dirs, "scratch folders and worktrees: reads and cd there never ask"),
         ] + wanted
     for n in notes:
@@ -269,6 +435,14 @@ def main():
         added = [r for r in dict.fromkeys(want) if same(r) not in known]
         have.extend(added)
         print(f"  {key}: {'adding ' + ', '.join(added) if added else 'nothing to add (already present)'}  ({why})")
+    if a.default_mode:
+        was = perms.get("defaultMode")
+        perms["defaultMode"] = a.default_mode
+        print(f"  defaultMode: {a.default_mode}" + (f" (was {was})" if was and was != a.default_mode else
+                                                     " (already set)" if was == a.default_mode else ""))
+    elif perms.get("defaultMode") not in ("auto", "bypassPermissions"):
+        print(f"  note: defaultMode is {perms.get('defaultMode') or 'not set (default)'}: new sessions, the lead "
+              "included, start there and ask more; --default-mode auto changes it (the user's decision)")
     write(USER_SETTINGS, s, a.apply)
     print(f"  also (the user, once per repo): {HOST_PROTECTION}")
 
@@ -299,7 +473,27 @@ def main():
         if a.no_auto_memory and folder == a.project:
             s["autoMemoryEnabled"] = False
             print("  autoMemoryEnabled: false")
+        # Permissions for sessions that start here (RC threads start in the served folder): always the local file,
+        # so the absolute paths and the user's choices never reach a commit. Same file as the hook's: one write.
+        pl = ps.with_name("settings.local.json")
+        if pl == ps:
+            folder_rules(pl, s, a, folder_dirs(a.project, a.served))
+            continue
         write(ps, s, a.apply)
+        if git_exposed(pl):
+            exposed2 = git_exposed(pl)
+            exclude_locally(exposed2[0], exposed2[1], [os.path.relpath(pl, exposed2[0])], a.apply)
+        folder_rules(pl, load(pl), a, folder_dirs(a.project, a.served))
+    if a.project:  # the project's existing worktrees get the same rules (tw.py worktree copies them into new ones)
+        pj = Path(a.project).expanduser().resolve()
+        wroot = pj.parent / f"{pj.name}-worktrees"
+        for wt in sorted(x for x in wroot.iterdir() if (x / ".git").exists()) if wroot.is_dir() else []:
+            pl = wt / ".claude" / "settings.local.json"
+            print(f"3.w worktree {wt.name}")
+            if git_exposed(pl):
+                ex = git_exposed(pl)
+                exclude_locally(ex[0], ex[1], [os.path.relpath(pl, ex[0])], a.apply)
+            folder_rules(pl, load(pl), a, folder_dirs(a.project, a.served))
 
     if a.pre_push:
         print("4. pre-push privacy guard")

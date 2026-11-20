@@ -27,7 +27,7 @@ Goal: redesign the order list page so status, total and the next action fit abov
 Context: spec at docs/spec.md §3; design notes in .teamwork/MEMORY.md; the api thread owns /api/orders.
 Done when: the page renders with seeded data at phone and desktop widths, screenshots saved to docs/shots/, tests pass.
 Constraints: do not change API contracts (api owns them; hand off if you need a field). Work on tw/shop/ui.
-Report: ACK now, DONE or BLOCKED when finished (DONE with the review verdict, `rounds: N`, remaining and deferred findings). End every turn with the tw-status block.
+Report: ACK now, DONE or BLOCKED when finished (DONE with the review verdict, `rounds: N`, `reviewed: <full SHA>`, remaining and deferred findings). End every turn with the tw-status block.
 ```
 
 ## FOLLOWUP: more work in an area the thread already owns

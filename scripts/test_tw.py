@@ -3206,6 +3206,17 @@ class BashGuard(unittest.TestCase):
                     "git stash list", "git worktree list", "mkdir -p /tmp/z && cd /tmp/z && git init -q"):
             self.assertIsNone(self.judge(cmd), cmd)
 
+    def test_t42_no_heredoc_inside_arithmetic_or_expansions(self):
+        """`<<` in (( )), $(( )), $[ ], ${ } is a shift or text: the next lines are commands; a quoted `)` does not
+        end $( )."""
+        HARD = self.HARD
+        for cmd in (f"(( x = 1 << 2 ))\ngit reset {HARD}\n2", f"for (( i=1<<2; i<9; i++ )); do :; done\ngit reset {HARD}\n2",
+                    f"echo ${{x:-<<EOF}}\ngit reset {HARD}\nEOF}}", f"echo $[ 1 <<2 ]\ngit reset {HARD}\n2",
+                    f'echo "$((1<<2))"\ngit reset {HARD}\n2', f"echo $(echo ')' ; git reset {HARD})",
+                    f'echo $(echo ")" ; git reset {HARD})', f"echo ${{x:-$(git reset {HARD})}}"):
+            self.assertEqual(self.judge(cmd), "ask", cmd)
+        self.assertIsNone(self.judge(f"echo $(cat <<EOF\ngit reset {HARD}\nEOF\n)\nls"))  # a real heredoc in $( )
+
     def test_t42_heredoc_delimiters_read_as_the_shell_does(self):
         HARD = self.HARD
         for cmd in (f'cat <<E"O"F\nbody\nEOF\ngit reset {HARD}', f'cat <<"EO F"\nx\nEO F\ngit reset {HARD}',

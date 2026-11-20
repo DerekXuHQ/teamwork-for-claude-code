@@ -4380,9 +4380,11 @@ def _heredoc_word(cmd, i):
     return "".join(out), i
 
 
-def _segments(cmd):
+def _segments(cmd, heredoc=True):
     """The commands in a shell line, each as an argv list: quotes kept together across lines, heredoc bodies dropped,
-    `\\`+newline joined, operators and newlines split commands, `$( )` and backtick bodies judged as commands too."""
+    `\\`+newline joined, operators and newlines split commands, `$( )` and backtick bodies judged as commands too.
+    Arithmetic (`(( ))`, `$(( ))`, `$[ ]`) and `${ }` bodies are judged with heredoc=False: `<<` there is a shift or
+    plain text, never a heredoc, so no line after it is dropped."""
     cmd, out, cur, word, i, n, heredocs = cmd[:_GUARD_MAX], [], [], None, 0, 0, []
     n = len(cmd)
 
@@ -4399,14 +4401,24 @@ def _segments(cmd):
             out.append(cur)
         cur = []
 
-    def sub_body(j, closer):  # the text of $( ... ) or ` ... ` from j, and the index after it
+    def sub_body(j, closer, opener="("):  # the text of $( ... ), ` ... `, (( ... )), ${ ... } from j; index after it
         depth, k = 1, j
         while k < n:
             c = cmd[k]
             if c == "\\":
                 k += 2
                 continue
-            if closer == ")" and c == "(":
+            if c == "'" and closer != "`":  # a quoted `)` does not close it
+                q = cmd.find("'", k + 1)
+                k = n if q < 0 else q + 1
+                continue
+            if c == '"' and closer != "`":
+                k += 1
+                while k < n and cmd[k] != '"':
+                    k += 2 if cmd[k] == "\\" else 1
+                k += 1
+                continue
+            if c == opener and closer != "`":
                 depth += 1
             elif c == closer:
                 depth -= 1
@@ -4414,6 +4426,17 @@ def _segments(cmd):
                     return cmd[j:k], k + 1
             k += 1
         return cmd[j:], n
+
+    def no_heredoc(j):  # $(( )), (( )), $[ ], ${ } at j: judge the inside, `<<` there is no heredoc
+        if cmd.startswith("$((", j) or cmd.startswith("((", j):
+            k = j + (3 if cmd[j] == "$" else 2)
+            body, k2 = sub_body(k, ")")
+            k2 = k2 + 1 if k2 < n and cmd[k2] == ")" else k2  # the second closing paren
+        else:
+            opener, closer = ("[", "]") if cmd[j + 1] == "[" else ("{", "}")
+            body, k2 = sub_body(j + 2, closer, opener)
+        out.extend(_segments(body, heredoc=False))
+        return body, k2
 
     while i < n:
         c = cmd[i]
@@ -4435,6 +4458,11 @@ def _segments(cmd):
                     buf.append(cmd[j + 1])
                     j += 2
                     continue
+                if cmd.startswith(("$((", "$[", "${"), j):
+                    body, j2 = no_heredoc(j)
+                    buf.append(cmd[j:j2])
+                    j = j2
+                    continue
                 if cmd.startswith("$(", j) or cmd[j] == "`":
                     body, j2 = sub_body(j + 2 if cmd[j] == "$" else j + 1, ")" if cmd[j] == "$" else "`")
                     out.extend(_segments(body))
@@ -4445,6 +4473,12 @@ def _segments(cmd):
                 j += 1
             word = (word or "") + "".join(buf)
             i = j + 1
+        elif cmd.startswith(("$((", "$[", "${"), i):
+            j0 = i
+            _, i = no_heredoc(i)
+            word = (word or "") + cmd[j0:i]  # kept as typed: `${HOME}` is still home to the wipe check
+        elif cmd.startswith("((", i) and word is None:  # (( arithmetic )) and for (( ...; ...; ... ))
+            _, i = no_heredoc(i)
         elif cmd.startswith("$(", i) or c == "`":
             body, i = sub_body(i + 2 if c == "$" else i + 1, ")" if c == "$" else "`")
             out.extend(_segments(body))
@@ -4472,7 +4506,7 @@ def _segments(cmd):
             if word is not None and word.isdigit():
                 word = None
             end_word()
-            if cmd.startswith("<<", i) and not cmd.startswith("<<<", i):
+            if heredoc and cmd.startswith("<<", i) and not cmd.startswith("<<<", i):
                 tag, j = _heredoc_word(cmd, i + 2 + (cmd.startswith("<<-", i)))
                 if tag:
                     heredocs.append((tag, cmd.startswith("<<-", i)))

@@ -1,9 +1,10 @@
 # Lessons from a real overnight run (2026-11-17/18)
 
 One lead session coordinated about 27 rc threads for roughly 10 hours, from a pile of planning
-documents to an app that was close to complete. Looking back afterwards, the user called the result
-very good, the way the team communicated most of all. This file collects what can be reused. Product, requirements, names
-and session ids are left out on purpose; private notes with quotes stay outside the repo.
+documents to an app that was close to complete. At 05:24 UTC on the second day the user told the
+lead its current way of working was very good and very impressive (translated), right after a round of
+corrections. This file collects what can be reused. Product, requirements, names and session
+ids are left out on purpose; private notes with quotes stay outside the repo.
 
 Method: every transcript of the run (lead, an earlier lead for the same project, all threads) was
 condensed to its messages, then read by parallel subagents: one for every user instruction to the
@@ -127,6 +128,9 @@ The one that was lost was "do it now, don't make me remind you later". Grouped:
 20. **Tool and model by task.** Judgment, planning and precision-critical writing stay with the
     strongest model and are written by hand (no generation scripts, no bulk model); bulk execution,
     tests and regression may go to another model.
+21. **Outside review on request.** When the user asks for a third-party assessment of a
+    deliverable, it comes from a fresh session or another model that did not write it, and is
+    judged by the long-board rule (strengths first, no over-rigour), not as a gate.
 
 The one request that was lost arrived in the same message as an interrupt and never became a
 ledger entry. Eight user messages were comments typed while viewing a document; they arrive wrapped
@@ -192,7 +196,8 @@ Already covered by TFCC (no change needed beyond wording): one ledger and `--use
 ownership areas and file leases; record every request before routing; language rule; ROSTER after
 creating a thread; `extra_allowed_tools` and `permission_mode`; independent review with a round
 limit; intake with do / propose / drop; capacity check before creating rc threads; "keep prompts
-rare" (scratch in `/tmp`, Edit not heredocs); "after compaction run `TW board`" for the lead;
+rare" (non-private scratch in `/tmp`, private scratch in `.teamwork/private/<thread>/tmp/`, Edit
+not heredocs); "after compaction run `TW board`" for the lead;
 the protocol goes into `append_system_prompt` from `TW worker-prompt` (the run deviated from this,
 see IL-19); "who works where" (the lead does not use its own subagents for work, threads are
 created with `create_session`); "never wait silently" and "do not repeat settled things" in the
@@ -210,7 +215,7 @@ Numbered for reference (IL = item from this lessons list); files are relative to
 - **IL-1 No blocking questions in the lead.** `SKILL.md` "Keep the user in one chat" + Rules: the
   lead never uses a tool that blocks its turn for an answer (e.g. `AskUserQuestion`); it asks in
   chat with a recommendation and a default, keeps sweeping and merging, and applies the default
-  after a stated deadline (`prefs default_after_minutes`, e.g. 30), noting it as revisable. The
+  after a stated deadline (a new pref `default_after_minutes`, e.g. 30), noting it as revisable. The
   timeout never applies to approval-gated, irreversible or outward steps ("Approvals happen here"),
   the user's own decisions, plan approval, or anything that needs `--user-said`: those wait, and
   the lead keeps working around them. Write
@@ -231,9 +236,17 @@ Numbered for reference (IL = item from this lessons list); files are relative to
 - **IL-5 Pre-queue sequences.** `references/messages.md` TASK + `SKILL.md` §3 + `scripts/tw.py`:
   chain one owner's tasks with the existing `task add --deps` and say in the first TASK "then T62,
   then T65; do not stop to wait for me", with priority and resource rules. Today `task set --status
-  dispatched` refuses a task whose deps are open (and the SKILL ledger table says the same), so
-  either the later tasks stay `approved` on the board and are only announced in the TASK body, or
-  add an explicit exception: a same-owner chain may be dispatched together.
+  dispatched` refuses a task whose deps are open (and the SKILL ledger table says the same).
+  Chosen route: keep that hard rule and change no code. The later tasks stay `approved` on the
+  board and are only announced in the first TASK body; an `approved` task holds no file lease, so
+  when T61 is done the lead (or its next sweep) marks T62 dispatched and sends a one-line "T62
+  starts now"; the thread does not wait for that line. Because leases count only dispatched,
+  working, blocked and review tasks, the first task's `--touches` lists the paths of the whole
+  chain, so no other thread gets overlapping files while the later tasks are still `approved`.
+  The later tasks build on the first task's branch (the same thread branch), and the first task
+  is merged before the next one's DONE is merged. Not chosen: a same-owner exception that
+  dispatches the chain together; if core ever adds it, it relaxes only the dependency check, never plan approval
+  or task approval.
 - **IL-6 Unblocking slice first.** `references/messages.md` TASK rules: when others wait on this task,
   name them and ask for the slice they need first, committed separately, with an UPDATE.
 
@@ -267,12 +280,13 @@ Numbered for reference (IL = item from this lessons list); files are relative to
   that prints a phone-readable summary (first the target deliverables: name → status → link; then
   the user's requests → status → where the result is); the lead keeps it as a document or artifact
   visible only in the user's own account, updates it on each report, not only `BOARD.md` on disk.
-  The same as for IL-14: sharing it with anyone else or making it public stays an approval step
-  ("Approvals happen here").
+  Sharing follows IL-14.
 - **IL-14 Deliverables as openable links.** `SKILL.md` "Report results": every user-facing
   deliverable is reported as a link that renders on a phone, with a status line (draft / final,
-  what is missing); keep an index of outputs in delivery order. The link is private to the user's
-  account unless the user asks to share it.
+  what is missing); keep an index of outputs in delivery order. By default every such link (and
+  the board of IL-13) is visible only in the user's own account. Sharing it with anyone else or
+  making it public is an approval step ("Approvals happen here"): the lead asks in its chat and
+  does it itself; a thread never shares or publishes a document on its own.
 - **IL-15 Interrupted and document-view input.** `SKILL.md` §4: after an interrupt, re-read the
   user's last message and record every ask in it; comments the user types while viewing a document
   arrive in a context block and are user messages too.
@@ -286,14 +300,16 @@ Numbered for reference (IL = item from this lessons list); files are relative to
   one recommendation, one-word answer; for decisions the user owns, give the complete list or a
   side-by-side comparison with the recommendation; non-core topics stay at plan level; disagree
   with reasons when the user's framing is wrong; repeat open questions once per report at most, and
-  send no report that has nothing for the user.
+  fold a progress report that has nothing new and nothing for the user to do into the next real
+  one (DONE, BLOCKED, questions and answers to the user still go out at once).
 
 **Threads**
 
 - **IL-18 Re-read after compaction.** `templates/worker-protocol.md`: after a context summary,
   re-read this protocol's header, language and STATUS sections before the next message. The
   SessionStart hook already runs `TW context` (board, instructions, memory); extend `TW context` to
-  repeat the header format and the language line, and confirm the hook also fires after a compact.
+  repeat the header format and the language line (the hook already fires after compaction,
+  `references/setup.md` §3, so no new hook is needed).
   Same for the lead (`SKILL.md` Rules: language and header too).
 - **IL-19 Keep the protocol in the session.** `SKILL.md` §3 already says `append_system_prompt` is
   the output of `TW worker-prompt`; the run deviated by passing a pointer to a file under `/tmp`.
@@ -313,7 +329,11 @@ Numbered for reference (IL = item from this lessons list); files are relative to
   default); DONE says "processes closed".
 - **IL-24 Command shapes that trigger guards.** `templates/worker-protocol.md` + `references/setup.md`:
   list the commands to avoid (recursive force delete, `reset --hard`, `clean -f`, branch force delete)
-  and the safe alternative (`mktemp -d`, leave temp dirs); copy the list into subagent briefs. The lead
+  and the safe alternative: non-private scratch under `/tmp` (`references/setup.md` §2 notes that
+  creating it with `mktemp -d` still asks in `default` mode; Edit or Write avoids the shell-shape
+  prompts but can still ask in `default` mode too, so threads run in `auto` or `acceptEdits`), private scratch in `<project folder>/.teamwork/private/<thread>/tmp/` (the rule the
+  protocol already has); remove named files instead of a recursive force delete, or leave the
+  dir. Copy the list into subagent briefs. The lead
   never edits the user's plugins or hooks to silence prompts; it proposes an allow rule instead.
 - **IL-25 Don't announce what isn't merged.** `SKILL.md` §7: a rule that relies on a script or
   command is broadcast only after that script is on the base.
@@ -329,19 +349,33 @@ Numbered for reference (IL = item from this lessons list); files are relative to
   named owner in `owns`.
 - **IL-29 One topic per thread, checked on every route.** `SKILL.md` §4: before giving new work to an
   existing thread, check its topic matches the thread's focus; a new topic gets a new thread.
-- **IL-30 Standing grants.** `SKILL.md` §3 capacity, §6 (last rule) and §8 all forbid the lead to
-  archive on its own; change all three to allow a standing grant. Generalise it as
-  `prefs standing_grants=archive,schedule,merge`, each set once with `--user-said`: archive threads
+- **IL-30 Standing grants.** Five places in `SKILL.md` keep archiving with the user: §2.3 ("ask the
+  user what to archive" when seats are full), §3 capacity ("do not archive anything yourself"), §6
+  reseat step 5 ("archive the old session only if the user asks"), §6 last rule ("Never archive,
+  delete, or force anything in a thread without the user's explicit OK") and §8. Change all five to
+  allow a standing grant for archiving only; the §6 rule becomes "Never delete or force anything
+  in a thread without the user's explicit OK; archive only with the user's explicit OK or under
+  the standing grant". Generalise it as a new pref `standing_grants=archive,schedule,merge`;
+  `scripts/tw.py prefs` requires `--user-said` to set any grant (today it requires it only for
+  turning review off or lowering rounds): archive threads
   whose work is merged, choose when low-priority work runs, merge per IL-2; report each use.
-- **IL-31 Model and method per task.** `scripts/tw.py thread add --model` sets a thread default;
-  `task add --model <m> --no-scripts` overrides it per task; the TASK template (IL-7) gains a
+- **IL-31 Model and method per task.** New in `scripts/tw.py`: `thread add --model` sets a thread
+  default; `task add --model <m> --no-scripts` overrides it per task; the TASK template (IL-7) gains a
   "Model / method" line. Judgment and precision-critical writing stay with the strongest model,
   written by hand; bulk execution and regression may go elsewhere. `create_session` passes `model`
   when set.
 - **IL-32 Review depth by phase.** `SKILL.md` §7: `review_max_rounds` is already a standing
   preference; add a standing user decision for review depth per phase (deep for documents that go
   to outside parties, one round for scaffolding, none for mechanical edits), recorded once with
-  `--user-said`, instead of per-task `--skip-review`.
+  `--user-said`, instead of per-task `--skip-review`. The review gate in `scripts/tw.py`
+  (`task set --status done` checks `require_review`, `--review` and `--accept`) must read that
+  decision, so a task in a "none" phase passes without `--skip-review` and one in a "one round"
+  phase passes after one round. The lead never picks a task's phase on its own: phases are set
+  with the plan at `plan approve --user-said`. A task added later with `task add` (it is
+  `approved` at once, with no user step) gets the deepest phase by default; putting it, or any
+  task, in a lighter phase needs `--user-said`, and `scripts/tw.py` refuses it otherwise, like
+  lowering `review_max_rounds` does today. A "none" task still needs a recorded `--checks pass`
+  (today the gate only blocks `checks == "fail"`) and an `--accept` line.
 
 **Intake and setup**
 
@@ -367,3 +401,10 @@ Numbered for reference (IL = item from this lessons list); files are relative to
 - **IL-38 Complete requirement list.** `SKILL.md` §5.9 + `TW board --share` (IL-13): the user's
   view can list every requirement, goal and constraint by phase and category, so the user can
   strike out what is stale.
+- **IL-39 Outside review on request.** `SKILL.md` §7: when the user asks for a third-party
+  assessment, the lead has it done by a fresh session or a different model with no part in the
+  work (the user's model choice per IL-31), reports it with the long-board reading (what to push
+  further, which gaps are acceptable), and does not treat it as a merge gate unless the user says so.
+  Sending material to an outside model or service stays an approval step ("Approvals happen
+  here"): the lead states in its own chat what it would send and to which service, and sends only
+  after the user's OK there; a request relayed by a thread is confirmed in the lead's chat first.

@@ -591,6 +591,7 @@ def cmd_init(a):
             "thread_permission_mode": THREAD_MODE_DEFAULT,  # create_session permission_mode for every thread
             "standing_grants": [],  # archive, schedule, merge: the user allowed these once (IL-30), each by --user-said
             "check_cmd": "",  # the project's checks, run by `merge` on the rehearsed merge
+            "default_after_minutes": 30,  # IL-1: an unanswered non-gated question takes its stated default after this
         },
     }
     if not (d / "INSTRUCTIONS.md").exists():
@@ -604,7 +605,8 @@ def cmd_init(a):
         (d / "MEMORY.md").write_text(
             f"# {a.project}: project memory\n\n"
             "Facts, decisions and conventions every thread must respect. Only the lead edits this file;\n"
-            "threads propose additions with a MEMORY message. Keep it short: it is pasted into every new thread.\n\n",
+            "threads propose additions with a MEMORY message. Keep it short: it is pasted into every new thread.\n\n"
+            + "".join(f"{h}\n\n" for h in MEMORY_SECTIONS.values()),
             encoding="utf-8",
         )
     gi = d / ".gitignore"
@@ -654,7 +656,9 @@ def cmd_lead(a):
         st["repo"]["base"] = a.base
     save(d, st, {"ev": "lead", "session": a.session, "envs": st["envs"],
                  **({"mode": a.mode} if a.mode else {})})
-    out = {"lead": st["lead"], "envs": st["envs"], "repo": st["repo"], "thread_permission_mode": thread_mode(st)}
+    out = {"lead": st["lead"], "envs": st["envs"], "repo": st["repo"], "thread_permission_mode": thread_mode(st),
+           "title": f"[{tag(st)}] lead", "tags": [f"teamwork:{tag(st)}", "teamwork-thread:lead"],
+           "set_up": "set_session_title and set_session_tags on your own session with these (IL-34)"}
     w = permission_warning(st)
     if w:
         out["permission_warning"] = w
@@ -1786,6 +1790,31 @@ def _suggest_name(text):
 def cmd_route(a):
     d = need(find_dir())
     st = load(d)
+    if a.path:
+        if a.text.strip():
+            sys.exit("route takes the request text or --path, not both")
+        roots = [d.parent.resolve()] + [Path(t.get("worktree") or worktree_path(st, n)).resolve()
+                                        for n, t in st["threads"].items()]
+        out = {}
+        for f in a.path:
+            rel = f
+            if os.path.isabs(f):  # QA reports give absolute paths: make them relative to the project or a worktree
+                fp = Path(f).resolve()
+                for r in roots:
+                    if r == fp or r in fp.parents:
+                        rel = str(fp.relative_to(r))
+                        break
+            rf = RealFile(_norm_path(rel))
+            hit = [n for n, t in st["threads"].items() if t["status"] != "archived" and (
+                any(paths_overlap(rf, o) for o in t.get("owns", []) if o) or
+                any(paths_overlap(rf, x) for k in st["tasks"].values() if k.get("owner") == n
+                    and k.get("status") in LEASE_ACTIVE for x in k.get("touches") or []))]
+            out[f] = hit or None
+        print(json.dumps({"owners": out, "note": "from owns and active task leases; none = nobody owns it yet"},
+                         ensure_ascii=False))
+        return
+    if not a.text.strip():
+        sys.exit("route needs the request text, or --path <file>")
     text = a.text.lower()
     words = _tokens(text)
     scores = []
@@ -1859,11 +1888,51 @@ def cmd_ask(a):
     print(render_board(st))
 
 
+MEMORY_SECTIONS = {
+    "never_raise": "## Never raise (topics the user ruled out: never bring them up again, side notes included)",
+    "user_owned": "## User-owned (the user provides or decides these: never plan, ask or remind about them)",
+}
+
+
+def _memory_section(text, key):
+    """Where a special section's heading starts (matched by its first words, so a hand-edited heading counts)."""
+    word = MEMORY_SECTIONS[key].split(" (")[0]  # "## Never raise"
+    m = re.search(r"(?mi)^" + re.escape(word) + r"\b.*$", text)
+    return m.start() if m else None
+
+
 def cmd_memory(a):
     d = need(find_dir())
-    with open(d / "MEMORY.md", "a", encoding="utf-8") as f:
-        f.write(f"- {a.text}  _(added {now()[:10]})_\n")
-    log(d, {"ev": "memory", "text": a.text})
+    if a.never_raise and a.user_owned:
+        sys.exit("--never-raise or --user-owned, not both")
+    a.text = " ".join(a.text.split())  # one line: a newline could start a heading of its own
+    which = "never_raise" if a.never_raise else "user_owned" if a.user_owned else None
+    mark = " _(temporary: confirm with the user before enforcing it later)_" if a.temporary else ""
+    line = f"- {a.text}{mark}  _(added {now()[:10]})_\n"
+    path = d / "MEMORY.md"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    starts = {k: _memory_section(text, k) for k in MEMORY_SECTIONS}
+    if which:
+        if starts[which] is None:
+            other = starts["user_owned"] if which == "never_raise" else None  # Never raise comes first
+            block = f"{MEMORY_SECTIONS[which]}\n\n"
+            text = (text[:other] + block + text[other:]) if other is not None else \
+                text.rstrip("\n") + "\n\n" + block.rstrip("\n") + "\n"
+            starts = {k: _memory_section(text, k) for k in MEMORY_SECTIONS}
+        i = text.index("\n", starts[which]) if "\n" in text[starts[which]:] else len(text)
+        nxt = text.find("\n## ", i)
+        end = len(text) if nxt < 0 else nxt + 1
+        body = text[i:end].rstrip("\n")
+        text = text[:i] + body + "\n" + ("\n" if not body.strip() else "") + line + ("\n" if nxt >= 0 else "") \
+            + text[end:]
+    else:  # facts stay above the special sections
+        at = min([x for x in starts.values() if x is not None] or [len(text)])
+        before = text[:at].rstrip("\n")
+        last = before.rsplit("\n", 1)[-1]
+        text = before + ("\n" if last.startswith("- ") else "\n\n") + line + ("\n" + text[at:] if at < len(text) else "")
+    path.write_text(text, encoding="utf-8")
+    log(d, {"ev": "memory", "text": a.text, **({"section": which} if which else {}),
+            **({"temporary": True} if a.temporary else {})})
     print(read_file(d, "MEMORY.md"))
 
 
@@ -1921,6 +1990,8 @@ def cmd_prefs(a):
                 sys.exit("require_review must be true or false")
             if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
                 sys.exit("turning the review gate off is the user's decision: add --user-said \"<their words>\"")
+        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes") and not re.fullmatch(r"[0-9]+", v):
+            sys.exit(f"{k}: a whole number of minutes")
         cur = st["prefs"].get(k)
         if k in ("check_cmd", "language", "short_name", "thread_permission_mode"):
             st["prefs"][k] = v  # text, never coerced (check_cmd=true is a command)
@@ -4258,7 +4329,9 @@ def main():
         "ready", help="approved tasks whose deps are done, and free slots"
     ).set_defaults(f=cmd_ready)
     x = s.add_parser("route", help="keyword hint: which thread owns this request?")
-    x.add_argument("text")
+    x.add_argument("text", nargs="?", default="")
+    x.add_argument("--path", action="append", help="a file: which thread owns it (owns globs and active task "
+                   "leases); repeat for several (IL-22: QA reports name the owner)")
     x.set_defaults(f=cmd_route)
     x = s.add_parser("ask", help="record a question waiting on the user, or --answer N")
     x.add_argument("text", nargs="?", default="")
@@ -4270,6 +4343,9 @@ def main():
     x.set_defaults(f=cmd_ask)
     x = s.add_parser("memory", help="append a project memory line")
     x.add_argument("text")
+    x.add_argument("--never-raise", action="store_true", help="a topic the user ruled out (IL-16)")
+    x.add_argument("--user-owned", action="store_true", help="something the user provides or decides (IL-16)")
+    x.add_argument("--temporary", action="store_true", help="a rule for now: confirm before enforcing it later (IL-36)")
     x.set_defaults(f=cmd_memory)
     x = s.add_parser("log", help="append a note to log.jsonl")
     x.add_argument("text")

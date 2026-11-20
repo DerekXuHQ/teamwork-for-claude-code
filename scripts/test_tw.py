@@ -138,6 +138,83 @@ class RouteByTopic(TwCase):
         self.assertNotIn("topic_mismatch", r.stderr)
 
 
+class LessonsCommands(TwCase):
+    """T39: the small commands behind IL-1, IL-16, IL-22, IL-34 and IL-36."""
+
+    def test_memory_sections_and_temporary(self):
+        self.tw("memory", "fact one")
+        self.tw("memory", "--never-raise", "pricing tiers")
+        self.tw("memory", "fact two", "--temporary")
+        self.tw("memory", "--user-owned", "brand name")
+        self.tw("memory", "--never-raise", "dark mode")
+        text = (self.dir / ".teamwork" / "MEMORY.md").read_text(encoding="utf-8")
+        nr, uo = text.index("## Never raise"), text.index("## User-owned")
+        self.assertLess(text.index("fact one"), nr)
+        self.assertLess(text.index("fact two"), nr)  # facts stay above the special sections
+        self.assertIn("temporary: confirm", text[text.index("fact two"):nr])
+        self.assertTrue(nr < text.index("pricing tiers") < text.index("dark mode") < uo < text.index("brand name"))
+        self.assertIn("pricing tiers", self.context())  # pasted into every new thread
+
+    def test_memory_section_added_to_an_old_file(self):
+        (self.dir / ".teamwork" / "MEMORY.md").write_text("# old\n\n- a\n", encoding="utf-8")
+        self.tw("memory", "--user-owned", "logo")
+        self.tw("memory", "b")
+        lines = (self.dir / ".teamwork" / "MEMORY.md").read_text(encoding="utf-8").split("\n")
+        self.assertEqual(lines[:3], ["# old", "", "- a"])
+        self.assertTrue(lines[3].startswith("- b "), lines)
+        self.assertTrue(lines[5].startswith("## User-owned"), lines)
+
+    def test_memory_hand_edited_heading_newlines_and_order(self):
+        mem = self.dir / ".teamwork" / "MEMORY.md"
+        mem.write_text("# m\n\n- a\n\n## never raise\n\n- old topic\n\n## Decisions\n\n- d1\n", encoding="utf-8")
+        self.tw("memory", "--never-raise", "n2")
+        self.tw("memory", "line1\n## User-owned (x)\ninjected")
+        text = mem.read_text(encoding="utf-8")
+        self.assertEqual(text.lower().count("## never raise"), 1)  # matched by its first words
+        self.assertLess(text.index("old topic"), text.index("n2"))
+        self.assertLess(text.index("n2"), text.index("## Decisions"))
+        self.assertNotIn("\n## User-owned (x)", text)  # one line: no injected heading
+        self.assertIn("- line1 ## User-owned (x) injected", text)
+        mem.write_text("# m\n", encoding="utf-8")
+        self.tw("memory", "--user-owned", "u1")
+        self.tw("memory", "--never-raise", "n1")
+        text = mem.read_text(encoding="utf-8")
+        self.assertLess(text.index("## Never raise"), text.index("## User-owned"))  # fixed order
+        self.assertNotEqual(self.tw("memory", "x", "--never-raise", "--user-owned", ok=False).returncode, 0)
+
+    def test_lead_prints_its_title_and_tags(self):
+        out = json.loads(self.tw("lead", "--session", "session_0quixbar").stdout)
+        short = self.state()["prefs"]["short_name"]
+        self.assertEqual((out["title"], out["tags"]), (f"[{short}] lead", [f"teamwork:{short}", "teamwork-thread:lead"]))
+
+    def test_route_path_names_the_owner(self):
+        self.tw("thread", "add", "web", "--owns", "web/**")
+        self.tw("thread", "add", "api", "--owns", "api/")
+        self.tw("thread", "add", "data")
+        self.tw("task", "add", "T1", "--title", "migrations", "--owner", "data", "--touches", "db/migrations/**")
+        out = json.loads(self.tw("route", "--path", "web/a.ts", "--path", "api/x/y.py", "--path", "db/migrations/1.sql",
+                                 "--path", "README.md").stdout)["owners"]
+        self.assertEqual(out["web/a.ts"], ["web"])
+        self.assertEqual(out["api/x/y.py"], ["api"])
+        self.assertIsNone(out["db/migrations/1.sql"])  # T1 is not active yet: an approved task holds no lease
+        self.assertIsNone(out["README.md"])
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        out = json.loads(self.tw("route", "--path", "db/migrations/1.sql").stdout)["owners"]
+        self.assertEqual(out["db/migrations/1.sql"], ["data"])
+        self.assertNotEqual(self.tw("route", ok=False).returncode, 0)
+        out = json.loads(self.tw("route", "--path", str(self.dir.resolve() / "web" / "a.ts")).stdout)["owners"]
+        self.assertEqual(list(out.values()), [["web"]])  # absolute path inside the project
+        self.assertNotEqual(self.tw("route", "fix the page", "--path", "web/a.ts", ok=False).returncode, 0)
+        self.tw("thread", "set", "web", "--status", "archived")
+        self.assertIsNone(json.loads(self.tw("route", "--path", "web/a.ts").stdout)["owners"]["web/a.ts"])
+
+    def test_default_after_minutes_pref(self):
+        self.assertEqual(self.state()["prefs"]["default_after_minutes"], 30)
+        self.assertNotEqual(self.tw("prefs", "--set", "default_after_minutes=abc", ok=False).returncode, 0)
+        self.tw("prefs", "--set", "default_after_minutes=45")
+        self.assertEqual(self.state()["prefs"]["default_after_minutes"], 45)
+
+
 class Language(TwCase):
     def setUp(self):
         super().setUp()

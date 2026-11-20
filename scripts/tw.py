@@ -143,13 +143,13 @@ def render_requests(st):
     reqs.sort(key=lambda x: (order.get(x[1]["status"], 9), int(x[0][1:]) if x[0][1:].isdigit() else 0))
     out = []
     for r, q in reqs:
-        line = f"- **{r}** [{lab(st, 'req_' + q['status'])}] {q['text']}"
-        extra = [", ".join(q.get("tasks") or []), q.get("where") or ""]
+        line = f"- **{r}** [{lab(st, 'req_' + q['status'])}] {_md(q['text'])}"  # user text: never struck or bolded
+        extra = [", ".join(q.get("tasks") or []), _where(q.get("where")) if q.get("where") else ""]
         extra = " · ".join(x for x in extra if x)
         if extra:
             line += f" — {extra}"
         if q.get("followup"):
-            line += f" — {lab(st, 'followup')}: {q['followup']}"
+            line += f" — {lab(st, 'followup')}: {_md(q['followup'])}"
         out.append(line)
     return "\n".join(out)
 
@@ -557,7 +557,7 @@ def render_board(st):
     ]
     if open_q:
         out += ["", f"## {lab(st, 'questions')}", ""] + [
-            f"- [{i + 1}] ({q['from']}) {q['text']}" for i, q in open_q
+            f"- [{i + 1}] ({q['from']}) {_md(q['text'])}" for i, q in open_q
         ]
     w = merge_waiting(st)
     if w:
@@ -683,6 +683,7 @@ def cmd_init(a):
             "thread_permission_mode": THREAD_MODE_DEFAULT,  # create_session permission_mode for every thread
             "standing_grants": [],  # archive, schedule, merge: the user allowed these once (IL-30), each by --user-said
             "check_cmd": "",  # the project's checks, run by `merge` on the rehearsed merge
+            "check_timeout_minutes": 60,  # merge stops checks that run longer (the whole process group); 0 = no limit
             "default_after_minutes": 30,  # IL-1: an unanswered non-gated question takes its stated default after this
         },
     }
@@ -1916,16 +1917,18 @@ _ZH_STOP = re.compile("我们|你们|他们|这个|那个|这些|那些|一个|�
 
 
 def _stem(w):
-    """Plural to singular, roughly and the same on both sides: guides, statuses, processes, analyses."""
-    if len(w) <= 3 or not w.endswith("s") or w.endswith(("ss", "us", "is")):
-        return w
-    if w.endswith("yses"):  # analyses
+    """One form for the singular and the plural, the same on both sides (not always a real word): house/houses ->
+    hous, bus/buses -> bus, policy/policies -> policy, status/statuses -> status, analysis/analyses -> analysis."""
+    if len(w) > 4 and w.endswith("yses"):  # analyses
         return w[:-3] + "sis"
-    if w.endswith(("uses", "sses")) and len(w) > 5:  # statuses, processes (not databases, uses)
-        return w[:-2]
-    if w.endswith(("xes", "shes", "ches")):
-        return w[:-2]
-    return w[:-1]
+    if len(w) > 4 and w.endswith("ies") and not w.endswith(("kies", "vies")):  # policies (not cookies, movies)
+        return w[:-3] + "y"
+    if len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is", "vas", "ias", "gas")):  # canvas, alias, gas stay
+        cut = w[:-2] if w.endswith("es") else ""  # boxes, buses, statuses, matches; frees, uses keep their e
+        w = cut if len(cut) > 2 and cut.endswith(("s", "x", "z", "ch", "sh")) else w[:-1]
+    if len(w) > 3 and w.endswith("e") and not w.endswith(("ee", "ie")):
+        w = w[:-1]  # house and houses meet at hous; free, tie stay
+    return w
 
 
 def _tokens(s, stop=True):
@@ -2000,8 +2003,10 @@ def cmd_route(a):
         if t["status"] == "archived":
             continue
         keys = [name, t.get("focus", "")] + t.get("owns", [])
-        keys += [k["title"] for k in st["tasks"].values() if k.get("owner") == name]
-        s = 0
+        topic = _thread_topic(t, name)
+        s = min(2, sum(  # its tasks count a little (2 at most), only on its topic: a task routed there by mistake
+            min(1, len(words & _tokens(k.get("title") or "") & topic))  # does not pull more of the same
+            for k in st["tasks"].values() if k.get("owner") == name and k["status"] != "dropped"))
         for key in keys:
             key = key.lower().strip()
             if not key:
@@ -2160,6 +2165,9 @@ def cmd_issue(a):
                 sys.exit(f"status: one of {', '.join(ISSUE_STATUSES)}")
             if a.status == "fixed-on-branch" and not (a.ref or i.get("ref") if a.ref is None else a.ref):
                 sys.exit("fixed-on-branch needs --ref <branch>@<commit>: QA tests only what is merged")
+            if a.status == "merged" and not (i.get("ref") if a.ref is None else a.ref):
+                sys.exit("merged needs --ref <base>@<commit> (or the fix's ref from fixed-on-branch): QA tests that "
+                         "commit, not whatever is on the base now")
             if a.status == "verified" and i["status"] != "merged":
                 sys.exit(f"{i['id']} is {i['status']}: QA verifies only a merged fix (set it to merged first)")
             if a.status == "open":
@@ -2244,7 +2252,7 @@ def cmd_prefs(a):
                 sys.exit("require_review must be true or false")
             if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
                 sys.exit("turning the review gate off is the user's decision: add --user-said \"<their words>\"")
-        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes") and not re.fullmatch(r"[0-9]+", v):
+        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes") and not re.fullmatch(r"[0-9]+", v):
             sys.exit(f"{k}: a whole number of minutes")
         cur = st["prefs"].get(k)
         if k in ("check_cmd", "language", "short_name", "thread_permission_mode"):
@@ -4047,10 +4055,14 @@ def _base_holder(git, base):
         lines = dict((ln.split(" ", 1) + [""])[:2] for ln in blk.splitlines() if ln.strip())
         if not lines.get("worktree"):
             continue
+        if "prunable" in lines:  # its folder is gone: nobody works there (merge prunes it before the checks)
+            continue
         w = Path(lines["worktree"])
         if lines.get("branch") == f"refs/heads/{base}":
             return w, lines.get("HEAD", "")
         gd = git("rev-parse", "--absolute-git-dir", cwd=w).stdout.strip()
+        if not gd:
+            continue  # not readable: never fall back to a path relative to the current folder
         for f in ("rebase-merge/head-name", "rebase-apply/head-name", "BISECT_START"):
             try:
                 if Path(gd, f).read_text().strip() in (f"refs/heads/{base}", base):
@@ -4060,6 +4072,26 @@ def _base_holder(git, base):
     return None, None
 
 
+def _in_the_way(git, checkout, old, new):
+    """Local untracked or ignored files the fast-forward old -> new would overwrite or delete in checkout: the same
+    path, a local file where the merge adds a folder (`cfg` vs `cfg/a`), or local files inside a path the merge
+    turns into a file (`bld/x` vs `bld`). Ignored files count: a local .env must not vanish silently."""
+    root = git("rev-parse", "--show-toplevel", cwd=checkout).stdout.strip()
+    if not root:
+        return []
+    z = lambda r: {x for x in r.stdout.split("\0") if x}  # -z: paths as they are, not quoted (non-ASCII names)
+    changed = z(git("diff", "-z", "--name-only", "--no-renames", old, new))
+    dirs = {"/".join(c.split("/")[:i]) for c in changed for i in range(1, c.count("/") + 1)}
+    local = z(git("ls-files", "-z", "--others", "--exclude-standard", cwd=root))
+    local |= z(git("ls-files", "-z", "--others", "--ignored", "--exclude-standard", cwd=root))
+    hit = set()
+    for u in local:
+        up = u.rstrip("/").split("/")
+        if u in changed or u.rstrip("/") in dirs or any("/".join(up[:i]) in changed for i in range(1, len(up))):
+            hit.add(u)
+    return sorted(hit)
+
+
 def cmd_merge(a):
     """Rehearse a merge of the reviewed commit into the base in a throwaway worktree, run the checks there, and only
     with --apply fast-forward the base. The live checkout is never left half-merged: a conflict, a red check, or a
@@ -4067,6 +4099,7 @@ def cmd_merge(a):
     import shutil
     import signal
     import tempfile
+    import time
     d = need(find_dir())
     st = load(d)
     proj = Path(st.get("repo", {}).get("path") or ".")
@@ -4118,7 +4151,7 @@ def cmd_merge(a):
         res["note"] = f"{sha[:9]} is already in {base}: nothing to merge"
         print(json.dumps(res, ensure_ascii=False))
         return
-    holder, held_at = _base_holder(git, base)
+    holder, _ = _base_holder(git, base)
     if a.apply and holder and git("status", "--porcelain", "--untracked-files=no", cwd=holder).stdout.strip():
         sys.exit(f"{holder} has uncommitted changes on {base}: commit or move them first")
     pre = git("merge-tree", "--write-tree", "--name-only", "--no-messages", old, sha)
@@ -4132,7 +4165,15 @@ def cmd_merge(a):
             try:
                 os.kill(int((Path(w).parent / "pid").read_text()), 0)
                 continue  # another merge is running
+            except PermissionError:
+                continue  # alive, run by another user: theirs to clean up
             except (OSError, ValueError):
+                pidfile = Path(w).parent / "pid"
+                try:  # no pid file (an older tw.py, or one killed before writing it): only once it is an hour old
+                    if not pidfile.exists() and time.time() - Path(w).parent.stat().st_mtime < 3600:
+                        continue
+                except OSError:
+                    pass
                 git("worktree", "remove", "--force", w)
                 shutil.rmtree(Path(w).parent, ignore_errors=True)
     git("worktree", "prune")
@@ -4169,22 +4210,42 @@ def cmd_merge(a):
         new = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
         res["merged"] = new
         if a.apply and holder:  # untracked files the fast-forward would overwrite: say so before the checks run
-            changed = set(git("diff", "--name-only", old, new).stdout.splitlines())
-            pre_root = git("rev-parse", "--show-toplevel", cwd=holder).stdout.strip()
-            untracked = set(git("ls-files", "--others", "--exclude-standard", cwd=pre_root).stdout.splitlines())
-            untracked |= set(git("ls-files", "--others", "--ignored", "--exclude-standard", cwd=pre_root)
-                             .stdout.splitlines())  # ignored local files (.env) would be overwritten silently
-            if changed & untracked:
-                res["untracked_in_the_way"] = sorted(changed & untracked)
+            in_way = _in_the_way(git, holder, old, new)
+            if in_way:
+                res["untracked_in_the_way"] = in_way
                 print(json.dumps(res, ensure_ascii=False))
                 sys.exit(f"untracked files in {holder} would be overwritten by the merge: move them, then run "
                          "merge again; nothing changed")
         if test.strip():
             env = {k: v for k, v in os.environ.items() if k != "TEAMWORK_DIR"}  # checks never touch the live ledger
-            pr = subprocess.Popen(test, shell=True, cwd=str(wt / sub), stdout=subprocess.PIPE,
+            try:
+                limit = float(st.get("prefs", {}).get("check_timeout_minutes", 60) or 0)
+            except (TypeError, ValueError):
+                limit = 60.0  # a hand-edited ledger: the default, never no limit by accident
+            if limit != limit or limit in (float("inf"), float("-inf")) or limit < 0:
+                limit = 60.0  # nan, inf, negative
+            pr = subprocess.Popen(test, shell=True, cwd=str(wt / sub), stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
                                   stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
             try:
-                out, _ = pr.communicate()
+                out, _ = pr.communicate(timeout=limit * 60 if limit > 0 else None)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(pr.pid, signal.SIGKILL) if hasattr(os, "killpg") else pr.kill()
+                except OSError:
+                    pass
+                try:
+                    out, _ = pr.communicate(timeout=10)
+                except subprocess.TimeoutExpired:  # a detached grandchild still holds the output pipe
+                    out = "(output not read: a process the check detached still holds it)"
+                    pr.kill()
+                    pr.wait()
+                    if pr.stdout:
+                        pr.stdout.close()
+                res["checks"] = "fail"
+                res["check_output"] = (out or "")[-2000:]
+                print(json.dumps(res, ensure_ascii=False))
+                sys.exit(f"checks ran over {limit:g} minutes on the rehearsed merge ({test}) and were stopped: nothing "
+                         "changed (prefs check_timeout_minutes sets the limit; 0 = none)")
             except BaseException:  # stopped: take the whole check down with us, grandchildren included
                 try:
                     os.killpg(pr.pid, signal.SIGKILL) if hasattr(os, "killpg") else pr.kill()
@@ -4224,6 +4285,9 @@ def cmd_merge(a):
                 moved = f"{now} is no longer on {base} at {old[:9]} (rebase or checkout in progress?)"
             elif git("status", "--porcelain", "--untracked-files=no", cwd=now).stdout.strip():
                 moved = f"{now} got uncommitted changes on {base} meanwhile"
+            elif (late := _in_the_way(git, now, old, new)):
+                res["untracked_in_the_way"] = late
+                moved = f"untracked or ignored files in {now} that the merge would overwrite appeared meanwhile"
         if moved:
             res["refused"] = moved
             print(json.dumps(res, ensure_ascii=False))
@@ -4236,6 +4300,21 @@ def cmd_merge(a):
             res["refused"] = (r.stderr or r.stdout).strip()[:300]
             print(json.dumps(res, ensure_ascii=False))
             sys.exit(f"fast-forward of {base} failed ({res['refused'][:200]}); {base} is unchanged")
+        after = git("rev-parse", "--verify", "--quiet", f"refs/heads/{base}^{{commit}}").stdout.strip()
+        if after != new and git("merge-base", "--is-ancestor", new, after).returncode == 0:
+            res["note"] = f"{base} moved on to {after[:9]} right after the fast-forward (it contains the merge)"
+        elif after != new:  # the checkout switched branches in the last instant: the fast-forward went elsewhere
+            moved_to = git("symbolic-ref", "-q", "--short", "HEAD", cwd=now).stdout.strip() if now else ""
+            res["refused"] = f"{base} is at {after[:9]}, not {new[:9]}, after the fast-forward"
+            log(d, {"ev": "merge-misfired", "branch": a.branch, "sha": sha, "base": base, "to": new,
+                    "checkout_branch": moved_to})
+            print(json.dumps(res, ensure_ascii=False))
+            if not now:
+                sys.exit(f"{base} is at {after[:9]} right after it was moved to {new[:9]}: something else moved it; "
+                         f"check `git log -1 {base}` and run merge again")
+            sys.exit(f"{now or 'the repo'} switched to {moved_to or 'another branch'} during the fast-forward: that "
+                     f"branch may now be at {new[:9]}, and {base} is unchanged. Check {moved_to or 'it'} "
+                     f"(`git -C \"{now}\" log -1`), then run merge again")
         res["applied"] = True
         log(d, {"ev": "merge", "branch": a.branch, "sha": sha, "base": base, "from": old, "to": new,
                 "checks": res["checks"]})
@@ -4269,15 +4348,43 @@ _WRAPPER_VALUE_OPTS = {"-n", "-u", "-I", "-L", "-P", "-d", "-s", "-k", "-S", "-o
                        "--kill-after", "--interval", "-E", "-a"}
 _GUARD_MAX = 1 << 20  # parse at most 1 MB of a command line
 _PLAIN = re.compile(r"[^\s'\"\\$`<>;&|(){}#]+")
-_HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([^\s'\"<>;&|()]+)\2")
 _REDIR = re.compile(r"[<>]+&?-?\d*|&>>?")
 _TARGET = re.compile(r"\s*(\"[^\"]*\"|'[^']*'|[^\s;&|()<>]+)")
 _OP = re.compile(r"&&|\|\||;;|\|&|&>>?|[;&|(){}]")
 
 
-def _segments(cmd):
+def _heredoc_word(cmd, i):
+    """The heredoc delimiter starting at i (after `<<` or `<<-`), as the shell reads it: one word, its quotes
+    removed (`E"O"F` and `'EOF'` are both EOF), and the index after it. ('', i) when there is none."""
+    n = len(cmd)
+    while i < n and cmd[i] in " \t":
+        i += 1
+    out, start = [], i
+    while i < n and cmd[i] not in " \t\n;&|()<>":
+        c = cmd[i]
+        if c == "$" and i + 1 < n and cmd[i + 1] in "'\"":  # $'EOF' and $"EOF" close at EOF, like 'EOF'
+            i += 1
+            continue
+        if c in "'\"":
+            j = cmd.find(c, i + 1)
+            if j < 0 or "\n" in cmd[i:j] or "\\" in cmd[i:j]:
+                return "", start  # unclosed, multi-line, or escapes the shell decodes ($'E\x4fF', "E\$F"): untrusted
+            out.append(cmd[i + 1:j])
+            i = j + 1
+        elif c == "\\" and i + 1 < n:
+            out.append(cmd[i + 1])
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), i
+
+
+def _segments(cmd, heredoc=True):
     """The commands in a shell line, each as an argv list: quotes kept together across lines, heredoc bodies dropped,
-    `\\`+newline joined, operators and newlines split commands, `$( )` and backtick bodies judged as commands too."""
+    `\\`+newline joined, operators and newlines split commands, `$( )` and backtick bodies judged as commands too.
+    Arithmetic (`(( ))`, `$(( ))`, `$[ ]`) and `${ }` bodies are judged with heredoc=False: `<<` there is a shift or
+    plain text, never a heredoc, so no line after it is dropped."""
     cmd, out, cur, word, i, n, heredocs = cmd[:_GUARD_MAX], [], [], None, 0, 0, []
     n = len(cmd)
 
@@ -4294,14 +4401,24 @@ def _segments(cmd):
             out.append(cur)
         cur = []
 
-    def sub_body(j, closer):  # the text of $( ... ) or ` ... ` from j, and the index after it
+    def sub_body(j, closer, opener="("):  # the text of $( ... ), ` ... `, (( ... )), ${ ... } from j; index after it
         depth, k = 1, j
         while k < n:
             c = cmd[k]
             if c == "\\":
                 k += 2
                 continue
-            if closer == ")" and c == "(":
+            if c == "'" and closer != "`":  # a quoted `)` does not close it
+                q = cmd.find("'", k + 1)
+                k = n if q < 0 else q + 1
+                continue
+            if c == '"' and closer != "`":
+                k += 1
+                while k < n and cmd[k] != '"':
+                    k += 2 if cmd[k] == "\\" else 1
+                k += 1
+                continue
+            if c == opener and closer != "`":
                 depth += 1
             elif c == closer:
                 depth -= 1
@@ -4309,6 +4426,17 @@ def _segments(cmd):
                     return cmd[j:k], k + 1
             k += 1
         return cmd[j:], n
+
+    def no_heredoc(j):  # $(( )), (( )), $[ ], ${ } at j: judge the inside, `<<` there is no heredoc
+        if cmd.startswith("$((", j) or cmd.startswith("((", j):
+            k = j + (3 if cmd[j] == "$" else 2)
+            body, k2 = sub_body(k, ")")
+            k2 = k2 + 1 if k2 < n and cmd[k2] == ")" else k2  # the second closing paren
+        else:
+            opener, closer = ("[", "]") if cmd[j + 1] == "[" else ("{", "}")
+            body, k2 = sub_body(j + 2, closer, opener)
+        out.extend(_segments(body, heredoc=False))
+        return body, k2
 
     while i < n:
         c = cmd[i]
@@ -4330,6 +4458,11 @@ def _segments(cmd):
                     buf.append(cmd[j + 1])
                     j += 2
                     continue
+                if cmd.startswith(("$((", "$[", "${"), j):
+                    body, j2 = no_heredoc(j)
+                    buf.append(cmd[j:j2])
+                    j = j2
+                    continue
                 if cmd.startswith("$(", j) or cmd[j] == "`":
                     body, j2 = sub_body(j + 2 if cmd[j] == "$" else j + 1, ")" if cmd[j] == "$" else "`")
                     out.extend(_segments(body))
@@ -4340,6 +4473,12 @@ def _segments(cmd):
                 j += 1
             word = (word or "") + "".join(buf)
             i = j + 1
+        elif cmd.startswith(("$((", "$[", "${"), i):
+            j0 = i
+            _, i = no_heredoc(i)
+            word = (word or "") + cmd[j0:i]  # kept as typed: `${HOME}` is still home to the wipe check
+        elif cmd.startswith("((", i) and word is None:  # (( arithmetic )) and for (( ...; ...; ... ))
+            _, i = no_heredoc(i)
         elif cmd.startswith("$(", i) or c == "`":
             body, i = sub_body(i + 2 if c == "$" else i + 1, ")" if c == "$" else "`")
             out.extend(_segments(body))
@@ -4348,12 +4487,17 @@ def _segments(cmd):
             end_cmd()
             i += 1
             for tag, strip in heredocs:  # heredoc bodies are data
-                while i < n:
-                    j = cmd.find("\n", i)
+                k, closed = i, False
+                while k < n:
+                    j = cmd.find("\n", k)
                     j = n if j < 0 else j
-                    line, i = cmd[i:j], j + 1
+                    line, k = cmd[k:j], j + 1
                     if (line.lstrip("\t") if strip else line) == tag:
+                        closed = True
                         break
+                if not closed:  # no closing line: maybe a delimiter read wrong; judge the rest as commands
+                    break
+                i = k
             heredocs = []
         elif c in " \t\r":
             end_word()
@@ -4362,11 +4506,12 @@ def _segments(cmd):
             if word is not None and word.isdigit():
                 word = None
             end_word()
-            m = _HEREDOC.match(cmd, i)
-            if m and not cmd.startswith("<<<", i):
-                heredocs.append((m.group(3), bool(m.group(1))))
-                i = m.end()
-                continue
+            if heredoc and cmd.startswith("<<", i) and not cmd.startswith("<<<", i):
+                tag, j = _heredoc_word(cmd, i + 2 + (cmd.startswith("<<-", i)))
+                if tag:
+                    heredocs.append((tag, cmd.startswith("<<-", i)))
+                    i = j
+                    continue
             i = _REDIR.match(cmd, i).end()
             m = _TARGET.match(cmd, i)  # the redirect target is not an argument
             i = m.end() if m else i

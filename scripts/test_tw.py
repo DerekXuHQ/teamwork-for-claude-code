@@ -83,7 +83,21 @@ class RouteByTopic(TwCase):
     def route(self, text):
         return json.loads(self.tw("route", text).stdout)
 
-    def test_inside_a_thread_goes_to_it(self):
+    def test_t42_plural_pairs_and_misrouted_tasks(self):
+        """T42: singular and plural meet (house/houses, policy/policies, bus/buses); a task routed to the wrong
+        thread does not pull more of that topic there."""
+        tok = lambda x: json.loads(self.tw("route", x).stdout)
+        self.tw("thread", "add", "infra", "--focus", "bus routes and house policies")
+        for x in ("one bus", "the house", "a policy"):
+            self.assertEqual(tok(x)["best"], "infra", x)
+        self.tw("thread", "add", "media", "--focus", "movies and cookies")
+        self.assertEqual(tok("the movie cookie")["best"], "media")
+        for i in range(2, 8):  # many tasks on one shared word do not outweigh a thread whose focus is the request
+            self.tw("task", "add", f"T{i}", "--owner", "docs", "--title", f"guide house {i}")
+        self.assertEqual(tok("house policies")["best"], "infra")
+        self.tw("task", "add", "T1", "--owner", "docs", "--title", "partner outreach list")  # routed by mistake
+        self.assertIsNone(tok("partner outreach list again")["best"])
+
         self.assertEqual(self.route("write the install guide")["best"], "docs")
         self.assertEqual(self.route("台账导出")["best"], "ledger")  # Chinese pairs match inside longer words
         self.assertNotIn("suggest", self.route("write the install guide"))
@@ -266,6 +280,18 @@ class LessonsFeatures(TwCase):
         self.assertIn("I1", self.tw("issue", "list", "--all").stdout)
         self.assertNotEqual(self.tw("issue", "add", "x", "--owner", "nobody", ok=False).returncode, 0)
         self.assertNotEqual(self.tw("issue", "set", "I1", "--status", "gone", ok=False).returncode, 0)
+        self.tw("issue", "add", "login is slow")  # T42: open -> merged names the commit too
+        r = self.tw("issue", "set", "I2", "--status", "merged", ok=False)
+        self.assertIn("--ref", r.stderr)
+        self.tw("issue", "set", "I2", "--status", "merged", "--ref", "main@def456")
+
+    def test_board_request_text_is_escaped(self):
+        self.tw("req", "add", "keep ~~old~~ *and* new_name", "--where", "https://example.invalid/a_b")
+        self.tw("req", "set", "R1", "--followup", "ask about __this__")
+        b = self.tw("board").stdout
+        self.assertIn("keep \\~\\~old\\~\\~ \\*and\\* new\\_name", b)
+        self.assertIn("<https://example.invalid/a_b>", b)  # a link stays as typed
+        self.assertIn("\\_\\_this\\_\\_", b)
 
     def test_share_view_in_the_users_language_and_escaped(self):
         self.tw("prefs", "--set", "language=zh")
@@ -3180,6 +3206,27 @@ class BashGuard(unittest.TestCase):
                     "git stash list", "git worktree list", "mkdir -p /tmp/z && cd /tmp/z && git init -q"):
             self.assertIsNone(self.judge(cmd), cmd)
 
+    def test_t42_no_heredoc_inside_arithmetic_or_expansions(self):
+        """`<<` in (( )), $(( )), $[ ], ${ } is a shift or text: the next lines are commands; a quoted `)` does not
+        end $( )."""
+        HARD = self.HARD
+        for cmd in (f"(( x = 1 << 2 ))\ngit reset {HARD}\n2", f"for (( i=1<<2; i<9; i++ )); do :; done\ngit reset {HARD}\n2",
+                    f"echo ${{x:-<<EOF}}\ngit reset {HARD}\nEOF}}", f"echo $[ 1 <<2 ]\ngit reset {HARD}\n2",
+                    f'echo "$((1<<2))"\ngit reset {HARD}\n2', f"echo $(echo ')' ; git reset {HARD})",
+                    f'echo $(echo ")" ; git reset {HARD})', f"echo ${{x:-$(git reset {HARD})}}"):
+            self.assertEqual(self.judge(cmd), "ask", cmd)
+        self.assertIsNone(self.judge(f"echo $(cat <<EOF\ngit reset {HARD}\nEOF\n)\nls"))  # a real heredoc in $( )
+
+    def test_t42_heredoc_delimiters_read_as_the_shell_does(self):
+        HARD = self.HARD
+        for cmd in (f'cat <<E"O"F\nbody\nEOF\ngit reset {HARD}', f'cat <<"EO F"\nx\nEO F\ngit reset {HARD}',
+                    f"cat << EOF\ngit reset {HARD}", f'cat <<A <<B\na\nA\nb\nB\ngit reset {HARD}',
+                    f"cat <<$'EOF'\nbody\nEOF\ngit reset {HARD}\n$EOF", f'cat <<$"EOF"\nb\nEOF\ngit reset {HARD}',
+                    f"cat <<$'E\\x4fF'\nhi\nEOF\ngit reset {HARD}\nE\\x4fF", f'cat <<"E\\$F"\nhi\nE$F\ngit reset {HARD}\nE\\$F'):
+            self.assertEqual(self.judge(cmd), "ask", cmd)  # after the body, or an unclosed one: judged
+        for cmd in (f"cat <<'EOF'\ngit reset {HARD}\nEOF\nls", f"cat <<-EOF\n\tgit reset {HARD}\n\tEOF\nls"):
+            self.assertIsNone(self.judge(cmd), cmd)  # inside a closed body: data
+
     def test_words_in_messages_heredocs_and_greps_pass(self):
         F, FORCE, HARD, RF = self.F, self.FORCE, self.HARD, self.RF
         words = (f"launchctl and DROP TABLE, sudo, shutdown, reboot, pkill, rm {RF} /, git push {FORCE}, push {F}u, "
@@ -3983,6 +4030,77 @@ class MergeRehearsal(LeasesGit):
         self.assertTrue((self.proj / "quix.py").exists())
         self.assertIn('"ev": "merge"', (self.proj / ".teamwork" / "log.jsonl").read_text())
         self.no_temp_worktrees()
+
+    def test_t42_folder_and_file_prefix_clashes_refused(self):
+        """T42: a local ignored folder where the merge adds a file, and a local ignored file where it adds a folder."""
+        self.git("checkout", "-q", "tw/proj/ui")
+        (self.proj / "bld").write_text("tracked file\n")
+        (self.proj / "cfg").mkdir()
+        (self.proj / "cfg" / "a").write_text("tracked\n")
+        self.git("add", "-f", "bld", "cfg/a")
+        self.commit("T1: bld and cfg")
+        self.git("checkout", "-q", "main")
+        (self.proj / ".git" / "info" / "exclude").write_text("bld\ncfg\n")
+        (self.proj / "bld").mkdir()
+        (self.proj / "bld" / "x").write_text("LOCAL\n")
+        (self.proj / "cfg").write_text("LOCAL\n")
+        r = self.merge("--apply", ok=False)
+        self.assertEqual(sorted(json.loads(r.stdout)["untracked_in_the_way"]), ["bld/x", "cfg"])
+        self.assertEqual(((self.proj / "bld" / "x").read_text(), (self.proj / "cfg").read_text()), ("LOCAL\n",) * 2)
+
+    def test_t42_non_ascii_paths_in_the_way(self):
+        self.git("checkout", "-q", "tw/proj/ui")
+        (self.proj / "中文").write_text("tracked\n")
+        self.commit("T1: zh")
+        self.git("checkout", "-q", "main")
+        (self.proj / "中文").mkdir()
+        (self.proj / "中文" / "k").write_text("LOCAL\n")
+        r = self.merge("--apply", ok=False)
+        self.assertEqual(json.loads(r.stdout)["untracked_in_the_way"], ["中文/k"])
+        self.assertEqual(self.head(), self.main0)
+
+    def test_t42_ignored_file_appearing_during_checks_refused(self):
+        self.git("checkout", "-q", "tw/proj/ui")
+        (self.proj / "k.secret").write_text("from the branch\n")
+        self.git("add", "-f", "k.secret")
+        self.commit("T1: secret")
+        self.git("checkout", "-q", "main")
+        (self.proj / ".git" / "info" / "exclude").write_text("*.secret\nrace.sh\n")
+        r = self.merge_with_check(f"echo LOCAL > {self.proj / 'k.secret'}", ok=False)
+        self.assertIn("appeared meanwhile", r.stderr)
+        self.assertEqual((self.proj / "k.secret").read_text(), "LOCAL\n")
+        self.assertEqual(self.head(), self.main0)
+
+    def test_t42_check_timeout_and_no_stdin(self):
+        stf = self.proj / ".teamwork" / "state.json"
+        st = json.loads(stf.read_text())
+        st["prefs"]["check_timeout_minutes"] = 0.02  # about a second
+        stf.write_text(json.dumps(st))
+        r = self.m("--test", "sleep 30", ok=False)
+        self.assertIn("were stopped", r.stderr)
+        self.no_temp_worktrees()
+        self.assertEqual(json.loads(self.m("--test", "cat").stdout)["checks"], "pass")  # stdin is empty, not ours
+        self.assertNotEqual(self.tw("prefs", "--set", "check_timeout_minutes=x", ok=False).returncode, 0)
+
+    def test_t42_prunable_base_worktree_is_nobody(self):
+        self.git("checkout", "-q", "-b", "zorb-side")
+        side = Path(tempfile.mkdtemp()) / "m"
+        self.git("worktree", "add", "-q", str(side), "main")
+        shutil.rmtree(side)  # its folder is gone: the worktree is prunable
+        r = json.loads(self.merge("--apply").stdout)
+        self.assertTrue(r["applied"])  # the first run, not after a misleading "changed meanwhile"
+        self.assertEqual(self.head(), r["merged"])
+
+    def test_t42_live_or_young_leftovers_are_kept(self):
+        tmp = Path(tempfile.mkdtemp(prefix="tw-merge-"))
+        self.git("worktree", "add", "-q", "--detach", str(tmp / "wt"), "main")
+        (tmp / "pid").write_text("1")  # alive, not ours to signal: PermissionError means running
+        young = Path(tempfile.mkdtemp(prefix="tw-merge-"))
+        self.git("worktree", "add", "-q", "--detach", str(young / "wt"), "main")  # no pid file, just made
+        self.merge()
+        self.assertTrue((tmp / "wt").exists() and (young / "wt").exists())
+        for w in (tmp, young):
+            self.git("worktree", "remove", "--force", str(w / "wt"))
 
     def test_killed_run_leftover_is_cleaned_next_time(self):
         tmp = Path(tempfile.mkdtemp(prefix="tw-merge-"))

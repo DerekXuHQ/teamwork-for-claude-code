@@ -2473,6 +2473,15 @@ class Rebuild(LeasesGit):
         self.assertEqual(after["prefs"]["stuck_minutes"], 15)
         self.assertIn("make it blue", self.tw("board").stdout)
 
+    def test_rebuild_preview_and_apply_increment_rev(self):
+        self.populate()
+        tw_dir = self.proj / ".teamwork"
+        next_rev = json.loads((tw_dir / "state.json").read_text())["rev"] + 1
+        self.tw("rebuild")
+        self.assertEqual(json.loads((tw_dir / "state.json.rebuilt").read_text())["rev"], next_rev)
+        self.tw("rebuild", "--apply")
+        self.assertEqual(json.loads((tw_dir / "state.json").read_text())["rev"], next_rev)
+
     def test_apply_keeps_backup_and_reports_diff(self):
         self.populate()
         out = json.loads(self.tw("rebuild").stdout)
@@ -5829,3 +5838,711 @@ class T57Round3Core(Quota):
             self.assertEqual(tw.sensitive_decision(command), ("ask", "sensitive"), command)
         for command in quiet:
             self.assertIsNone(tw.sensitive_decision(command), command)
+
+
+class ScreenShadow(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.keys = self.dir.parent / (self.dir.name + "-keys") / "demo"
+        self.keys.mkdir(parents=True)
+        self.env["TW_KEYS_DIR"] = str(self.keys.parent)
+        self.tw("prefs", "--set", "language=zh")
+
+    def test_ask_score_clear_and_rebuild(self):
+        self.tw("thread", "add", "api", "--session", "s-api")
+        prompt = self.tw("screen", "ask", "api", "--session", "s-api").stdout
+        self.assertIn("这一回只答题", prompt)
+        self.assertEqual(len(self.state()["screens"]["SC1"]["items"]), 6)
+        self.assertNotIn("questions", self.state()["screens"]["SC1"])
+        self.assertTrue((self.keys / "SC1.json").exists())
+        answer_file = self.dir / "answers.txt"
+        answer_file.write_text("P1 to P6 answers", encoding="utf-8")
+        grade_path = self.tw("screen", "brief", "SC1", "--answers", str(answer_file)).stdout.splitlines()[0]
+        self.assertTrue(Path(grade_path).is_relative_to(self.keys))
+        scores = ",".join(f"P{i}=2" for i in range(1, 7))
+        self.tw("screen", "record", "SC1", "--scores", scores)
+        self.assertEqual(self.state()["screens"]["SC1"]["verdict"], "pass")
+        self.assertIn("作废", self.tw("screen", "clear-msg", "SC1").stdout)
+        board = self.tw("board").stdout
+        self.assertIn("体检：过（12/12）", board)
+        self.tw("rebuild")
+        self.assertEqual(self.state()["screens"]["SC1"]["verdict"], "pass")
+
+    def test_strict_key_is_external_and_invalid_scores_fail(self):
+        self.tw("thread", "add", "merge")
+        self.tw("thread", "set", "merge", "--critical")
+        self.tw("screen", "ask", "merge", "--session", "s-bad")
+        self.assertEqual(len(self.state()["screens"]["SC1"]["items"]), 7)
+        scores = ",".join(f"P{i}={0 if i == 5 else 1}" for i in range(1, 8))
+        self.tw("screen", "record", "SC1", "--scores", scores)
+        self.assertEqual(self.state()["screens"]["SC1"]["verdict"], "fail")
+        self.assertNotEqual(self.tw("thread", "reseat", "merge", "--session", "s-bad", ok=False).returncode, 0)
+        self.tw("screen", "ask", "merge", "--session", "s-bad")
+        self.tw("screen", "unavailable", "SC2", "--why", "grader unavailable")
+        self.assertIn("未体检", self.tw("screen", "list", "--pending").stdout)
+
+    def test_signal_json_and_off_mode(self):
+        transcript = self.dir / "transcript.jsonl"
+        transcript.write_text("\n".join(json.dumps(x) for x in [
+            {"type": "user", "message": {"content": "不对"}},
+            {"type": "user", "message": {"content": "又错了"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "已修好"}]}}
+        ]) + "\n", encoding="utf-8")
+        result = json.loads(self.tw("signals", "lead", "--transcript", str(transcript), "--json").stdout)
+        self.assertEqual(result["color"], "red")
+        self.assertEqual(result["color_label"], "红")
+        self.tw("prefs", "--set", "screen_mode=off")
+        self.assertEqual(self.tw("screen", "ask", "lead").stdout.strip(), "体检已关")
+
+
+class SeatSwap(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.keys = self.dir.parent / (self.dir.name + "-keys") / "demo"
+        self.keys.mkdir(parents=True)
+        self.env["TW_KEYS_DIR"] = str(self.keys.parent)
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "api", "--session", "s-old")
+
+    def test_start_freeze_pack_abort_and_rebuild(self):
+        self.assertIn("记下了，开始换 api", self.tw("succ", "start", "api", "--reason", "把 api 换掉").stdout)
+        self.tw("succ", "candidate", "HO1", "session_candidate")
+        self.assertNotEqual(self.tw("succ", "freeze", "HO1", "--stopped", "idle confirmed", ok=False).returncode, 0)
+        self.tw("succ", "freeze", "HO1", "--stopped", "s-old idle; last event 12:00")
+        packed = self.tw("succ", "pack", "HO1", "--config-dir", str(self.dir / "claude")).stdout
+        self.assertRegex(packed, r"缺口 [1-9]\d*")
+        self.assertTrue(Path(packed.split(" · ")[0]).exists())
+        self.tw("succ", "abort", "HO1", "--reason", "cancel")
+        self.tw("rebuild")
+        self.assertEqual(self.state()["handovers"]["HO1"]["phase"], "aborted")
+
+    def test_bad_candidate_and_chinese_status(self):
+        self.tw("lead", "--session", "s-lead")
+        self.tw("succ", "start", "api", "--reason", "换掉")
+        self.assertNotEqual(self.tw("succ", "candidate", "HO1", "s-lead", ok=False).returncode, 0)
+        self.assertIn("HO1", self.tw("succ", "status").stdout)
+
+    def test_pack_extracts_tools_facts_and_excludes_screen_window(self):
+        self.tw("succ", "start", "api", "--reason", "换掉")
+        self.tw("succ", "candidate", "HO1", "session-next")
+        st = self.state()
+        st["threads"]["api"]["sessions"][0]["from"] = "2025-12-01T00:00:00-05:00"
+        st["screens"]["SC9"] = {"seat": "api", "session_id": "s-old", "created_at": "2025-12-03T00:00:00-05:00",
+                                  "cleared_at": "2025-12-04T00:00:00-05:00"}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        stamp = "2025-12-02T12:00:00-05:00"
+        rows = [
+            {"type": "user", "timestamp": stamp, "origin": {"kind": "human"}, "message": {"content": "不要修改保留内容"}},
+            {"type": "assistant", "timestamp": stamp, "message": {"content": [
+                {"type": "tool_use", "id": "read1", "name": "Read", "input": {"file_path": "README.md"}},
+                {"type": "tool_use", "id": "bash1", "name": "Bash", "input": {"command": "false"}}]}},
+            {"type": "user", "timestamp": stamp, "message": {"content": [{"type": "tool_result", "tool_use_id": "bash1", "content": "Process exited with code 1"},
+                                                                                 {"type": "text", "text": "https://example.com/path"}]}},
+            {"type": "user", "timestamp": "2025-12-03T12:00:00-05:00", "origin": {"kind": "human"}, "message": {"content": "体检里的练习要求"}},
+            {"type": "assistant", "timestamp": stamp, "isCompactSummary": True, "message": {"content": "压缩摘要"}},
+        ]
+        transcript = self.dir / "transcript.jsonl"
+        transcript.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in rows), encoding="utf-8")
+        self.tw("succ", "freeze", "HO1", "--stopped", "s-old idle evidence")
+        out = self.tw("succ", "pack", "HO1", "--transcript", str(transcript), "--config-dir", str(self.dir / "claude")).stdout
+        brief = Path(out.split(" · ")[0]).read_text(encoding="utf-8")
+        facts = json.loads((Path(out.split(" · ")[0]).parent / "facts.json").read_text(encoding="utf-8"))
+        words = (Path(out.split(" · ")[0]).parent / "words.md").read_text(encoding="utf-8")
+        manifest = json.loads((Path(out.split(" · ")[0]).parent / "MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertIn("未推送提交", brief)
+        self.assertEqual(facts["files"][0]["exists"], False)
+        self.assertEqual(facts["failed_commands"][0]["command"], "false")
+        self.assertIn("https://example.com/path", facts["urls"])
+        self.assertIn("不要修改保留内容", words)
+        self.assertNotIn("体检里的练习要求", words)
+        self.assertEqual(manifest["compactions"], 1)
+
+    def test_quiz_uses_rule_and_fact_material_and_grades_keywords(self):
+        self.tw("succ", "start", "api", "--reason", "换掉")
+        self.tw("succ", "candidate", "HO1", "session-next")
+        stamp = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        transcript = self.dir / "quiz.jsonl"
+        rows = [{"type": "user", "timestamp": stamp, "origin": {"kind": "human"},
+                 "message": {"content": f"必须检查第{i}项结果"}} for i in range(1, 11)]
+        transcript.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in rows), encoding="utf-8")
+        self.tw("succ", "freeze", "HO1", "--stopped", "s-old idle evidence")
+        self.tw("succ", "pack", "HO1", "--transcript", str(transcript), "--config-dir", str(self.dir / "claude"))
+        prompt = self.tw("succ", "quiz", "HO1").stdout
+        self.assertEqual(len(prompt.splitlines()), 10)
+        keyfile = self.keys / "HO1-quiz-1.json"
+        key = json.loads(keyfile.read_text(encoding="utf-8"))["items"]
+        answers = self.keys / "answers.txt"
+        answers.write_text("\n".join(" ".join(x["keywords"]) for x in key), encoding="utf-8")
+        graded = self.tw("succ", "grade", "HO1", "--answers", str(answers)).stdout
+        self.assertIn("10/10", graded)
+        second = self.tw("succ", "quiz", "HO1")
+        self.assertNotEqual(prompt, second.stdout)
+        self.assertIn("素材不足", second.stderr)
+
+    def test_signals_relay_count_and_replaced_archive_reason(self):
+        today = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        st = self.state()
+        st["handovers"] = {f"HO{i}": {"id": f"HO{i}", "seat": "api", "phase": "seated", "old_session": f"s{i}",
+                                                "steps": {"seat": today}} for i in (1, 2)}
+        t = st["threads"]["api"]
+        t.update(session_id="s-new", status="working", last_report_session="s-new", last_status_at=today)
+        t["sessions"] = [{"session_id": "s1", "from": "2025-01-01T00:00:00-05:00", "to": today, "reason": "HO1: change"},
+                          {"session_id": "s2", "from": "2025-02-01T00:00:00-05:00", "to": today, "reason": "HO2: change"},
+                          {"session_id": "s-new", "from": today}]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        sig = json.loads(self.tw("signals", "api", "--json").stdout)
+        self.assertEqual(sig["relay_count_today"], 2)
+        rows = json.loads(self.tw("archive", "candidates", "--json").stdout)
+        self.assertEqual(next(x for x in rows if x["session_id"] == "s1")["reason"], "HO1 换下的会话，新会话已汇报")
+
+    def test_verify_rejects_post_freeze_changes(self):
+        self.tw("succ", "start", "api", "--reason", "换掉")
+        self.tw("succ", "candidate", "HO1", "session-next")
+        st = self.state(); st["tasks"]["T1"] = {"title": "finish task", "owner": "api", "status": "working", "accept": "包含测试和报告", "touches": ["src"]}
+        st["requests"]["R1"] = {"status": "open", "text": "finish T1", "tasks": ["T1"]}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        stamp = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        transcript = self.dir / "verify.jsonl"
+        transcript.write_text(json.dumps({"type": "user", "timestamp": stamp, "origin": {"kind": "human"},
+                                          "message": {"content": "永远保留工作文件"}}, ensure_ascii=False), encoding="utf-8")
+        self.tw("succ", "freeze", "HO1", "--stopped", "s-old idle evidence")
+        self.tw("succ", "pack", "HO1", "--transcript", str(transcript), "--config-dir", str(self.dir / "claude"))
+        st = self.state(); st["handovers"]["HO1"]["freeze"]["dirty_fingerprint"] = "changed-after-freeze"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        head = "-"
+        receipt = self.keys / "receipt.json"
+        receipt.write_text(json.dumps({"tasks": {"T1": {"accept": "包含测试和报告"}}, "branch": "tw/demo/api", "head": head,
+                                       "rules": [1], "requests": {"R1": "open"}}, ensure_ascii=False), encoding="utf-8")
+        result = self.tw("succ", "verify", "HO1", "--receipt", str(receipt))
+        self.assertIn("冻结后还有改动", result.stdout)
+        self.assertFalse(self.state()["handovers"]["HO1"]["verify"]["passed"])
+
+    def test_critical_seat_rejects_failed_screen(self):
+        self.tw("thread", "set", "api", "--critical")
+        self.tw("succ", "start", "api", "--reason", "换掉")
+        self.tw("succ", "candidate", "HO1", "session-next")
+        st = self.state()
+        rec = st["handovers"]["HO1"]
+        rec.update(freeze={"at": "now"}, pack_dir=str(self.dir),
+                   verify={"passed": True}, quiz={"passed": True})
+        rec["steps"].update(freeze="now", pack="now", verify="now", quiz="now")
+        st["screens"]["SC1"] = {"seat": "api", "session_id": "session-next", "verdict": "fail"}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        result = self.tw("succ", "seat", "HO1", "session-next", ok=False)
+        self.assertIn("关键席位不让体检没过", result.stderr)
+
+
+class SeatSwapFlow(TwCase):
+    """End to end in a real git repo: the pack inside .teamwork must not count as a change after freeze."""
+
+    def test_full_swap_in_git_repo(self):
+        def git(*args):
+            subprocess.run(["git", "-C", str(self.dir), *args], check=True, capture_output=True)
+        git("init", "-q", "-b", "main"); git("config", "user.name", "t"); git("config", "user.email", "t@example.invalid")
+        (self.dir / "f.txt").write_text("a\n"); git("add", "f.txt"); git("commit", "-q", "-m", "init")
+        keys = self.dir.parent / (self.dir.name + "-keys"); keys.mkdir()
+        self.env["TW_KEYS_DIR"] = str(keys)
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "ui", "--session", "old1")
+        self.tw("thread", "set", "ui", "--status", "working", "--from-status")
+        self.env["TW_NOW"] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=1)).isoformat(timespec="seconds")
+        transcript = self.dir / ".teamwork" / "tr.jsonl"
+        transcript.write_text(json.dumps({"type": "user", "timestamp": self.env["TW_NOW"], "origin": {"kind": "human"},
+                                          "message": {"content": "导出一定要用 CSV 格式，不要用 xlsx 表格"}}) + "\n", encoding="utf-8")
+        self.env["TW_NOW"] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=2)).isoformat(timespec="seconds")
+        self.tw("succ", "start", "ui", "--reason", "把 ui 换掉")
+        self.tw("succ", "candidate", "HO1", " new1 ")
+        self.tw("succ", "freeze", "HO1", "--stopped", "get_session old1: idle")
+        self.tw("succ", "pack", "HO1", "--transcript", str(transcript))
+        missing = self.tw("succ", "seat", "HO1", "new1", ok=False)
+        self.assertIn("verify", missing.stderr)
+        head = subprocess.run(["git", "-C", str(self.dir), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        receipt = self.dir / ".teamwork" / "rc.json"
+        receipt.write_text(json.dumps({"tasks": [], "branch": "tw/demo/ui", "head": head, "rules": [1], "requests": []}))
+        verified = self.tw("succ", "verify", "HO1", "--receipt", str(receipt)).stdout
+        self.assertNotIn("不过", verified)
+        quiz = self.tw("succ", "quiz", "HO1").stdout
+        self.assertNotIn("xlsx", quiz.split("\n", 1)[-1].split("\n")[0] if "xlsx" in quiz else "")
+        answers = self.dir / ".teamwork" / "ans.txt"
+        items = json.loads((keys / "demo" / "HO1-quiz-1.json").read_text(encoding="utf-8"))["items"]
+        answers.write_text("\n".join(" ".join(item["keywords"]) for item in items), encoding="utf-8")
+        self.tw("succ", "grade", "HO1", "--answers", str(answers))
+        self.tw("succ", "seat", "HO1", " new1 ")
+        self.assertEqual(self.state()["threads"]["ui"]["session_id"], "new1")
+        (self.dir / "f.txt").write_text("changed after seat\n")
+        self.tw("thread", "set", "ui", "--status", "working", "--from-status")
+        self.assertIn("HO1", self.tw("archive", "candidates").stdout)
+
+
+class LeadSwap(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.keys = self.dir.parent / (self.dir.name + "-keys") / "demo"
+        self.keys.mkdir(parents=True)
+        self.env["TW_KEYS_DIR"] = str(self.keys.parent)
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("lead", "--session", "lead-old")
+
+    def test_freeze_lock_abort_and_rebuild(self):
+        self.tw("succ", "start", "lead", "--reason", "我原话要求换 lead")
+        self.tw("succ", "candidate", "HO1", "lead-next")
+        self.tw("succ", "freeze", "HO1", "--stopped", "lead-old idle at last event")
+        self.assertEqual(self.state()["write_lock"]["ho"], "HO1")
+        self.assertNotEqual(self.tw("prefs", "--set", "language=en", ok=False).returncode, 0)
+        self.assertIn("teamwork: demo", self.tw("board").stdout)
+        self.tw("rebuild")
+        self.assertEqual(self.state()["write_lock"]["old_session"], "lead-old")
+        self.tw("succ", "abort", "HO1", "--reason", "候选无响应")
+        self.assertNotIn("write_lock", self.state())
+        self.tw("rebuild")
+        self.assertEqual(self.state()["handovers"]["HO1"]["phase"], "aborted")
+
+    def test_lead_handover_rejects_thread_swap_while_open(self):
+        self.tw("succ", "start", "lead", "--reason", "交给继任")
+        self.tw("thread", "add", "api", "--session", "api-old")
+        result = self.tw("succ", "start", "api", "--reason", "换 api", ok=False)
+        self.assertIn("lead handover", result.stderr)
+
+    def test_lead_seat_updates_history_and_clears_lock(self):
+        self.tw("succ", "start", "lead", "--reason", "换 lead")
+        self.tw("succ", "candidate", "HO1", "lead-next")
+        self.tw("screen", "ask", "lead", "--session", "lead-next")
+        self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}=2" for i in range(1, 8)))
+        self.tw("screen", "clear-msg", "SC1")
+        self.tw("succ", "screened", "HO1", "lead-next", "SC1")
+        transcript = self.dir / "lead.jsonl"
+        stamp=(dt.datetime.now().astimezone()+dt.timedelta(minutes=1)).isoformat()
+        transcript.write_text("\n".join(json.dumps({"type":"user","timestamp":stamp,
+            "origin":{"kind":"human"},"message":{"content":"Always "+x}},ensure_ascii=False) for x in ("validate alpha endpoint", "preserve beta records", "verify gamma status", "update delta summary", "record epsilon outcome", "compare zeta branch", "check eta request", "store theta facts", "track iota changes", "confirm kappa result"))+"\n",encoding="utf-8")
+        self.env["TW_NOW"]=(dt.datetime.fromisoformat(stamp)+dt.timedelta(minutes=1)).isoformat()
+        self.tw("succ", "freeze", "HO1", "--stopped", "lead-old idle event")
+        self.tw("succ", "pack", "HO1", "--transcript", str(transcript), "--config-dir", str(self.dir / "claude"))
+        receipt = self.dir / "receipt.json"
+        receipt.write_text(json.dumps({"tasks":[],"branch":None,"head":"-","rules":list(range(1,11)),"requests":[]}),encoding="utf-8")
+        self.tw("succ", "verify", "HO1", "--receipt", str(receipt))
+        self.tw("succ", "quiz", "HO1")
+        key = json.loads((self.keys / "HO1-quiz-1.json").read_text(encoding="utf-8"))["items"]
+        answers = self.dir / "answers.txt"
+        answers.write_text("\n".join(" ".join(item["keywords"]) for item in key),encoding="utf-8")
+        self.tw("succ", "grade", "HO1", "--answers", str(answers))
+        result = self.tw("succ", "seat", "HO1", "lead-next")
+        self.assertIn("https://claude.ai/code/lead-next", result.stdout)
+        st = self.state()
+        self.assertEqual(st["lead"]["session_id"], "lead-next")
+        self.assertEqual([x["session_id"] for x in st["lead"]["sessions"]], ["lead-old", "lead-next"])
+        self.assertNotIn("write_lock", st)
+        self.tw("rebuild")
+        self.assertEqual(self.state()["lead"]["session_id"], "lead-next")
+
+    def _seat_lead(self, triggers=None, subscriptions=None):
+        self.tw("succ", "start", "lead", "--reason", "Please hand over the lead")
+        self.tw("succ", "candidate", "HO1", "lead-next")
+        self.tw("screen", "ask", "lead", "--session", "lead-next")
+        self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}=2" for i in range(1, 8)))
+        self.tw("screen", "clear-msg", "SC1")
+        self.tw("succ", "screened", "HO1", "lead-next", "SC1")
+        transcript = self.dir / "lead.jsonl"
+        stamp=(dt.datetime.now().astimezone()+dt.timedelta(minutes=1)).isoformat()
+        transcript.write_text("\n".join(json.dumps({"type":"user","timestamp":stamp,
+            "origin":{"kind":"human"},"message":{"content":"Always "+x}},ensure_ascii=False) for x in ("validate alpha endpoint", "preserve beta records", "verify gamma status", "update delta summary", "record epsilon outcome", "compare zeta branch", "check eta request", "store theta facts", "track iota changes", "confirm kappa result"))+"\n",encoding="utf-8")
+        self.env["TW_NOW"]=(dt.datetime.fromisoformat(stamp)+dt.timedelta(minutes=1)).isoformat()
+        self.tw("succ", "freeze", "HO1", "--stopped", "lead-old idle event")
+        args = ["succ", "pack", "HO1", "--transcript", str(transcript), "--config-dir", str(self.dir / "claude")]
+        if triggers: args += ["--triggers", str(triggers)]
+        if subscriptions: args += ["--subscriptions", str(subscriptions)]
+        self.tw(*args)
+        receipt = self.dir / "receipt.json"
+        receipt.write_text(json.dumps({"tasks":[],"branch":None,"head":"-","rules":list(range(1,11)),"requests":[]}),encoding="utf-8")
+        self.tw("succ", "verify", "HO1", "--receipt", str(receipt))
+        self.tw("succ", "quiz", "HO1")
+        items = json.loads((self.keys / "HO1-quiz-1.json").read_text(encoding="utf-8"))["items"]
+        answers = self.dir / "answers.txt"
+        answers.write_text("\n".join(" ".join(item["keywords"]) for item in items),encoding="utf-8")
+        self.tw("succ", "grade", "HO1", "--answers", str(answers))
+        return self.tw("succ", "seat", "HO1", "lead-next")
+
+    def test_ack_blocks_archive_until_every_thread_acknowledges(self):
+        self.tw("thread", "add", "api", "--session", "api-old")
+        self.tw("thread", "add", "ui", "--session", "ui-old")
+        self.tw("thread", "add", "planned")
+        self.tw("thread", "add", "retired", "--session", "retired-old")
+        self.tw("thread", "set", "retired", "--status", "archived")
+        triggers=self.dir/"triggers_ack.json"; triggers.write_text(json.dumps([{"id":"daily"}]),encoding="utf-8")
+        subscriptions=self.dir/"subscriptions_ack.json"; subscriptions.write_text(json.dumps([]),encoding="utf-8")
+        self._seat_lead(triggers,subscriptions)
+        self.assertEqual(self.state()["handovers"]["HO1"]["ack_needed"], ["api", "ui"])
+        self.tw("succ", "ack", "HO1", "--thread", "api")
+        rows = json.loads(self.tw("archive", "candidates", "--json").stdout)
+        old = next(x for x in rows if x["session_id"] == "lead-old")
+        self.assertEqual(old["category"], "blocked-replaced")
+        self.assertIn("还有 1 个线程", old["reason"])
+        self.tw("succ", "ack", "HO1", "--thread", "ui")
+        rows = json.loads(self.tw("archive", "candidates", "--json").stdout)
+        self.assertIn("还有 1 项提醒",next(x for x in rows if x["session_id"] == "lead-old")["reason"])
+        self.tw("succ", "moved", "HO1", "--trigger", "daily")
+        self.tw("succ", "reconciled", "HO1", "--count", "0")
+        self.tw("succ", "window", "HO1")
+        rows = json.loads(self.tw("archive", "candidates", "--json").stdout)
+        self.assertEqual(next(x for x in rows if x["session_id"] == "lead-old")["category"], "replaced")
+
+    def test_moved_lists_and_missing_list_gaps(self):
+        triggers = self.dir / "triggers.json"
+        triggers.write_text(json.dumps([{"id":"daily"}]),encoding="utf-8")
+        subscriptions = self.dir / "subscriptions.json"
+        subscriptions.write_text(json.dumps([{"owner":"acme","repo":"app","number":9}]),encoding="utf-8")
+        self._seat_lead(triggers, subscriptions)
+        self.assertIn("trigger:daily", self.tw("succ", "status", "HO1").stdout)
+        self.tw("succ", "moved", "HO1", "--trigger", "daily")
+        self.tw("succ", "moved", "HO1", "--subscription", "acme/app#9")
+        self.assertNotIn("trigger:daily", self.tw("succ", "status", "HO1").stdout)
+        self.tw("rebuild")
+        self.assertEqual(len(self.state()["handovers"]["HO1"]["moved"]), 2)
+
+    def test_window_reconciliation_and_lead_seat_json(self):
+        self.tw("succ", "start", "lead", "--reason", "Please hand over")
+        early = self.tw("succ", "window", "HO1", ok=False)
+        self.assertIn("上任后", early.stderr)
+        self.tw("succ", "abort", "HO1", "--reason", "stop")
+        # A separate complete handover exercises the atomic seat response and reconciliation record.
+        self.tw("succ", "start", "lead", "--reason", "Please hand over")
+        self.tw("succ", "candidate", "HO2", "lead-next")
+        self.tw("screen", "ask", "lead", "--session", "lead-next")
+        self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}=2" for i in range(1, 8)))
+        self.tw("screen", "clear-msg", "SC1")
+        self.tw("succ", "screened", "HO2", "lead-next", "SC1")
+        transcript = self.dir / "lead2.jsonl"
+        stamp=(dt.datetime.now().astimezone()+dt.timedelta(minutes=1)).isoformat()
+        transcript.write_text("\n".join(json.dumps({"type":"user","timestamp":stamp,"origin":{"kind":"human"},"message":{"content":"Always "+x}}) for x in ("validate alpha endpoint", "preserve beta records", "verify gamma status", "update delta summary", "record epsilon outcome", "compare zeta branch", "check eta request", "store theta facts", "track iota changes", "confirm kappa result"))+"\n",encoding="utf-8")
+        self.env["TW_NOW"]=(dt.datetime.fromisoformat(stamp)+dt.timedelta(minutes=1)).isoformat()
+        self.tw("succ", "freeze", "HO2", "--stopped", "lead-old idle event")
+        self.tw("succ", "pack", "HO2", "--transcript", str(transcript))
+        receipt = self.dir / "receipt.json"
+        receipt.write_text(json.dumps({"tasks":[],"branch":None,"head":"-","rules":list(range(1,11)),"requests":[]}),encoding="utf-8")
+        self.tw("succ", "verify", "HO2", "--receipt", str(receipt)); self.tw("succ", "quiz", "HO2")
+        items=json.loads((self.keys / "HO2-quiz-1.json").read_text())["items"]
+        answers=self.dir / "answers2.txt"; answers.write_text("\n".join(" ".join(x["keywords"]) for x in items))
+        self.tw("succ", "grade", "HO2", "--answers", str(answers))
+        seated=self.tw("succ", "seat", "HO2", "lead-next", "--json")
+        obj=json.loads(seated.stdout)
+        self.assertIsNone(obj["thread"]); self.assertEqual(obj["lead"]["session_id"],"lead-next")
+        self.tw("succ", "reconciled", "HO2", "--count", "2", "--missing", "one reply")
+        self.tw("succ", "window", "HO2")
+        self.assertEqual(self.state()["handovers"]["HO2"]["reconciled"]["missing"],"one reply")
+
+    def test_watchdog_threshold_does_not_abort(self):
+        self.tw("succ", "start", "lead", "--reason", "Please hand over")
+        self.tw("succ", "ping", "HO1", "--candidate-seen", "2026-11-22T00:00:00-05:00")
+        stale=self.tw("succ", "status", "HO1").stdout
+        self.assertIn("新 lead 卡住了",stale)
+        self.assertEqual(self.state()["handovers"]["HO1"]["phase"],"started")
+        self.tw("succ", "ping", "HO1", "--candidate-seen", dt.datetime.now().astimezone().isoformat())
+        self.assertNotIn("新 lead 卡住了",self.tw("succ", "status", "HO1").stdout)
+
+    def test_quiz_threshold_and_chinese_keyword_matching(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location("tw_module",TW); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        self.assertTrue(mod._succ_hit("CSV 格式",mod._succ_normalize("CSV 格式，不要 xlsx")))
+        self.assertFalse(mod._succ_hit("CSV 格式",mod._succ_normalize("随便")))
+        self.tw("succ","start","lead","--reason","test grading")
+        st=self.state(); keyfile=self.keys/"HO1-quiz-1.json"
+        keyfile.write_text(json.dumps({"items":[{"question":"one","keywords":["apple"]},{"question":"two","keywords":["banana"]}]}))
+        st["handovers"]["HO1"].update(candidates=[{"session_id":"lead-next"}],quiz={"key_file":str(keyfile),"candidate":"lead-next"},phase="quiz",steps={"quiz":"now"})
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st))
+        answers=self.dir/"threshold-2.txt"; answers.write_text("apple\nwrong\n")
+        result=self.tw("succ","grade","HO1","--answers",str(answers))
+        self.assertIn("1/2 不过",result.stdout)
+        self.assertIn("素材不足 3 题",result.stdout)
+        self.assertFalse(self.state()["handovers"]["HO1"]["quiz"]["passed"])
+        st=self.state(); keyfile=self.keys/"HO1-quiz-2.json"
+        keyfile.write_text(json.dumps({"items":[{"question":str(i),"keywords":[f"word{i}"]} for i in range(10)]}))
+        st["handovers"]["HO1"].update(candidates=[{"session_id":"lead-next"}],quiz={"key_file":str(keyfile),"candidate":"lead-next"},phase="quiz",steps={"quiz":"now"})
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st))
+        answers=self.dir/"threshold-10.txt"; answers.write_text("\n".join(["wrong",*[f"word{i}" for i in range(1,10)]])+"\n")
+        result=self.tw("succ","grade","HO1","--answers",str(answers))
+        self.assertIn("9/10 过",result.stdout)
+        self.assertTrue(self.state()["handovers"]["HO1"]["quiz"]["passed"])
+
+    def test_english_brief_and_locked_readonly_lead(self):
+        self.tw("prefs","--set","language=en")
+        self.tw("succ","start","lead","--reason","Please hand over the lead")
+        transcript=self.dir/"english.jsonl"
+        transcript.write_text(json.dumps({"type":"user","timestamp":dt.datetime.now().astimezone().isoformat(),"origin":{"kind":"human"},"message":{"content":"Keep every task status accurate"}})+"\n")
+        self.tw("succ","candidate","HO1","lead-next")
+        self.tw("succ","freeze","HO1","--stopped","lead-old idle event")
+        self.tw("succ","pack","HO1","--transcript",str(transcript))
+        brief=(self.dir/".teamwork/private/handover/HO1-lead/BRIEF.md").read_text()
+        self.assertNotRegex(brief,r"[\u3400-\u9fff]")
+        self.assertIn("Missing triggers list",brief)
+        self.assertIn("Missing subscriptions list",brief)
+        lead=self.tw("lead"); self.assertEqual(lead.returncode,0); json.loads(lead.stdout)
+        add=self.tw("task","add","Blocked task","--accept","done",ok=False)
+        self.assertNotEqual(add.returncode,0)
+
+
+class SeatSwap2(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.keys = self.dir.parent / (self.dir.name + "-keys") / "demo"
+        self.keys.mkdir(parents=True)
+        self.env["TW_KEYS_DIR"] = str(self.keys.parent)
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "api", "--session", "old-api")
+
+    def test_aborted_handover_is_terminal(self):
+        self.tw("succ", "start", "api", "--reason", "换 api")
+        self.tw("succ", "candidate", "HO1", "candidate-api")
+        self.tw("succ", "abort", "HO1", "--reason", "取消")
+        result = self.tw("succ", "candidate", "HO1", "candidate-two", ok=False)
+        self.assertIn("不能再 candidate", result.stderr)
+        self.tw("succ", "start", "api", "--reason", "重新换 api")
+        self.tw("succ", "candidate", "HO2", "candidate-api")
+
+    def test_pack_filters_answer_files_and_redacts_main_rows(self):
+        self.tw("succ", "start", "api", "--reason", "换 api")
+        self.tw("succ", "candidate", "HO1", "candidate-api")
+        self.tw("succ", "freeze", "HO1", "--stopped", "old-api is idle")
+        main = self.dir / "main.jsonl"
+        main.write_text(json.dumps({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":str(self.keys / "SC1-grade.md")}}]}}), encoding="utf-8")
+        child = self.dir / "agent-run.jsonl"
+        child.write_text(json.dumps({"type":"user","message":{"content":f"read {self.keys / 'SC1.json'}"}}), encoding="utf-8")
+        packed = self.tw("succ", "pack", "HO1", "--transcript", str(main), "--transcript", str(child)).stdout
+        brief = Path(packed.split(" · ")[0])
+        facts = json.loads((brief.parent / "facts.json").read_text(encoding="utf-8"))
+        raw = (brief.parent / "raw" / "old.jsonl").read_text(encoding="utf-8")
+        self.assertIn("跳过 1 份读过答案", brief.read_text(encoding="utf-8"))
+        self.assertNotIn("SC1-grade.md", json.dumps(facts))
+        self.assertNotIn("SC1-grade.md", raw)
+        self.assertNotIn("SC1-quiz-1.json", raw)
+
+    def test_pack_redacts_tool_result_from_custom_key_directory(self):
+        keyroot = self.dir.parent / (self.dir.name + "-vault")
+        self.env["TW_KEYS_DIR"] = str(keyroot)
+        actual = keyroot / "demo" / "SC1.json"
+        self.tw("succ", "start", "api", "--reason", "swap")
+        self.tw("succ", "candidate", "HO1", "candidate-api")
+        self.tw("succ", "freeze", "HO1", "--stopped", "old-api idle")
+        transcript = self.dir / "answer-transcript.jsonl"
+        rows = [
+            {"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"read-secret","name":"Bash","input":{"command":f"cat {actual}"}}]}},
+            {"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"read-secret","content":"SECRETANSWER"}]},
+             "toolUseResult":{"stdout":"SECRETANSWER"}},
+            {"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"cd-cat-star","name":"Bash","input":{"command":f"cd {actual.parent} && cat *"}}]}},
+            {"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"cd-cat-star","content":"SECRETANSWER"}]},
+             "toolUseResult":{"stdout":"SECRETANSWER"}},
+            {"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"cd-keys","name":"Bash","input":{"command":f"cd {actual.parent}"}}]}},
+            {"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"cat-sc","name":"Bash","input":{"command":"cat SC1.json"}}]}},
+            {"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"cat-sc","content":"SECRETANSWER"}]},
+             "toolUseResult":{"stdout":"SECRETANSWER"}},
+        ]
+        transcript.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        packed = self.tw("succ", "pack", "HO1", "--transcript", str(transcript)).stdout
+        package = Path(packed.split(" · ")[0]).parent
+        for path in package.rglob("*"):
+            if path.is_file(): self.assertNotIn("SECRETANSWER", path.read_text(encoding="utf-8", errors="replace"), str(path))
+
+    def test_init_force_uses_current_revision(self):
+        self.tw("prefs", "--set", "language=en")
+        self.tw("init", "demo", "--force", "--goal", "g2")
+        self.assertEqual(self.state()["goal"], "g2")
+
+    def test_succ_status_omits_terminal_next_step_and_shows_seated_followup(self):
+        st = self.state()
+        st["handovers"] = {
+            "HO1":{"id":"HO1","seat":"api","phase":"aborted","steps":{"start":"t","abort":"t"}},
+            "HO2":{"id":"HO2","seat":"lead","phase":"seated","steps":{"start":"t","candidate":"t","freeze":"t","pack":"t","verify":"t","quiz":"t","grade":"t","seat":"t"}},
+        }
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        rows = json.loads(self.tw("succ", "status", "--json").stdout)
+        self.assertIsNone(rows[0]["next"])
+        self.assertEqual(rows[1]["next"], "ack")
+        self.assertNotIn("→", self.tw("succ", "status", "HO1").stdout)
+
+    def test_grade_rejects_candidate_different_from_quiz_candidate(self):
+        self.tw("succ", "start", "api", "--reason", "swap")
+        st = self.state()
+        rec = st["handovers"]["HO1"]
+        rec["candidates"] = [{"session_id":"candidate-a"}, {"session_id":"candidate-b"}]
+        keyfile = self.keys / "HO1-quiz.json"
+        keyfile.write_text(json.dumps({"items":[{"question":"q","keywords":["apple"]}]}), encoding="utf-8")
+        rec["quiz"] = {"key_file":str(keyfile), "candidate":"candidate-a"}
+        rec["phase"] = "quiz"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        answers = self.dir / "answers.txt"
+        answers.write_text("apple\n", encoding="utf-8")
+        result = self.tw("succ", "grade", "HO1", "--candidate", "candidate-b", "--answers", str(answers), ok=False)
+        self.assertIn("candidate", result.stderr)
+
+    def test_thread_set_cannot_replace_session_during_open_handover(self):
+        self.tw("succ", "start", "api", "--reason", "swap")
+        result = self.tw("thread", "set", "api", "--session", "new-api", ok=False)
+        self.assertIn("succ seat", result.stderr)
+
+
+class LeadSwap2(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.tw("lead", "--session", "lead-old")
+        self.tw("prefs", "--set", "language=zh")
+
+    def test_disk_write_lock_is_rechecked_by_save(self):
+        st = self.state()
+        st["write_lock"] = {"ho": "HO9", "since": "now", "old_session": "lead-old"}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        result = self.tw("prefs", "--set", "language=en", ok=False)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_write_lock_gate_and_rev_conflict(self):
+        self.tw("succ", "start", "lead", "--reason", "swap")
+        self.tw("succ", "candidate", "HO1", "lead-next")
+        self.tw("succ", "freeze", "HO1", "--stopped", "lead-old idle")
+        self.assertEqual(self.tw("task", "reviews").returncode, 0)
+        rejected = self.tw("memory", "should be blocked", ok=False)
+        self.assertIn("换届中", rejected.stderr)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tw_rev_test", TW)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        ledger = self.dir / ".teamwork"
+        loaded = mod.load(ledger)
+        disk = self.state()
+        disk["rev"] += 1
+        (ledger / "state.json").write_text(json.dumps(disk), encoding="utf-8")
+        with self.assertRaises(SystemExit) as caught:
+            mod.save(ledger, loaded, {"ev":"succ-ping"})
+        self.assertIn("台账刚被别的命令改过，重跑一次", str(caught.exception))
+        self.assertEqual(self.state()["rev"], disk["rev"])
+
+    def test_lock_allows_hooks_reads_and_denies_writers(self):
+        self.tw("thread", "add", "api", "--session", "old-api")
+        self.tw("task", "add", "T1", "--title", "test writer lock")
+        self.tw("succ", "start", "lead", "--reason", "swap")
+        self.tw("succ", "candidate", "HO1", "lead-next")
+        self.tw("succ", "freeze", "HO1", "--stopped", "lead-old idle")
+        event = json.dumps({"tool_name":"Bash","tool_input":{"command":"rm " + "-rf /"}})
+        before = subprocess.run([sys.executable, str(TW), "bash-guard"], cwd=self.dir, env=self.env,
+                                input=event, capture_output=True, text=True)
+        self.assertEqual(before.returncode, 0)
+        fake_claude = self.dir / "fake-claude"
+        fake_codex = self.dir / "fake-codex"
+        for cmd in (("context",), ("req", "list"), ("decided", "x"), ("handover", "api"),
+                    ("quota", "--config-dir", str(fake_claude), "--codex-dir", str(fake_codex))):
+            result = self.tw(*cmd)
+            self.assertEqual(result.returncode, 0, (cmd, result.stderr))
+        after = subprocess.run([sys.executable, str(TW), "bash-guard"], cwd=self.dir, env=self.env,
+                               input=event, capture_output=True, text=True)
+        self.assertEqual((after.returncode, after.stdout), (before.returncode, before.stdout))
+        for cmd in (("memory", "blocked"), ("log", "blocked"), ("task", "add", "T99", "--title", "blocked"),
+                    ("model-log", "--task", "T1", "--type", "code", "--model", "gpt", "--result", "ok"),
+                    ("worktree", "api")):
+            result = self.tw(*cmd, ok=False)
+            self.assertNotEqual(result.returncode, 0)
+        self.assertNotEqual(self.tw("rebuild", "--apply", ok=False).returncode, 0)
+
+    def test_first_lead_session_with_failed_screen_is_rejected(self):
+        st = self.state()
+        st["lead"]["session_id"] = None
+        st["screens"]["SC9"] = {"seat":"lead","session_id":"first-lead","verdict":"fail"}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        result = self.tw("lead", "--session", "first-lead", ok=False)
+        self.assertIn("关键席位", result.stderr)
+
+    def test_concurrent_request_adds_are_serialized_without_tracebacks(self):
+        commands = [[sys.executable, str(TW), "req", "add", f"request {i}"] for i in range(8)]
+        procs = [subprocess.Popen(cmd, cwd=self.dir, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True) for cmd in commands]
+        results = [p.communicate() + (p.returncode,) for p in procs]
+        successes = sum(code == 0 for _, _, code in results)
+        for stdout, stderr, code in results:
+            self.assertNotIn("Traceback", stderr)
+            if code:
+                self.assertTrue("台账刚被别的命令改过" in stderr or "ledger was just changed" in stderr, stderr)
+        self.assertEqual(len(self.state()["requests"]), successes)
+
+    def test_lead_session_cannot_bypass_open_handover(self):
+        self.tw("succ", "start", "lead", "--reason", "swap")
+        self.tw("succ", "candidate", "HO1", "lead-next")
+        self.tw("succ", "freeze", "HO1", "--stopped", "lead-old idle")
+        for args in (("--session", "lead-next"), ("--session", "lead-next", "--force")):
+            result = self.tw("lead", *args, ok=False)
+            self.assertIn("succ seat or succ abort", result.stderr)
+        removed = self.tw("lead", "--session", "lead-next", "--handover", "HO1", ok=False)
+        self.assertNotEqual(removed.returncode, 0)
+
+
+class ScreenShadow2(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.keys = self.dir.parent / (self.dir.name + "-keys") / "demo"
+        self.keys.mkdir(parents=True)
+        self.env["TW_KEYS_DIR"] = str(self.keys.parent)
+        self.tw("prefs", "--set", "language=zh")
+
+    def test_screen_and_handover_errors_use_language_labels(self):
+        screen = self.tw("screen", "ask", "lead", ok=False)
+        self.assertIn("需要 --session", screen.stderr)
+        pack_dir = self.dir / ".teamwork" / "private" / "handover" / "HO1-api"
+        pack_dir.mkdir(parents=True)
+        st = self.state()
+        st["handovers"] = {"HO1": {"id":"HO1", "seat":"api", "kind":"thread", "phase":"packed",
+                                    "steps":{"start":"now"}, "pack_dir":str(pack_dir),
+                                    "candidates":[{"session_id":"candidate-next"}]}}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        receipt = self.tw("succ", "verify", "HO1", "--candidate", "candidate-next",
+                          "--receipt", str(self.dir / "missing-receipt.json"), ok=False)
+        self.assertIn("找不到验收回执", receipt.stderr)
+        import hashlib
+        used = self.keys / "HO1-used.json"
+        used.write_text(json.dumps({"questions":[hashlib.sha256("未推送提交有几条？".encode()).hexdigest()]}), encoding="utf-8")
+        quiz = self.tw("succ", "quiz", "HO1", "--candidate", "candidate-next", ok=False)
+        self.assertIn("没有未使用的测验材料", quiz.stderr)
+
+    def test_scoring_is_immutable(self):
+        self.tw("thread", "add", "api", "--session", "session_api")
+        self.tw("screen", "ask", "api", "--session", "session_api")
+        scores = ",".join(f"P{i}=2" for i in range(1, 7))
+        self.tw("screen", "record", "SC1", "--scores", scores)
+        self.assertNotEqual(self.tw("screen", "record", "SC1", "--scores", scores, ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("screen", "unavailable", "SC1", "--why", "later", ok=False).returncode, 0)
+
+    def test_signals_skips_bad_lines_and_does_not_save_while_locked(self):
+        st = self.state()
+        st["write_lock"] = {"ho": "HO9", "since": "now", "old_session": "lead-old"}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        transcript = self.dir / "signals.jsonl"
+        transcript.write_text('{"type":"user","message":{"content":"不对"}}\nnot-json\n', encoding="utf-8")
+        result = json.loads(self.tw("signals", "lead", "--transcript", str(transcript), "--json").stdout)
+        self.assertEqual(result["color"], "yellow")
+        self.assertEqual(result["bad_lines"], 1)
+        self.assertEqual(self.state()["signals"], {})
+
+    def test_session_ids_are_trimmed_and_signal_labels_follow_language(self):
+        self.tw("thread", "add", "api", "--session", " session_api ")
+        self.assertEqual(self.state()["threads"]["api"]["session_id"], "session_api")
+        self.tw("thread", "set", "api", "--session", " session_next ")
+        self.assertEqual(self.state()["threads"]["api"]["session_id"], "session_next")
+        self.tw("screen", "ask", "api", "--session", " session_next ")
+        self.assertEqual(self.state()["screens"]["SC1"]["session_id"], "session_next")
+        self.tw("succ", "start", "api", "--reason", "swap")
+        self.tw("succ", "candidate", "HO1", " candidate_next ")
+        self.assertEqual(self.state()["handovers"]["HO1"]["candidates"][0]["session_id"], "candidate_next")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tw_screen_test", TW)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        screens = self.state()
+        screens["screens"]["SC9"] = {"session_id":" session_next ", "verdict":"fail"}
+        self.assertTrue(mod._screen_failed(screens, "session_next"))
+        self.tw("succ", "abort", "HO1", "--reason", "end")
+        self.tw("prefs", "--set", "language=en")
+        english = json.loads(self.tw("signals", "lead", "--json").stdout)
+        self.assertEqual(english["color_label"], "green")
+        self.tw("prefs", "--set", "language=zh")
+        chinese = json.loads(self.tw("signals", "lead", "--json").stdout)
+        self.assertEqual(chinese["color_label"], "绿")

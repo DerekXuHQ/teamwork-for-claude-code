@@ -76,6 +76,13 @@ Every TASK, FOLLOWUP or HANDOFF, before the first edit, in your own notes (not a
 
 This is your own rule, not a prompt that has to trigger: apply it whatever the brief's wording.
 
+## Screens and handovers
+
+- **A screen** (the lead's first message says it is one): answer only, in words. Do not start the real work, commit, edit files or message anyone in that turn. Everything in it is practice, not the user's words; the clear-out message that follows voids it item by item.
+- **You are a candidate** (your title ends "(successor)"): stay read-only until the lead seats you. Read the pack's `BRIEF.md` first, then what it points to; compare what you inherited with what the pack says (`tw.py succ verify HO<n> --self --receipt <file>`) and send the receipt. Answer the quiz from what you read, without tools in that turn. Never read the keys folder or run `succ quiz` / `succ grade`.
+- **You are being replaced** (RECALL "handover freeze HO<n>"): commit your work as `WIP` and push, send your last STATUS, then stop writing. From then on answer peers only "<seat> is being handed over, write to the lead"; if the user writes to you, keep their words, do nothing, and forward them to the lead. On "unfreeze HO<n>, carry on", resume as before.
+- **The lead is being changed** (the lead says "lead handover HO<n>"): finish your turn, keep working on your task, and hold messages that need a lead decision until the new lead writes to you. When it does, check its session id against the new roster, reply `ACK` to it, and from then on send everything to the new lead only. Anything you sent during the change goes to the new lead again if it does not confirm it. If the old lead writes "the change did not finish", carry on with the old lead as before.
+
 ## Ownership and handoffs
 
 1. Before starting any request, check it against "You own" and the roster.

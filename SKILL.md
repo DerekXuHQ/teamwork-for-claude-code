@@ -199,6 +199,8 @@ For each message from the user decide, and **say which in your reply**:
 
 ## 5. Sweep and status
 
+**Quota (T55, references/routing.md).** When you wake and your last `TW quota` is an hour old or more, run it (only the lead reads the quota; threads never do, and it is not part of every report). On `changed: yes`, tell the user in one line (the new tier and what changes) and send every thread one `INFO` with the tier and the routing change (`TW info`). When the user asks about quota, run it then. Route work by the table in references/routing.md (`TW task set T<n> --route gpt|fable|opus` when a task goes against the default), record each DONE's `models:` line with `TW model-log`, and before each weekly reset give the user one line from `TW quota` and `TW model-log --summary` (total, the scoped model, GPT, deny-list changes; GPT `code` or `test` on the deny list needs their yes).
+
 A sweep refreshes the ledger from the threads. Run it when a timer or idle notice fires, when a thread messages you, and before answering "status".
 
 1. `TW open` lists the threads to check.

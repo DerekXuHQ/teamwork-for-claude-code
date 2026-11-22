@@ -23,6 +23,15 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # quota.py sits next to tw.py (also under python -P)
+try:  # only `quota` needs it: a copy without quota.py must not break the hooks (context, bash-guard)
+    import quota as quota_reader  # noqa: E402
+    QUOTA_DEFAULTS = dict(quota_reader.DEFAULTS)
+except ImportError:
+    quota_reader = None
+    QUOTA_DEFAULTS = {"quota_burn_at": 70, "quota_lead_only_at": 90, "quota_pre_reset_hours": 36,
+                      "quota_pre_reset_fable_max": 80, "quota_fable_done_at": 95, "quota_5h_tight": 80,
+                      "quota_gpt_tight": 90}
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 TEMPLATES = SKILL_DIR / "templates"
@@ -85,6 +94,7 @@ LABELS = {
         "merge_waiting": "Waiting to merge: {n} branch(es), oldest {m} min ({tasks})", "owner": "owner",
         "d_draft": "draft", "d_final": "final", "i_open": "open", "i_fixed-on-branch": "fixed on a branch",
         "i_merged": "merged", "i_verified": "verified", "qa_pending": "Merged, regression not run yet",
+        "quota_deny": "Unsuitable model combinations",
     },
     "zh": {
         "planned": "建议中（还没有会话）", "starting": "已创建，第一轮还没结束",
@@ -107,6 +117,7 @@ LABELS = {
         "merge_waiting": "等待合并：{n} 个分支，最早的已等 {m} 分钟（{tasks}）", "owner": "负责",
         "d_draft": "草稿", "d_final": "定稿", "i_open": "未修", "i_fixed-on-branch": "已在分支上修好",
         "i_merged": "已合并", "i_verified": "已验证", "qa_pending": "已合并、还没跑回归",
+        "quota_deny": "不适合名单",
     },
 }
 
@@ -279,6 +290,8 @@ def snapshots(st, ev):
         snap["snap_deliverables"] = st.get("deliverables", [])
     if ev.get("ev") in ("merge", "qa-done"):
         snap["snap_qa_pending"] = st.get("qa_pending", [])
+    if ev.get("ev", "").startswith("model-deny-"):
+        snap["snap_model_deny"] = st.get("model_deny", [])
     if "roster_version" in st:
         snap["snap_roster_version"] = st["roster_version"]
     return snap
@@ -419,7 +432,7 @@ def render_tasks(st, only_owner=None):
                          for r, q in st.get("requests", {}).items() if tid in (q.get("tasks") or [])]
                         + [f"({r})" for r in k.get("from_requests") or []]) or "-"  # (R1): follow-up, not holding it
         rows.append(
-            f"| {tid} | {k['title']} | {k.get('owner') or '-'} | {deps} | {k['status']} | {k.get('accept') or '-'} "
+            f"| {tid} | {k['title']}" + (f" ({k['route']})" if k.get("route") else "") + f" | {k.get('owner') or '-'} | {deps} | {k['status']} | {k.get('accept') or '-'} "
             f"| {review} | {reqs} |"
         )
     if not rows:
@@ -575,6 +588,9 @@ def render_board(st):
     iss = [i for i in st.get("issues", []) if i.get("status") != "verified"]
     if iss:
         out += ["", f"## {lab(st, 's_issues')}", ""] + [render_issue(i, st) for i in iss]
+    deny = [x for x in st.get("model_deny", []) if not x.get("allowed_at")]
+    if deny:
+        out += ["", f"## {lab(st, 'quota_deny')}", ""] + [f"- {x.get('type')} — {x.get('model')}" for x in deny]
     out += ["", f"## {lab(st, 'roster')}", "", render_roster(st), "", f"## {lab(st, 'plan')}", "", render_tasks(st)]
     return "\n".join(out) + "\n"
 
@@ -1098,6 +1114,7 @@ def cmd_task(a):
             "touches": check_touches(a.touches),
             "topics": norm_topics(a.topics),
             **({"model": a.model.strip()} if (a.model or "").strip() else {}),
+            **({"route": a.route} if a.route else {}),
             **({"no_scripts": True} if a.no_scripts else {}),
             "status": "approved" if st["plan_approved"] else "planned",
             "notes": "",
@@ -1169,6 +1186,11 @@ def cmd_task(a):
                 k["model"] = a.model.strip()
             else:
                 k.pop("model", None)
+        if a.route is not None:
+            if a.route.strip():
+                k["route"] = a.route.strip()
+            else:
+                k.pop("route", None)
         if a.no_scripts:
             k["no_scripts"] = True
         if a.scripts_ok:
@@ -2470,8 +2492,8 @@ def cmd_prefs(a):
                 sys.exit("require_review must be true or false")
             if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
                 sys.exit("turning the review gate off is the user's decision: add --user-said \"<their words>\"")
-        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes") and not re.fullmatch(r"[0-9]+", v):
-            sys.exit(f"{k}: a whole number of minutes")
+        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes", *QUOTA_DEFAULTS) and not re.fullmatch(r"[0-9]+", v):
+            sys.exit(f"{k}: a whole number" + ("" if k in QUOTA_DEFAULTS else " of minutes"))
         cur = st["prefs"].get(k)
         if k in ("check_cmd", "language", "short_name", "thread_permission_mode", "skill_edge", "spawn_policy", "perm_policy", "gpt_policy"):
             st["prefs"][k] = v  # text, never coerced (check_cmd=true is a command)
@@ -2518,6 +2540,14 @@ def cmd_prefs(a):
                              "decision, add --user-said \"<their words>\"")
         if k == "short_name" and v and not re.fullmatch(SHORT_RE, v):
             sys.exit("short_name: letters/digits/hyphen, max 6 chars (e.g. TFCC)")
+        if k in ("quota_burn_at", "quota_lead_only_at"):
+            other = {**QUOTA_DEFAULTS, **st["prefs"], **dict(x.partition("=")[::2] for x in a.set or [])}
+            if re.fullmatch(r"[0-9]+", str(other["quota_burn_at"])) and re.fullmatch(
+                    r"[0-9]+", str(other["quota_lead_only_at"])) and int(other["quota_burn_at"]) >= int(
+                    other["quota_lead_only_at"]):
+                sys.exit("quota_burn_at must be below quota_lead_only_at (or burn-fable and save never happen)")
+        if k in QUOTA_DEFAULTS and not 0 <= int(v) <= (168 if k.endswith("_hours") else 100):
+            sys.exit(f"{k}: a whole number, " + ("hours from 0 to 168" if k.endswith("_hours") else "percent from 0 to 100"))
     retitled = {}
     if any(kv.partition("=")[0] == "short_name" for kv in a.set or []):
         for n, t in st["threads"].items():
@@ -2535,6 +2565,216 @@ def cmd_prefs(a):
                           "note": "update each session with set_session_title / set_session_tags"},
                          ensure_ascii=False), file=sys.stderr)
     print(json.dumps(st["prefs"], ensure_ascii=False))
+
+
+QUOTA_RANK = ("unknown", "normal", "pre-reset-burn", "burn-fable", "save", "lead-only")  # least to most severe
+
+
+def cmd_quota(a):
+    """T55: the lead's quota check. Reads local files only; bad data counts as missing; exit code is always 0."""
+    if quota_reader is None:
+        print("quota: scripts/quota.py is missing next to tw.py (reinstall teamwork) · tier unknown · changed: no")
+        return
+    try:
+        sys.stdout.reconfigure(errors="replace")  # a lone surrogate in a cached name must not crash the print
+    except (AttributeError, ValueError):
+        pass
+    dirs = a.config_dir or [os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")]
+    codex_dir = a.codex_dir or str(Path.home() / ".codex")
+    current = dt.datetime.now().timestamp()
+    notes, prefs, prev, changed, state_path, project_dir, prefs_ok = [], {}, None, "no", None, None, True
+    try:
+        project_dir = find_dir()
+        state_path = Path(project_dir) / "quota-state.json" if project_dir else None
+        if state_path:
+            try:
+                prev = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, RecursionError):
+                prev = None
+            if isinstance(prev, dict) and prev.get("tier") in QUOTA_RANK and isinstance(prev.get("flags", []), list) \
+                    and all(x in ("gpt-tight", "fable-done") for x in prev.get("flags", [])):
+                prev = {"tier": prev["tier"], "flags": sorted(prev.get("flags", []))}  # only the checked fields
+            else:
+                prev = None  # a hand-edited or broken file counts as no earlier run
+            try:
+                st0 = load(project_dir)
+                prefs = st0["prefs"] if isinstance(st0, dict) and isinstance(st0.get("prefs"), dict) else None
+            except Exception:
+                prefs = None
+            if prefs is None:  # thresholds unknown: report, but do not record a change on defaults
+                prefs, prefs_ok = {}, False
+                notes.append("prefs unreadable: default thresholds, state not updated")
+    except Exception as exc:  # anything odd about the project: answer as outside one
+        notes.append(f"project files unreadable: {exc.__class__.__name__}")
+        state_path = None
+    # One reading per config folder (different accounts must not be mixed); the most severe tier decides.
+    graded = []
+    for i, c in enumerate(dirs):
+        r = quota_reader.read_quota([c], codex_dir, current)
+        lv, fl = quota_reader.tier(r, prefs, current)
+        tot = quota_reader.num(((r.get("claude") or {}).get("total") or {}).get("pct"))
+        sc = quota_reader.num(((r.get("claude") or {}).get("scoped") or {}).get("pct"))
+        graded.append(((QUOTA_RANK.index(lv), tot or -1, sc or -1), i, r, lv, fl))
+    _, pick, result, level, flags = max(graded, key=lambda g: (g[0], -g[1]))
+    result.setdefault("notes", [])
+    result["notes"] += notes
+    if sum(g[3] != "unknown" for g in graded) > 1:
+        result["notes"].append(f"most severe of {len(dirs)} config folders: #{pick + 1} ({dirs[pick]})")
+    signature = {"tier": level, "flags": sorted(x for x in flags if x != "5h-tight")}  # 5h-tight: the lead's own
+    if state_path and level != "unknown" and prefs_ok:
+        changed = "yes" if (prev is None and (level != "normal" or signature["flags"])) or (
+            prev is not None and (prev["tier"], prev["flags"]) != (level, signature["flags"])) else "no"
+        try:
+            state_path.write_text(json.dumps(dict(signature, at=int(current))), encoding="utf-8")
+        except OSError as exc:
+            result["notes"].append(f"state not saved ({exc.__class__.__name__}): the next run reports this "
+                                   "change again")
+        if changed == "yes":
+            try:
+                log(Path(project_dir), {"ev": "quota", "tier": level, "flags": signature["flags"], "prev": prev})
+            except Exception as exc:
+                result["notes"].append(f"log not written: {exc.__class__.__name__}")
+    output = {**result, "tier": level, "flags": flags, "prev": prev, "changed": changed}
+    if a.json:
+        print(json.dumps(output, ensure_ascii=False, indent=1))
+        return
+    claude = result.get("claude", {})
+    total, scoped, five = (claude.get(x) or {} for x in ("total", "scoped", "five_hour"))
+    gpt = result.get("gpt", {}) or {}
+    def show(row):
+        return "?" if quota_reader.num(row.get("pct")) is None else f"{row['pct']:.0f}%"
+    # Keep the line compact and avoid exposing local paths.
+    gpt_label = show(gpt) + ("" if gpt.get("weekly") else "(5h)") if gpt else "?"
+    prev_label = prev.get("tier") if prev else "-"
+    line = f"quota: total {show(total)} · 5h {show(five)} · {scoped.get('model') or 'Fable'} {show(scoped)} · GPT {gpt_label} · tier {level}"
+    if flags:
+        line += " [" + ", ".join(flags) + "]"
+    line += f" · changed: {changed} · prev {prev_label}"
+    if result.get("notes"):
+        line += " · notes: " + "; ".join(str(n) for n in result["notes"])
+    print(line)
+
+
+MODEL_TYPES = ("code", "test", "read", "review1", "review2", "docs-en", "docs-zh", "research",
+               "debug-hard", "plan", "merge")
+MODELS = ("gpt", "fable", "opus")
+
+
+def _model_log_append(path, record):
+    """One JSON line; a hand-edited file without a final newline does not glue two records together."""
+    try:
+        ends = path.read_bytes()[-1:] in (b"", b"\n")
+    except OSError:
+        ends = True
+    with open(path, "a", encoding="utf-8") as stream:
+        stream.write(("" if ends else "\n") + json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _model_deny_change(st, typ, model, allow=False):
+    rows = st.setdefault("model_deny", [])
+    found = next((x for x in rows if x.get("type") == typ and x.get("model") == model), None)
+    if allow:
+        if found:
+            rows.remove(found)
+        # remembered: the old redos must not put it straight back; only new tries after this count
+        rows.append({"type": typ, "model": model, "allowed_at": now()})
+    elif found and found.get("allowed_at"):
+        found.pop("allowed_at")
+    elif not found:
+        rows.append({"type": typ, "model": model})
+
+
+def _denied(st, typ, model):
+    return any(x.get("type") == typ and x.get("model") == model and not x.get("allowed_at")
+               for x in st.get("model_deny", []))
+
+
+def cmd_model_log(a):
+    d = need(find_dir())
+    st = load(d)
+    path = d / "model-log.jsonl"
+    if a.summary:
+        rows, skipped = [], 0  # (line number, record): `after` counts lines, so the index is the line
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").split("\n")  # not splitlines: U+2028 in a why
+        except OSError:
+            lines = []
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except (ValueError, RecursionError):
+                item = None
+            if isinstance(item, dict) and item.get("type") in MODEL_TYPES and item.get("model") in MODELS:
+                rows.append((i, item))  # a record, or an `allow` marker (ev) the summary counts from
+            else:
+                skipped += 1
+        summary = []
+        pairs = sorted({(x["type"], x["model"]) for _, x in rows if x.get("ev") != "allow"})
+        stamp = dt.datetime.now().timestamp()
+        for typ, model in pairs:
+            pair = [(i, x) for i, x in rows if (x["type"], x["model"]) == (typ, model)]
+            marks = [i for i, x in pair if x.get("ev") == "allow"]
+            allowed = next((x["allowed_at"] for x in st.get("model_deny", []) if x.get("allowed_at")
+                            and (x.get("type"), x.get("model")) == (typ, model)), None)
+            # only tries since the user allowed it again: after the log's marker, or (marker cut away) by time
+            matched = [x for i, x in pair if x.get("ev") != "allow" and (
+                i > marks[-1] if marks else not allowed or str(x.get("at") or "") >= allowed)]
+            if not matched:
+                continue
+            recent = matched[-3:]
+            redo = sum(x.get("result") == "redo" for x in recent)
+            latest = matched[-1]
+            try:
+                last = dt.datetime.fromisoformat(str(latest.get("at"))).timestamp()
+            except ValueError:
+                last = None
+            summary.append({"type": typ, "model": model, "count": len(matched),
+                            "recent": [x.get("result") for x in recent],
+                            "proposed": len(matched) >= 3 and redo >= 2,
+                            "denied": _denied(st, typ, model),
+                            "retry": bool(last and stamp - last >= 30 * 86400)})
+        deny = lambda: [x for x in st.get("model_deny", []) if not x.get("allowed_at")]
+        output = {"combinations": summary, "model_deny": deny(), **({"skipped": skipped} if skipped else {})}
+        additions = [(x["type"], x["model"]) for x in summary if x["proposed"] and
+                     (x["model"], x["type"]) not in (("gpt", "code"), ("gpt", "test")) and not x["denied"]]
+        if additions:
+            for typ, model in additions:
+                _model_deny_change(st, typ, model)
+            save(d, st, {"ev": "model-deny-proposed", "items": additions})
+            output["model_deny"] = deny()
+            for row in summary:
+                row["denied"] = _denied(st, row["type"], row["model"])
+        if a.json:
+            print(json.dumps(output, ensure_ascii=False, indent=1))
+        else:
+            print(json.dumps(output, ensure_ascii=False))
+        return
+    if a.allow and a.deny:
+        sys.exit("--allow or --deny, not both")
+    if a.allow or a.deny:
+        typ, model = a.allow or a.deny, a.model
+        if typ not in MODEL_TYPES or model not in MODELS:
+            sys.exit("--allow/--deny needs a valid type and model")
+        if not (a.user_said or "").strip():
+            sys.exit("--allow/--deny requires --user-said")
+        _model_deny_change(st, typ, model, allow=bool(a.allow))
+        if a.allow:  # the marker the summary counts new tries from (survives a cut or emptied log)
+            _model_log_append(path, {"ev": "allow", "type": typ, "model": model, "at": now()})
+        save(d, st, {"ev": "model-deny-allow" if a.allow else "model-deny-add",
+                     "type": typ, "model": model, "user_said": a.user_said.strip()})
+        print(f"{typ} on {model}: " + ("allowed again" if a.allow else "on the deny list"))
+        return
+    if a.type not in MODEL_TYPES or a.model not in MODELS or a.result not in ("ok", "redo"):
+        sys.exit("record needs a valid --type, --model and --result")
+    if a.task not in st.get("tasks", {}):
+        sys.exit(f"unknown task {a.task}")
+    record = {"task": a.task, "type": a.type, "model": a.model, "result": a.result,
+              "why": a.why, "at": now()}
+    _model_log_append(path, record)
+    print(json.dumps(record, ensure_ascii=False))
+
 
 
 OPENING = {
@@ -4024,6 +4264,8 @@ def _replay(st, e, project, notes, d):
             st["tasks"].update(e["snap_more_tasks"])
         if e.get("snap_roster_version") is not None:
             st["roster_version"] = e["snap_roster_version"]
+        if e.get("snap_model_deny") is not None:
+            st["model_deny"] = e["snap_model_deny"]
         r = e.get("req")
         if r and ev.startswith("req"):
             q = st["requests"].setdefault(r, {"text": e.get("text") or r, "status": "open", "tasks": [],
@@ -5240,6 +5482,7 @@ def main():
                    "tasks must not run in parallel")
     x.add_argument("--touches", help="comma list of paths/globs the task will change (file lease), e.g. 'web/**,api/x.py'")
     x.add_argument("--model", help="model for this task, over the thread's default (IL-31); empty clears it")
+    x.add_argument("--route", choices=["", "gpt", "fable", "opus"], help="task model route; empty clears it")
     x.add_argument("--no-scripts", action="store_true", help="write this by hand, no generating scripts (IL-31)")
     x.add_argument("--scripts-ok", action="store_true", help="set: clear --no-scripts")
     x.add_argument("--status")
@@ -5332,11 +5575,29 @@ def main():
         f=cmd_open
     )
     x = s.add_parser(
-        "prefs", help="show or set coordination prefs: --set key=value ..."
+        "prefs", help="show or set coordination prefs: --set key=value ...; quota thresholds: "
+        + ", ".join(f"{k}={v}" for k, v in QUOTA_DEFAULTS.items())
     )
     x.add_argument("--set", nargs="*")
     x.add_argument("--user-said", metavar="WORDS", help="the user's words, needed to turn require_review off")
     x.set_defaults(f=cmd_prefs)
+    x = s.add_parser("quota", help="read local usage windows and quota tier (lead)")
+    x.add_argument("--config-dir", action="append", metavar="DIR")
+    x.add_argument("--codex-dir", metavar="DIR")
+    x.add_argument("--json", action="store_true")
+    x.set_defaults(f=cmd_quota)
+    x = s.add_parser("model-log", help="record model outcomes and review suitability")
+    x.add_argument("--task")
+    x.add_argument("--type", choices=MODEL_TYPES)
+    x.add_argument("--model", choices=MODELS)
+    x.add_argument("--result", choices=["ok", "redo"])
+    x.add_argument("--why")
+    x.add_argument("--summary", action="store_true")
+    x.add_argument("--json", action="store_true")
+    x.add_argument("--deny", choices=MODEL_TYPES)
+    x.add_argument("--allow", choices=MODEL_TYPES)
+    x.add_argument("--user-said")
+    x.set_defaults(f=cmd_model_log)
     x = s.add_parser("opening", help="show the opening policy questions")
     x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_opening)
     x = s.add_parser("selfcheck", help="check this lead session and project setup")

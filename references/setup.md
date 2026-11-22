@@ -112,6 +112,12 @@ RC threads all start in the same served folder. Each RC thread creates its own g
 
 They need a cloud environment and, to edit code, a GitHub repo the account can reach. The lead passes `source_url`, `source_revision` and `outcome_branch`. They cannot read the project folder: anything they need goes into the repo or the TASK message.
 
+## §5b Models and quota (T55)
+
+- `TW quota` reads local files only, no network and no credentials: the Claude windows from the newest session transcripts in each config folder (`CLAUDE_CONFIG_DIR`, default `~/.claude`; the state file `~/.claude.json`, whose usage cache is written only when someone opens `/usage`), and the GPT windows from `~/.codex/sessions`. Pass `--config-dir` (repeatable: each folder is read on its own, the most severe tier decides) / `--codex-dir` for other places. Nothing to install.
+- A running session's model cannot be changed by a tool. `create_session(model=...)` sets it for a new seat only; the user can switch any session by hand in claude.ai. `get_session` shows `configured_model`, `session_context.model` and `external_metadata.last_served_model` (the self-check compares them).
+- GPT runs through the codex plugin (`codex:codex-rescue`, or its companion script). `TW selfcheck` says whether `codex` is on the PATH; routing is in references/routing.md.
+
 ## §6 If something is refused
 
 - A trust card appears in claude.ai the first time the lead messages or creates sessions: approve it for the lead only.

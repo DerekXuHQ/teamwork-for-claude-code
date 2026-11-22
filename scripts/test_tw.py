@@ -15,6 +15,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # scripts/: quota.py next to tw.py
+import quota  # noqa: E402
 
 TW = Path(__file__).resolve().parent / "tw.py"
 WALK = ["planned", "approved", "dispatched", "working", "review", "done"]
@@ -154,6 +156,7 @@ class Releases(unittest.TestCase):
         (self.repo / "SKILL.md").write_text("release one\n")
         (self.repo / "scripts").mkdir()
         shutil.copy2(TW, self.repo / "scripts" / "tw.py")
+        shutil.copy2(TW.parent / "quota.py", self.repo / "scripts" / "quota.py")  # tw.py imports it
         self.commit("first")
         self.home = self.root / "home"; self.home.mkdir()
         self.configs = [self.home / ".claude", self.home / ".claude-b"]
@@ -4502,6 +4505,282 @@ class H1Followups(TwCase):
         result = subprocess.run([sys.executable, str(TW), "context"], cwd=work, env=self.env,
                                 capture_output=True, text=True)
         self.assertNotIn("If you are this project's lead", result.stdout)
+
+
+class Quota(TwCase):
+    NOW = 2_000_000_000
+
+    def setUp(self):
+        super().setUp()
+        self.cfg = self.dir / "fake-config"
+        self.codex = self.dir / "fake-codex"
+        self.cfg.mkdir()
+        (self.codex / "sessions" / "nested").mkdir(parents=True)
+
+    def event(self, windows, timestamp=None):
+        payload = {"timestamp": timestamp or self.NOW - 20,
+                   "rate_limit_info": {"unifiedWindows": windows}}
+        (self.cfg / "bridge-transcript-cse_fixture.jsonl").write_text(json.dumps(payload) + "\n")
+
+    def win(self, value, reset=None):
+        return {"utilization": value, "resetsAt": reset or self.NOW + 86400}
+
+    def read(self):
+        return quota.read_quota([str(self.cfg)], str(self.codex), self.NOW)
+
+    def test_event_windows_order_spacing_and_expired_data(self):
+        self.event({"seven_day": {"resetsAt": self.NOW - 1, "utilization": 0.4},
+                    "five_hour": {"resetsAt": self.NOW + 5, "utilization": 0.2}})
+        self.assertNotIn("total", self.read()["claude"])
+        self.event({"seven_day": {"resetsAt" : 2000000100, "utilization" : 0.695},
+                    "five_hour": self.win(0.81)})
+        result = self.read()["claude"]
+        self.assertAlmostEqual(result["total"]["pct"], 69.5)
+        self.assertAlmostEqual(result["five_hour"]["pct"], 81)
+
+    def test_bad_json_empty_file_and_bad_values_are_missing(self):
+        p = self.cfg / "bridge-transcript-cse_fixture.jsonl"
+        for content in ("{bad\n", "", '{"unifiedWindows":{"seven_day":{"utilization":1.2.3}}}\n'):
+            p.write_text(content)
+            self.assertNotIn("total", self.read()["claude"])
+
+    def test_epoch_milliseconds_absurd_and_string_times(self):
+        self.event({"seven_day": {"utilization": 0.5, "resetsAt": str(self.NOW + 800)},
+                    "five_hour": {"utilization": 0.5, "resetsAt": (self.NOW + 1000) * 1000}})
+        c = self.read()["claude"]
+        self.assertIn("total", c)
+        self.assertIn("five_hour", c)
+        self.assertIsNone(quota.epoch(10 ** 10000))
+
+    def test_cache_only_fable_name_and_done_flag(self):
+        cache = {"fetchedAtMs": self.NOW * 1000,
+                 "utilization": {"seven_day": {"utilization": 71, "resets_at": self.NOW + 3600},
+                                 "limits": [{"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable"}},
+                                             "percent": 96, "resets_at": self.NOW + 3600}]}}
+        (self.cfg / ".claude.json").write_text(json.dumps({"cachedUsageUtilization": cache}))
+        result = self.read()
+        self.assertEqual(result["claude"]["scoped"]["src"], "cache")
+        self.assertEqual(quota.tier(result, {}, self.NOW), ("save", ["fable-done"]))
+
+    def test_inferred_scoped_and_pre_reset_tier(self):
+        self.event({"seven_day": self.win(0.5, self.NOW + 3600)})
+        c = self.read()["claude"]
+        self.assertEqual(c["scoped"]["src"], "inferred")
+        self.assertEqual(quota.tier({"claude": c}, {}, self.NOW)[0], "pre-reset-burn")
+
+    def test_codex_weekly_choice_expired_primary_and_string_fields(self):
+        p = self.codex / "sessions" / "nested" / "s.jsonl"
+        p.write_text(json.dumps({"rate_limits": {"primary": {"used_percent": 22, "window_minutes": 300,
+             "resets_at": self.NOW + 100}}}) + "\n")
+        self.assertFalse(self.read()["gpt"]["weekly"])
+        p.write_text(json.dumps({"rate_limits": {"primary": {"used_percent": "88", "window_minutes": "300",
+             "resets_at": self.NOW + 100}, "secondary": {"used_percent": 40, "window_minutes": 10080,
+             "resets_at": self.NOW + 200}}}) + "\n")
+        self.assertTrue(self.read()["gpt"]["weekly"])
+        p.write_text(json.dumps({"rate_limits": {"primary": {"used_percent": "bad", "window_minutes": "x",
+             "resets_at": "bad"}}}) + "\n")
+        self.assertTrue(self.read()["gpt"].get("expired"))
+
+    def test_tier_boundaries_flags_and_over_100(self):
+        for value, expected in ((69.5, "normal"), (89.5, "burn-fable"), (94.9, "lead-only"),
+                                (101, "lead-only")):
+            reading = {"claude": {"total": {"pct": value, "resets_at": self.NOW + 400000},
+                                   "scoped": {"pct": 50}, "five_hour": {"pct": 80}}, "gpt": {}}
+            tier, flags = quota.tier(reading, {}, self.NOW)
+            self.assertEqual(tier, expected)
+            self.assertIn("5h-tight", flags)
+        self.assertEqual(quota.tier({}, {}, self.NOW)[0], "unknown")
+
+    def test_quota_changed_first_repeat_and_unknown_does_not_overwrite(self):
+        self.event({"seven_day": self.win(0.8), "five_hour": self.win(0.9),
+                    "seven_day_overage_included": self.win(0.96)})
+        first = json.loads(self.tw("quota", "--config-dir", str(self.cfg), "--codex-dir", str(self.codex), "--json").stdout)
+        self.assertEqual(first["changed"], "yes")
+        second = json.loads(self.tw("quota", "--config-dir", str(self.cfg), "--codex-dir", str(self.codex), "--json").stdout)
+        self.assertEqual(second["changed"], "no")
+        saved = (self.dir / ".teamwork" / "quota-state.json").read_text()
+        (self.cfg / "bridge-transcript-cse_fixture.jsonl").write_text("bad json\n")
+        unknown = json.loads(self.tw("quota", "--config-dir", str(self.cfg), "--codex-dir", str(self.codex), "--json").stdout)
+        self.assertEqual(unknown["tier"], "unknown")
+        self.assertEqual((self.dir / ".teamwork" / "quota-state.json").read_text(), saved)
+
+    def test_quota_never_fails_on_broken_project_files(self):
+        self.event({"seven_day": self.win(0.8)})
+        q = lambda: self.tw("quota", "--config-dir", str(self.cfg), "--codex-dir", str(self.codex), "--json")
+        state = self.dir / ".teamwork" / "quota-state.json"
+        for bad in ('{"tier": "burn-fable", "flags": [1, "a"]}', '{"tier": "burn-fable", "flags": 5}', "[1]"):
+            state.write_text(bad)
+            self.assertEqual(json.loads(q().stdout)["changed"], "yes")  # broken = no earlier run
+        st_file = self.dir / ".teamwork" / "state.json"
+        good = st_file.read_text()
+        st_file.write_text(json.dumps({**json.loads(good), "prefs": ["x"]}))
+        self.assertEqual(json.loads(q().stdout)["tier"], "burn-fable")
+        st_file.write_text("[1]")
+        self.assertEqual(json.loads(q().stdout)["tier"], "burn-fable")
+        st_file.write_text(good)
+        state.write_text('{"tier": "normal", "flags": []}')
+        log_file = self.dir / ".teamwork" / "log.jsonl"
+        log_file.rename(self.dir / "log.moved") if log_file.exists() else None
+        log_file.mkdir()  # the journal cannot be written: a note, not a crash
+        self.assertTrue(any("log not written" in n for n in json.loads(q().stdout)["notes"]))
+
+    def test_quota_folders_read_apart_and_float_threshold(self):
+        other = self.dir / "fake-config-2"
+        other.mkdir()
+        (other / "bridge-transcript-cse_other.jsonl").write_text(json.dumps(
+            {"timestamp": self.NOW - 10, "rate_limit_info": {"unifiedWindows": {"seven_day": self.win(0.95)}}}) + "\n")
+        self.event({"seven_day": self.win(0.10), "seven_day_overage_included": self.win(0.99)}, timestamp=self.NOW - 5)
+        out = json.loads(self.tw("quota", "--config-dir", str(self.cfg), "--config-dir", str(other), "--codex-dir",
+                                 str(self.codex), "--json").stdout)
+        self.assertEqual(out["tier"], "lead-only")  # the other account is at 95%: never mixed with this one
+        self.event({"seven_day": self.win(0.57)})
+        self.assertEqual(quota.tier(self.read(), {"quota_burn_at": 57}, self.NOW)[0], "burn-fable")
+        self.assertNotEqual(self.tw("prefs", "--set", "quota_burn_at=95", ok=False).returncode, 0)  # above lead-only
+
+    def test_quota_stale_cache_folder_does_not_hide_a_live_one(self):
+        old = self.dir / "fake-config-old"
+        old.mkdir()
+        real_now = time.time()
+        cache = {"fetchedAtMs": (real_now - 10 * 3600) * 1000,
+                 "utilization": {"seven_day": {"utilization": 95, "resets_at": real_now + 86400}}}
+        (old / ".claude.json").write_text(json.dumps({"cachedUsageUtilization": cache}))
+        self.event({"seven_day": self.win(0.75)})
+        out = json.loads(self.tw("quota", "--config-dir", str(old), "--config-dir", str(self.cfg), "--codex-dir",
+                                 str(self.codex), "--json").stdout)
+        self.assertEqual(out["tier"], "burn-fable")
+
+    def test_quota_old_event_and_newer_cache(self):
+        real_now = time.time()
+        reset = real_now + 2 * 86400
+        (self.cfg / "bridge-transcript-cse_fixture.jsonl").write_text(json.dumps(
+            {"timestamp": real_now - 72 * 3600,
+             "rate_limit_info": {"unifiedWindows": {"seven_day": {"utilization": 0.4, "resetsAt": reset}}}}) + "\n")
+        q = lambda: json.loads(self.tw("quota", "--config-dir", str(self.cfg), "--codex-dir", str(self.codex),
+                                       "--json").stdout)
+        self.assertEqual(q()["tier"], "unknown")  # three days old: not a reading to route by
+        cache = {"fetchedAtMs": (real_now - 600) * 1000,
+                 "utilization": {"seven_day": {"utilization": 85, "resets_at": reset}}}
+        (self.cfg / ".claude.json").write_text(json.dumps({"cachedUsageUtilization": cache}))
+        self.assertEqual(q()["tier"], "burn-fable")  # the newer, higher reading of the same window
+
+    def test_quota_unreadable_prefs_and_text_notes(self):
+        self.event({"seven_day": self.win(0.75)})
+        q = lambda *x: self.tw("quota", "--config-dir", str(self.cfg), "--codex-dir", str(self.codex), *x).stdout
+        self.tw("prefs", "--set", "quota_burn_at=50", "quota_lead_only_at=60")
+        self.assertIn("tier lead-only", q())
+        st_file = self.dir / ".teamwork" / "state.json"
+        st_file.write_text("{broken")
+        out = json.loads(q("--json"))
+        self.assertEqual((out["changed"], json.loads((self.dir / ".teamwork" / "quota-state.json").read_text())["tier"]),
+                         ("no", "lead-only"))  # defaults are not recorded as a change
+        self.assertIn("prefs unreadable", q().split("notes: ", 1)[1])
+        (self.dir / ".teamwork" / "quota-state.json").write_text('{"tier": "\\ud800", "flags": [NaN]}')
+        json.loads(q("--json"))  # still valid JSON, no crash
+
+    def test_tw_without_quota_module_still_runs(self):
+        alone = Path(tempfile.mkdtemp(dir=self.dir))
+        shutil.copy2(TW, alone / "tw.py")
+        r = subprocess.run([sys.executable, str(alone / "tw.py"), "version"], cwd=self.dir, env=self.env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run([sys.executable, str(alone / "tw.py"), "quota"], cwd=self.dir, env=self.env,
+                           capture_output=True, text=True)
+        self.assertEqual((r.returncode, "quota.py is missing" in r.stdout), (0, True))
+
+    def test_quota_threshold_prefs_validate_numeric_range(self):
+        self.tw("prefs", "--set", "quota_burn_at=68")
+        self.assertEqual(self.state()["prefs"]["quota_burn_at"], 68)
+        self.tw("prefs", "--set", "quota_gpt_tight=abc", ok=False)
+        self.tw("prefs", "--set", "quota_gpt_tight=101", ok=False)
+
+
+class ModelLog(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.tw("task", "add", "T7", "--title", "test task")
+
+    def log_one(self, result="redo", model="fable", typ="code"):
+        return self.tw("model-log", "--task", "T7", "--type", typ, "--model", model,
+                       "--result", result, "--why", "fixture")
+
+    def test_record_validation_and_proposed_deny(self):
+        self.log_one("ok")
+        self.assertEqual(len((self.dir / ".teamwork" / "model-log.jsonl").read_text().splitlines()), 1)
+        self.tw("model-log", "--task", "T7", "--type", "code", "--model", "fable", "--result", "redo", "--why", "x", ok=False)
+        self.tw("model-log", "--task", "T404", "--type", "code", "--model", "fable", "--result", "redo", "--why", "x", ok=False)
+        self.log_one(); self.log_one()
+        summary = json.loads(self.tw("model-log", "--summary", "--json").stdout)
+        self.assertTrue(summary["combinations"][0]["proposed"])
+        self.assertEqual(self.state()["model_deny"][0]["type"], "code")
+
+    def test_gpt_code_needs_user_deny_and_allow_removes(self):
+        for _ in range(3):
+            self.log_one(model="gpt")
+        self.tw("model-log", "--summary", "--json")
+        self.assertFalse(self.state().get("model_deny"))
+        self.tw("model-log", "--deny", "code", "--model", "gpt", "--user-said", "please avoid")
+        self.assertTrue(self.state()["model_deny"])
+        self.tw("model-log", "--allow", "code", "--model", "gpt", "--user-said", "try again")
+        self.assertNotIn("Unsuitable", self.tw("board").stdout)
+        self.assertEqual(json.loads(self.tw("model-log", "--summary", "--json").stdout)["model_deny"], [])
+
+    def test_summary_keeps_unicode_line_separators(self):
+        for why in ("a\u2028b", "c\u0085d", "plain"):
+            self.tw("model-log", "--task", "T7", "--type", "docs-zh", "--model", "fable", "--result", "redo",
+                    "--why", why)
+        out = json.loads(self.tw("model-log", "--summary", "--json").stdout)
+        self.assertEqual(out["combinations"][0]["count"], 3)
+        self.assertNotIn("skipped", out)
+
+    def test_allow_survives_a_cut_or_emptied_log(self):
+        path = self.dir / ".teamwork" / "model-log.jsonl"
+        deny = lambda: [(x["type"], x["model"]) for x in
+                        json.loads(self.tw("model-log", "--summary", "--json").stdout)["model_deny"]]
+        for _ in range(4):
+            self.log_one()
+        self.tw("model-log", "--summary")
+        self.tw("model-log", "--allow", "code", "--model", "fable", "--user-said", "again")
+        self.log_one("ok")
+        path.write_text("\n".join(path.read_text().split("\n")[-3:]))  # head cut: the marker stays
+        self.assertEqual(deny(), [])
+        path.write_text("")  # emptied: new tries count, by time
+        for _ in range(3):
+            self.log_one()
+        self.assertEqual(deny(), [("code", "fable")])
+        path.write_text(path.read_text().rstrip("\n"))  # no final newline: the next record still parses
+        self.log_one()
+        self.assertNotIn("skipped", json.loads(self.tw("model-log", "--summary", "--json").stdout))
+
+    def test_summary_skips_bad_lines(self):
+        self.log_one(); self.log_one()
+        path = self.dir / ".teamwork" / "model-log.jsonl"
+        path.write_text(path.read_text() + "\n{half\n" + json.dumps({"model": "fable"}) + "\n")
+        self.log_one()
+        out = json.loads(self.tw("model-log", "--summary", "--json").stdout)
+        self.assertEqual((out["combinations"][0]["count"], out["skipped"]), (3, 2))
+        self.assertTrue(out["combinations"][0]["proposed"])
+        self.assertNotEqual(self.tw("model-log", "--deny", "code", "--allow", "test", "--model", "gpt",
+                                    "--user-said", "x", ok=False).returncode, 0)
+
+    def test_allowed_again_needs_new_redos(self):
+        for _ in range(3):
+            self.log_one()
+        self.tw("model-log", "--summary")
+        self.tw("model-log", "--allow", "code", "--model", "fable", "--user-said", "give it another go")
+        self.assertEqual(json.loads(self.tw("model-log", "--summary", "--json").stdout)["model_deny"], [])
+        self.log_one("ok"); self.log_one(); self.log_one()
+        deny = json.loads(self.tw("model-log", "--summary", "--json").stdout)["model_deny"]
+        self.assertEqual([(x["type"], x["model"]) for x in deny], [("code", "fable")])
+        self.assertIn("Unsuitable", self.tw("board").stdout)
+
+    def test_deny_rebuild_snapshot_and_route_display(self):
+        self.tw("model-log", "--deny", "test", "--model", "opus", "--user-said", "avoid")
+        self.tw("task", "set", "T7", "--route", "gpt")
+        self.assertIn("(gpt)", (self.dir / ".teamwork" / "BOARD.md").read_text())
+        self.tw("task", "set", "T7", "--route", "")
+        self.assertNotIn("(gpt)", (self.dir / ".teamwork" / "BOARD.md").read_text())
+        self.tw("rebuild")
+        self.assertEqual(self.state()["model_deny"][0]["model"], "opus")
 
 
 if __name__ == "__main__":

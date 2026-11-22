@@ -44,6 +44,7 @@ Not doing: pagination, the refund flow (api owns them)
 Done when: <what the DONE must contain to count: screenshots at two widths, tests green, the type committed>
 Review depth: full | one round | none (the user's standing decision for this phase)
 Model / method: <model, when not the thread's default; "by hand, no scripts" for judgment and precision writing> (IL-31)
+Route: gpt | fable | opus (who executes, when it differs from references/routing.md; T55)
 Report: ACK now, DONE or BLOCKED when finished, as in the short form.
 ```
 

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # scripts/: quota.py next to tw.py
 import quota  # noqa: E402
@@ -4933,7 +4934,7 @@ class ReportCards(TwCase):
         self.assertIn("R2 second thing", waiting)
         self.assertIn("which colour (going ahead with the default: blue)", waiting)
         self.assertEqual(out.splitlines()[-1],
-                         "Ledger +2/−1 · waiting on you: 2 · GPT did 1 · https://example.test/pr")
+                         "Ledger +2/−1 · waiting on you: 2 · GPT did 1 (T1 code) · https://example.test/pr")  # D1: names the work
         everything = json.loads(self.tw("card", "--kind", "status", "--head", "x", "--json").stdout)
         self.assertEqual(sorted(everything), ["doing", "done", "head", "kind", "waiting"])  # English keys, no ledger
         self.assertIn("F1 Old feature", everything["done"])
@@ -5299,3 +5300,532 @@ class ReviewRound3(TwCase):
     def test_defaulted_answer_needs_words(self):
         self.tw("ask", "db?", "--from", "core"); self.tw("ask", "--default", "1", "sqlite", "--undoable")
         self.assertNotEqual(self.tw("ask", "--answer", "1", ok=False).returncode, 0)
+
+
+class ThreadView(TwCase):
+    def test_waiting_stuck_folded_overview_and_notice_dedupe(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "core", "--session", "sid", "--status", "waiting")
+        self.tw("thread", "set", "core", "--waiting-for", "permission", "--summary", "批准命令")
+        self.assertIn("等你点批准", self.tw("threads").stdout)
+        self.tw("thread", "set", "core", "--status", "working", "--stuck-on", "cleanup")
+        self.assertNotIn("waiting_for", self.state()["threads"]["core"])
+        self.assertIn("清理临时文件", self.tw("threads").stdout)
+        self.tw("notice", "add", "--thread", "core", "--session", "sid", "--ref", "r1", "--text", "一轮结束")
+        self.tw("notice", "add", "--thread", "core", "--session", "sid", "--ref", "r1", "--text", "duplicate")
+        self.assertEqual(len(self.state()["notices"]), 1)
+        self.assertIn("一轮结束", self.tw("notice", "list").stdout)
+        self.tw("notice", "done", "--thread", "core")
+        self.assertEqual(json.loads(self.tw("notice", "list", "--json").stdout), [])
+
+    def test_notice_rejects_other_session_and_nudge_rate_limit(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "ui", "--session", "local", "--status", "working")
+        self.assertIn("不是本项目的会话", self.tw("notice", "add", "--thread", "ui", "--session", "foreign", "--ref", "x", ok=False).stderr)
+        self.tw("nudge", "ui")
+        self.assertIn("已经催过一次", self.tw("nudge", "ui", ok=False).stderr)
+
+    def test_urgent_defaults_and_rebuild_persists_notices(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "ui", "--session", "s1")
+        self.tw("task", "add", "T1", "--owner", "ui", "--urgent-minutes", "2")
+        self.assertEqual(self.state()["tasks"]["T1"]["urgent_minutes"], 2)
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        self.env["TW_NOW"] = (dt.datetime.now().astimezone() + dt.timedelta(minutes=3)).isoformat()
+        self.assertEqual(json.loads(self.tw("ready").stdout)["urgent_unacked"][0]["task"], "T1")
+        self.assertIn("收回再改派", self.tw("open").stderr)
+        self.tw("notice", "add", "--thread", "ui", "--session", "s1", "--ref", "z")
+        self.tw("rebuild")
+        self.assertEqual(len(self.state()["notices"]), 1)
+
+
+class ArchiveAndSeats(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.tw("prefs", "--set", "language=zh")
+
+    def test_replaced_session_archive_verification_and_rebuild(self):
+        self.tw("thread", "add", "ui", "--session", "old", "--status", "idle")
+        result = self.tw("thread", "reseat", "ui", "--session", "new", "--reason", "context full")
+        self.assertIn("ROSTER", result.stderr)
+        self.tw("thread", "set", "ui", "--status", "idle", "--from-status")
+        candidates = json.loads(self.tw("archive", "candidates", "--json").stdout)
+        self.assertEqual((candidates[0]["session_id"], candidates[0]["category"]), ("old", "replaced"))
+        self.assertNotEqual(self.tw("archive", "done", "old", ok=False).returncode, 0)
+        self.tw("archive", "verify", "old", "--stopped", "get_session old: idle; final event 12:00")
+        self.tw("archive", "done", "old")
+        failed_check = self.tw("archive", "check", "old", "--not-archived")
+        self.assertIn("已知问题", failed_check.stderr)
+        self.tw("rebuild")
+        rec = self.state()["archive"]["old"]
+        self.assertEqual(rec["check"], "failed")
+        self.assertEqual(rec["history"][-1]["evidence"], "get_session old: idle; final event 12:00")
+
+    def test_disconnected_requires_user_decision_and_clears_on_report(self):
+        self.tw("thread", "add", "api", "--session", "sid", "--status", "idle")
+        self.tw("thread", "set", "api", "--disconnected")
+        rows = json.loads(self.tw("archive", "candidates", "--json").stdout)
+        self.assertEqual(rows[0]["category"], "disconnected")
+        self.assertIn("等你定", rows[0]["reason"])
+        self.tw("archive", "verify", "sid", "--stopped", "idle in get_session")
+        self.assertIn("--user-said", self.tw("archive", "done", "sid", ok=False).stderr)
+        self.tw("archive", "done", "sid", "--user-said", "归档这条断线会话")
+        self.tw("thread", "set", "api", "--from-status")
+        self.assertFalse(self.state()["threads"]["api"].get("disconnected"))
+
+    def test_idle_old_is_shown_first_and_requires_user_decision(self):
+        self.tw("thread", "add", "docs", "--session", "sid", "--status", "idle")
+        self.tw("thread", "set", "docs", "--from-status")
+        self.env["TW_NOW"] = (dt.datetime.now().astimezone() + dt.timedelta(days=4)).isoformat()
+        rows = json.loads(self.tw("archive", "candidates", "--json").stdout)
+        self.assertEqual(rows[0]["category"], "idle-old")
+        self.assertIn("先列给用户看", rows[0]["reason"])
+        self.tw("archive", "verify", "sid", "--stopped", "idle; final event timestamp checked")
+        self.assertIn("--user-said", self.tw("archive", "done", "sid", ok=False).stderr)
+        self.tw("archive", "done", "sid", "--user-said", "先给我看过，确认归档")
+
+    def test_stale_deliverable_review_guard_and_spawn_refused(self):
+        self.tw("thread", "add", "api", "--session", "s1")
+        self.tw("task", "add", "T1", "--owner", "api", "--accept", "works")
+        self.tw("plan", "approve", "--user-said", "approved")
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        self.tw("task", "set", "T1", "--status", "working")
+        stale_review = self.tw("task", "set", "T1", "--status", "review", "--dispatch-v", "0", ok=False)
+        self.assertIn("迟到的旧结果", stale_review.stderr)
+        stale = json.loads(self.tw("deliverable", "add", "old result", "--task", "T1", "--dispatch-v", "0").stdout)
+        self.assertEqual((stale["status"], stale["superseded_by"]), ("stale", "v1"))
+        self.assertIn("旧版本的结果，已标过期", self.tw("deliverable", "add", "late", "--task", "T1", "--dispatch-v", "0").stderr)
+        self.assertIn("请在 lead 会话里", self.tw("spawn-refused", "api").stdout)
+        self.assertEqual(len(self.state()["spawn_refusals"]), 1)
+        self.tw("rebuild")
+        self.assertEqual(self.state()["deliverables"][0]["status"], "stale")
+        self.assertEqual(len(self.state()["spawn_refusals"]), 1)
+
+    def test_handover_prompt_and_selfcheck_chinese(self):
+        self.tw("thread", "add", "ui", "--session", "s1")
+        prompt = self.tw("handover", "ui", "--prompt").stdout
+        self.assertIn("--- HANDOVER ---", prompt)
+        self.assertIn("# teamwork thread protocol", prompt)
+        self.assertIn("完整输出，不要只给文件位置", self.tw("handover", "ui").stdout)
+        check = json.loads(self.tw("selfcheck", "--json").stdout)
+        self.assertIn("开会话的实测情况", check["session_opening"])
+
+
+class RoutingAndChecks(TwCase):
+    """T57 block B: card detail, route/quota hints, decision lookup, package checks and sensitive guard."""
+
+    def test_card_gpt_detail_and_chinese_empty_line(self):
+        self.tw("task", "add", "T1", "--title", "review package")
+        for typ in ("code", "test", "read", "review1", "review2", "research"):
+            self.tw("model-log", "--task", "T1", "--type", typ, "--model", "gpt", "--result", "ok")
+        self.tw("prefs", "--set", "language=zh")
+        out = self.tw("card", "--kind", "done", "--head", "完成").stdout
+        self.assertIn("GPT 做了 6（T1 code、T1 test、T1 read、T1 review1、T1 review2等 1 项）", out)
+        self.tw("model-log", "--task", "T1", "--type", "code", "--model", "opus", "--result", "ok")
+        self.assertIn("GPT 做了 0", self.tw("card", "--kind", "done", "--head", "完成", "--since",
+                                            "2030-01-01T00:00:00+00:00").stdout)
+
+    def test_quota_due_route_hints_and_rebuild(self):
+        self.env["TW_NOW"] = "2026-06-01T10:00:00-04:00"
+        self.tw("task", "add", "T1", "--title", "package build")
+        self.tw("plan", "approve", "--user-said", "approved")
+        self.tw("quota", "--config-dir", str(self.dir / "empty-config"), "--codex-dir", str(self.dir / "empty-codex"), "--json")
+        due = json.loads(self.tw("quota", "--due", "--json").stdout)
+        self.assertTrue(due["due"])
+        self.env["TW_NOW"] = "2026-06-01T11:01:00-04:00"
+        self.assertTrue(json.loads(self.tw("quota", "--due", "--json").stdout)["due"])
+        st = self.state(); st["quota"] = {"tier": "save", "at": self.env["TW_NOW"]}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        hints = json.loads(self.tw("ready").stdout)["route_hints"]
+        self.assertEqual(hints["T1"], {"route": "gpt", "why": "tier"})
+        self.tw("rebuild")
+        self.assertIsNone(self.state().get("last_quota_at"))
+
+    def test_merge_grant_counts_apply_only_and_rebuilds(self):
+        def git(*args):
+            return subprocess.run(["git", "-C", str(self.dir), *args], check=True, capture_output=True, text=True)
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "test")
+        git("config", "user.email", "test@example.invalid")
+        (self.dir / "base.txt").write_text("base\n")
+        git("add", "base.txt"); git("commit", "-q", "-m", "base")
+        branch = "tw/demo/ui"
+        git("checkout", "-q", "-b", branch)
+        (self.dir / "result.txt").write_text("result\n")
+        git("add", "result.txt"); git("commit", "-q", "-m", "T1: result")
+        sha = git("rev-parse", "HEAD").stdout.strip()
+        git("checkout", "-q", "main")
+        self.tw("prefs", "--set", "standing_grants=merge", "--user-said", "允许合并")
+        rehearsal = json.loads(self.tw("merge", branch, "--sha", sha, "--no-test", "docs only").stdout)
+        self.assertFalse(rehearsal["applied"])
+        self.assertEqual(self.state().get("grant_uses", []), [])
+        applied = json.loads(self.tw("merge", branch, "--sha", sha, "--no-test", "docs only", "--apply").stdout)
+        self.assertTrue(applied["applied"])
+        self.assertEqual(self.state()["grant_uses"][0]["branch"], branch)
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("rebuild")
+        self.assertEqual(len(self.state()["grant_uses"]), 1)
+        self.assertIn("长期授权：合并 1 次", self.tw("card", "--kind", "done", "--head", "完成").stdout)
+
+    def test_decided_warns_and_returns_chinese_hits(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("ask", "选择蓝色按钮")
+        self.tw("ask", "--answer", "1", "蓝色按钮采用")
+        result = json.loads(self.tw("decided", "蓝色按钮", "--json").stdout)
+        self.assertTrue(any("answered question" in h["source"] for h in result["hits"]))
+        warned = self.tw("ask", "蓝色按钮颜色选择", ok=True)
+        self.assertIn("这件可能已经定过", warned.stderr)
+        self.assertIn("先看 decided", warned.stderr)
+
+    def test_deliverable_and_package_check(self):
+        self.tw("prefs", "--set", "language=zh")
+        missing_link = self.tw("deliverable", "add", "安装包", ok=False)
+        self.assertIn("交付物要给能打开的链接", missing_link.stderr)
+        self.tw("deliverable", "add", "安装包", "--link", "https://example.invalid/app")
+        package = self.dir / "package"; package.mkdir()
+        (package / "app.bin").write_text("app")
+        (package / "README.txt").write_text("docs")
+        absent = self.tw("package-check", str(package), "--expect", "app.bin", "--expect", "missing.txt", ok=False)
+        self.assertEqual(absent.returncode, 1)
+        self.assertIn("missing.txt", absent.stdout)
+        self.tw("package-check", str(package), "--expect", "app.bin", "--expect", "README.txt", "--deliverable", "D1")
+        self.tw("rebuild")
+        self.assertEqual(self.state()["deliverables"][0]["checked_manifest"], ["app.bin", "README.txt"])
+        opaque = package / "release.dmg"; opaque.write_bytes(b"dmg")
+        unsupported = self.tw("package-check", str(opaque), "--expect", "app.bin", ok=False)
+        self.assertEqual(unsupported.returncode, 2)
+        self.assertIn("这种包读不了内容，要人工打开核对", unsupported.stderr)
+
+    def test_sensitive_tier_only_adds_review_prompts(self):
+        def judge(command):
+            event = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+            return subprocess.run([sys.executable, str(TW), "bash-guard"], cwd=self.dir, env=self.env,
+                                  input=event, capture_output=True, text=True)
+        self.assertEqual(judge("git push origin feature").stdout, "")
+        self.tw("prefs", "--set", "language=zh", "perm_policy=managed-sensitive", "--user-said", "请审查敏感命令")
+        answer = json.loads(judge("git push origin feature").stdout)
+        self.assertEqual(answer["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertIn("敏感档：这类命令你说过要看一眼",
+                      answer["hookSpecificOutput"]["permissionDecisionReason"])
+        commands = ("npm publish", "pnpm publish", "yarn publish", "pip upload", "twine upload", "docker push image",
+                    "curl -X POST https://example.invalid", "wget --post-data=x https://example.invalid",
+                    "scp file host:/tmp/file", "rsync file host:/tmp/file", "chmod -R 755 dir",
+                    "chown -R user dir", "kubectl apply -f x.yaml", "kubectl delete pod x",
+                    "terraform apply", "terraform destroy")
+        for command in commands:
+            with self.subTest(command=command):
+                result = judge(command)
+                self.assertTrue(result.stdout, f"{command}: {result.stderr}")
+                self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], "ask")
+
+
+class T57Round1(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.tw("prefs", "--set", "language=zh")
+
+    def test_archive_global_live_recheck_retry_and_current_seat(self):
+        self.tw("thread", "add", "ui", "--session", "retired", "--status", "idle")
+        self.tw("thread", "reseat", "ui", "--session", "current")
+        self.tw("thread", "set", "ui", "--status", "idle")
+        self.tw("thread", "add", "api", "--session", "other-live", "--status", "working")
+        st = self.state(); st["threads"]["api"]["sessions"].append({"session_id": "retired", "from": "2026-01-01T00:00:00+00:00"})
+        st["threads"]["ui"]["sessions"].append({"session_id": "other-live", "from": "2026-01-01T00:00:00+00:00", "to": "2026-01-02T00:00:00+00:00", "reason": "replaced"})
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.assertNotIn("retired", [x["session_id"] for x in json.loads(self.tw("archive", "candidates", "--json").stdout)])
+        self.assertNotIn("other-live", [x["session_id"] for x in json.loads(self.tw("archive", "candidates", "--json").stdout)])
+        self.tw("thread", "add", "review-seat", "--session", "review-sid", "--status", "review")
+        st = self.state(); st["threads"]["review-seat"]["sessions"].append({"session_id": "other-live", "from": "2026-01-01T00:00:00+00:00", "to": "2026-01-02T00:00:00+00:00", "reason": "replaced"})
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.assertNotIn("other-live", [x["session_id"] for x in json.loads(self.tw("archive", "candidates", "--json").stdout)])
+        self.tw("thread", "set", "api", "--status", "idle")
+        self.assertNotIn("other-live", [x["session_id"] for x in json.loads(self.tw("archive", "candidates", "--json").stdout)])
+        self.tw("thread", "set", "ui", "--disconnected")
+        self.tw("archive", "verify", "current", "--stopped", "会话已停")
+        self.tw("thread", "set", "ui", "--status", "working")
+        self.assertNotEqual(self.tw("archive", "done", "current", "--user-said", "归档", ok=False).returncode, 0)
+        self.tw("thread", "set", "ui", "--status", "idle")
+        self.tw("thread", "set", "ui", "--disconnected")
+        self.tw("archive", "verify", "current", "--stopped", "再次确认已停")
+        self.tw("archive", "done", "current", "--user-said", "归档这条会话")
+        self.assertEqual(self.state()["threads"]["ui"]["status"], "archived")
+        self.assertNotIn("ui", json.loads(self.tw("threads", "--json").stdout)["other"])
+        self.tw("archive", "check", "current", "--not-archived")
+        self.assertIn("current", [x["session_id"] for x in json.loads(self.tw("archive", "candidates", "--json").stdout)])
+
+    def test_stuck_thread_list_notice_and_nudge_rules(self):
+        self.tw("thread", "add", "planned")
+        self.tw("thread", "add", "waiter", "--session", "sid", "--status", "waiting", "--waiting-for", "permission")
+        self.tw("thread", "add", "reviewer", "--session", "review-sid", "--status", "review")
+        self.assertTrue(any(x["thread"] == "reviewer" for x in json.loads(self.tw("threads", "--json").stdout)["review"]))
+        self.assertNotIn("planned", json.loads(self.tw("threads", "--json").stdout)["other"])
+        self.tw("thread", "set", "waiter", "--status", "working", "--stuck-on", "cleanup")
+        self.tw("thread", "set", "waiter", "--from-status")
+        self.assertNotIn("stuck_on", self.state()["threads"]["waiter"])
+        self.tw("thread", "set", "waiter", "--stuck-on", "cleanup")
+        self.tw("thread", "set", "waiter", "--stuck-on", "none")
+        self.tw("prefs", "--set", "stuck_minutes=0")
+        self.tw("nudge", "waiter")
+        self.assertNotEqual(self.tw("nudge", "waiter", ok=False).returncode, 0)
+        self.tw("thread", "set", "waiter", "--status", "idle")
+        self.assertNotEqual(self.tw("nudge", "waiter", ok=False).returncode, 0)
+
+    def test_notice_ref_normalization_duplicate_json_and_decision_labels(self):
+        self.tw("thread", "add", "ui", "--session", "sid")
+        self.tw("notice", "add", "--thread", "ui", "--session", "sid", "--ref", " ref-1 ", "--text", "一轮结束")
+        duplicate = self.tw("notice", "add", "--thread", "ui", "--session", "sid", "--ref", "ref-1", "--text", "重复")
+        self.assertEqual(json.loads(duplicate.stdout)["text"], "一轮结束")
+        self.assertIn("已记过", duplicate.stderr)
+        self.tw("ask", "选择绿色按钮")
+        self.tw("ask", "--answer", "1", "绿色按钮采用")
+        self.assertIn("已回答的问题 1", self.tw("decided", "绿色按钮").stdout)
+        self.tw("thread", "set", "ui", "--status", "resolved")
+        self.assertIn("ui", self.tw("board").stdout)
+
+    def test_package_path_directory_empty_corrupt_missing_and_dotenv(self):
+        package = self.dir / "files"; (package / "sub").mkdir(parents=True)
+        (package / ".env").write_text("")
+        (package / "sub" / "same").write_text("ok")
+        (package / "same").write_text("top")
+        wrong = self.tw("package-check", str(package), "--expect", "missing/same", ok=False)
+        self.assertEqual(wrong.returncode, 1)
+        complete = self.tw("package-check", str(package), "--expect", "./.env", "--expect", "sub/same", "--expect", "sub/")
+        self.assertIn("空文件：.env", complete.stdout)
+        bad = package / "bad.zip"; bad.write_bytes(b"PK\x03\x04broken")
+        self.assertEqual(self.tw("package-check", str(bad), "--expect", "x", ok=False).returncode, 2)
+        self.assertIn("包坏了或不完整", self.tw("package-check", str(bad), "--expect", "x", ok=False).stderr)
+        missing_path = self.tw("package-check", str(package / "absent"), "--expect", "x", ok=False)
+        self.assertEqual(missing_path.returncode, 2)
+        self.assertIn("找不到这个路径", missing_path.stderr)
+
+    def test_sensitive_subcommands_and_malformed_state_are_safe(self):
+        self.tw("prefs", "--set", "perm_policy=managed-sensitive", "--user-said", "敏感命令需要检查")
+        self.env["TW_GUARD_LOG"] = str(self.dir / "own-guard-log.jsonl")
+        def judge(command):
+            event = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+            return subprocess.run([sys.executable, str(TW), "bash-guard"], cwd=self.dir, env=self.env,
+                                  input=event, capture_output=True, text=True)
+        for command in ("git push --force-with-lease origin x", "curl --request PATCH https://example.invalid",
+                        "curl -X OPTIONS https://example.invalid", "curl --upload-file a https://example.invalid",
+                        "gh release create v1", "gh pr create", "gh repo create x"):
+            self.assertEqual(json.loads(judge(command).stdout)["hookSpecificOutput"]["permissionDecision"], "ask")
+        for command in ("git stash push", "git log --grep push", "git commit -m push"):
+            self.assertEqual(judge(command).stdout, "")
+        for invalid in ("broken", "[]", '{"prefs":null}', '{"prefs":"invalid"}'):
+            (self.dir / ".teamwork" / "state.json").write_text(invalid, encoding="utf-8")
+            self.assertEqual(judge("git push origin x").stdout, "")
+        self.assertFalse(Path(self.env["TW_GUARD_LOG"]).exists())
+
+    def test_stale_deliverable_dedupe_link_validation_decision_ratio(self):
+        self.tw("thread", "add", "api", "--session", "s1")
+        self.tw("task", "add", "T1", "--owner", "api", "--title", "package work")
+        self.tw("plan", "approve", "--user-said", "approved")
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.tw("task", "set", "T1", "--status", "recalled")
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        first = json.loads(self.tw("deliverable", "add", "old", "--task", "T1", "--dispatch-v", "0").stdout)
+        again = self.tw("deliverable", "add", "old revised", "--task", "T1", "--dispatch-v", "0")
+        self.assertEqual(json.loads(again.stdout)["id"], first["id"])
+        self.assertIn("已记过", again.stderr)
+        self.assertEqual(len(self.state()["deliverables"]), 1)
+        self.assertNotEqual(self.tw("deliverable", "add", "future", "--task", "T1", "--dispatch-v", "9", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("deliverable", "add", "final", "--status", "final", ok=False).returncode, 0)
+        bad = self.tw("deliverable", "add", "bad", "--link", "file:bad")
+        self.assertIn("http", bad.stderr)
+        self.tw("ask", "选择蓝色按钮")
+        self.tw("ask", "--answer", "1", "蓝色按钮采用")
+        warning = self.tw("ask", "请问是否可以选蓝色按钮，以及账户安全如何配置数据库缓存", ok=True)
+        self.assertNotIn("这件可能已经定过", warning.stderr)
+
+    def test_burn_fable_route_handover_stdout_and_rebuild(self):
+        self.tw("thread", "add", "ui", "--session", "s1")
+        st = self.state(); st["quota"] = {"tier": "burn-fable"}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.tw("task", "add", "T1", "--owner", "ui", "--title", "package")
+        self.tw("plan", "approve", "--user-said", "approved")
+        hint = json.loads(self.tw("ready").stdout)["route_hints"]["T1"]
+        self.assertEqual((hint["route"], hint["why"], hint["claude_side"]), ("gpt", "tier", "fable"))
+        handover = self.tw("handover", "ui", "--prompt")
+        self.assertIn("# teamwork thread protocol", handover.stdout)
+        self.assertNotIn("create_session(", handover.stdout)
+        self.assertIn("create_session(", handover.stderr)
+        self.tw("rebuild")
+        self.assertEqual(self.state()["threads"]["ui"]["session_id"], "s1")
+
+
+class T57Round2(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.tw("prefs", "--set", "language=zh")
+
+    def test_selfcheck_skips_non_object_project_records(self):
+        served = self.dir / "served"; broken = served / "bad" / ".teamwork"
+        broken.mkdir(parents=True); (broken / "state.json").write_text("[]", encoding="utf-8")
+        result = self.tw("selfcheck", "--served", str(served), "--json")
+        self.assertIsInstance(json.loads(result.stdout), dict)
+
+    def test_archive_failed_recheck_requires_verify_and_rebuilds_user_said(self):
+        self.tw("thread", "add", "ui", "--session", "sid", "--status", "idle")
+        self.tw("thread", "set", "ui", "--disconnected")
+        st = self.state(); st["threads"]["ui"].update({"stuck_on": "cleanup", "waiting_for": "permission"})
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.tw("archive", "verify", "sid", "--stopped", "确认 sid 已停止")
+        self.tw("archive", "done", "sid", "--user-said", "用户原话：可以归档")
+        archived_thread = self.state()["threads"]["ui"]
+        self.assertNotIn("stuck_on", archived_thread); self.assertNotIn("waiting_for", archived_thread)
+        failed = json.loads(self.tw("archive", "check", "sid", "--not-archived").stdout)
+        self.assertEqual(failed["history"][-1]["evidence"], "确认 sid 已停止")
+        self.assertNotIn("verified_at", failed)
+        self.assertNotIn("archived_at", failed)
+        self.assertNotEqual(self.tw("archive", "done", "sid", "--user-said", "再次归档", ok=False).returncode, 0)
+        self.assertIn("归档复核失败：sid [ui]", self.tw("board").stdout)
+        listed = json.loads(self.tw("archive", "list", "--json").stdout)
+        self.assertEqual(listed["failed"][0]["session_id"], "sid")
+        self.tw("archive", "verify", "sid", "--stopped", "再次确认已停")
+        self.tw("archive", "done", "sid", "--user-said", "用户原话：可以归档")
+        listed = json.loads(self.tw("archive", "list", "--json").stdout)
+        self.assertEqual(listed["archived"][0]["result"], "已核实并归档")
+        self.tw("rebuild")
+        rec = self.state()["archive"]["sid"]
+        self.assertEqual(rec["user_said"], "用户原话：可以归档")
+        self.assertIn("用户原话：可以归档", (self.dir / ".teamwork" / "log.jsonl").read_text())
+
+    def test_reseat_clears_stale_state_and_planned_nudge_is_rejected(self):
+        self.tw("thread", "add", "ui", "--session", "old", "--status", "waiting", "--waiting-for", "permission", "--stuck-on", "cleanup")
+        st = self.state(); st["threads"]["ui"]["nudges"] = [{"at": "2026-01-01T00:00:00+00:00"}]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        reseat = self.tw("thread", "reseat", "ui", "--session", "new")
+        self.assertIn("handover <t> --prompt", reseat.stderr)
+        thread = self.state()["threads"]["ui"]
+        self.assertNotIn("stuck_on", thread); self.assertNotIn("waiting_for", thread); self.assertNotIn("nudges", thread)
+        self.tw("thread", "add", "planned")
+        self.assertNotEqual(self.tw("nudge", "planned", ok=False).returncode, 0)
+
+    def test_waiting_stuck_display_and_real_stuck_minutes(self):
+        self.tw("thread", "add", "waiter", "--session", "wait", "--status", "waiting",
+                "--waiting-for", "permission", "--stuck-on", "cleanup")
+        self.tw("thread", "add", "worker", "--session", "work", "--status", "working", "--stuck-on", "cleanup")
+        st = self.state()
+        st["threads"]["worker"]["last_status_at"] = "2026-06-01T10:00:00-04:00"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.env["TW_NOW"] = "2026-06-01T11:05:00-04:00"
+        board = self.tw("board").stdout
+        self.assertIn("waiter (rc) — 在等你点批准 — 清理临时文件", board)
+        self.assertIn("可能卡住", board)
+        self.assertIn("清理临时文件", board)
+        self.assertEqual(json.loads(self.tw("ready").stdout)["stuck"]["worker"], 65)
+
+    def test_merge_grant_follows_thread_owner_not_task_branch(self):
+        def git(*args):
+            return subprocess.run(["git", "-C", str(self.dir), *args], check=True, capture_output=True, text=True)
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "test")
+        git("config", "user.email", "test@example.invalid")
+        (self.dir / "base").write_text("base\n")
+        git("add", "base"); git("commit", "-q", "-m", "base")
+        branch = "tw/demo/ui"
+        git("checkout", "-q", "-b", branch)
+        (self.dir / "change").write_text("change\n")
+        git("add", "change"); git("commit", "-q", "-m", "change")
+        sha = git("rev-parse", "HEAD").stdout.strip()
+        git("checkout", "-q", "main")
+        self.tw("thread", "add", "ui", "--branch", branch, "--session", "sid", "--status", "working")
+        self.tw("task", "add", "T1", "--owner", "ui", "--title", "work")
+        self.tw("plan", "approve", "--user-said", "approve")
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        st = self.state(); st["tasks"]["T1"]["branch"] = "wrong/task-branch"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.tw("prefs", "--set", "standing_grants=merge", "--user-said", "允许合并")
+        self.tw("merge", branch, "--sha", sha, "--no-test", "docs only", "--apply")
+        self.assertEqual(self.state()["grant_uses"][0]["task"], "T1")
+
+    def test_sensitive_commands_are_normalized_and_precise(self):
+        self.tw("prefs", "--set", "perm_policy=managed-sensitive", "--user-said", "敏感命令需要复核")
+        def judge(command):
+            event = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+            result = subprocess.run([sys.executable, str(TW), "bash-guard"], cwd=self.dir, env=self.env,
+                                    input=event, capture_output=True, text=True)
+            return json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] if result.stdout else "allow"
+        positive = (
+            "X=y env terraform -chdir=infra apply", "env -i terraform apply", "env MODE=prod sh -c 'docker image push x'",
+            "if true; then kubectl --context c -n ns apply -f x; fi", "kubectl -n ns delete pod x",
+            "python3 -m twine upload dist/*", "chmod --recursive 755 x", "chown --recursive user x",
+            "wget --method=PATCH https://example.invalid", "wget --post-file=x https://example.invalid",
+            "curl -d x https://example.invalid", "curl --data-raw=x https://example.invalid", "curl -F x https://example.invalid",
+        )
+        negative = ("wget -d https://example.invalid", "curl -odata https://example.invalid",
+                    "npm run publish", "pnpm run publish")
+        for command in positive:
+            with self.subTest(command=command): self.assertEqual(judge(command), "ask")
+        for command in negative:
+            with self.subTest(command=command): self.assertEqual(judge(command), "allow")
+
+    def test_package_infers_zip_directories_and_filters_empty_files(self):
+        package = self.dir / "bundle.zip"
+        with zipfile.ZipFile(package, "w") as zf:
+            zf.writestr("app/bin", "payload")
+            zf.writestr("unrelated/empty", "")
+            zf.writestr("app/empty", "")
+        checked = self.tw("package-check", str(package), "--expect", "app/", "--expect", "app/bin", ok=True)
+        self.assertIn("空文件：app/empty", checked.stdout)
+        self.assertNotIn("unrelated/empty", checked.stdout)
+        self.tw("deliverable", "add", "包", "--link", "https://example.invalid/app")
+        stale = self.tw("deliverable", "set", "D1", "--status", "stale")
+        self.assertEqual(json.loads(stale.stdout)["status"], "stale")
+        self.assertIn("过期", self.tw("board", "--share").stdout)
+        self.assertNotEqual(self.tw("deliverable", "add", "非法", "--status", "stale", ok=False).returncode, 0)
+
+
+class SiblingProjects(TwCase):
+    def test_broken_sibling_state_does_not_break_opening(self):
+        sibling = Path(tempfile.mkdtemp(dir=self.dir.parent)) / ".teamwork"
+        sibling.mkdir()
+        for broken in ("[]", '{"prefs": []}', '{"prefs": {"policy_said": []}}'):
+            (sibling / "state.json").write_text(broken, encoding="utf-8")
+            self.assertEqual(self.tw("opening", "--json").returncode, 0)
+
+
+class T57Round3(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.tw("prefs", "--set", "language=zh")
+
+    def test_stuck_on_forces_board_and_waiting_reason_is_retained(self):
+        self.tw("thread", "add", "wait", "--session", "s", "--status", "waiting",
+                "--waiting-for", "permission", "--stuck-on", "cleanup")
+        board = self.tw("board").stdout
+        self.assertIn("可能卡住（进行中，超过 30 分钟没有汇报）", board)
+        self.assertIn("在等你点批准", board)
+        self.assertIn("清理临时文件", board)
+
+    def test_decision_stop_words_do_not_create_partial_chinese_pairs(self):
+        import tw
+        self.assertEqual(tw._decision_tokens("为什么选择蓝色怎么样"), tw._decision_tokens("为什么选择蓝色怎么样"))
+        self.assertNotIn("为什", tw._decision_tokens("为什么主题不同怎么样"))
+
+
+class T57Round3Core(Quota):
+    """Fixes made by hand after review round 3 (D10 positive path, sensitive-tier normalisation)."""
+
+    def test_known_tier_quota_is_not_due_right_after(self):
+        self.event({"seven_day": self.win(0.5), "five_hour": self.win(0.2)})
+        self.tw("quota", "--config-dir", str(self.cfg), "--codex-dir", str(self.codex), "--json")
+        self.assertIsNotNone(self.state().get("last_quota_at"))
+        self.assertFalse(json.loads(self.tw("quota", "--due", "--json").stdout)["due"])
+
+    def test_sensitive_tier_normalises_like_the_big_decision_judge(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tw", TW)
+        tw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tw)
+        asks = ("pnpm -r publish", "npm --tag beta publish", "yarn npm publish", "curl -sd a https://x.invalid",
+                "curl -Fa=b https://x.invalid", "curl -sX POST https://x.invalid", "timeout 30 git push",
+                "eval 'git push'", "find . -exec git push \;", "python -m twine upload d", "bash -c -- 'git push'",
+                "FOO=1 git push origin main", "if true; then git push; fi")
+        quiet = ("npm run publish", "npm run-script publish", "curl -odata https://x.invalid", "curl -sSL https://x.invalid",
+                 "wget -d https://x.invalid", "curl -X GET https://x.invalid")
+        for command in asks:
+            self.assertEqual(tw.sensitive_decision(command), ("ask", "sensitive"), command)
+        for command in quiet:
+            self.assertIsNone(tw.sensitive_decision(command), command)

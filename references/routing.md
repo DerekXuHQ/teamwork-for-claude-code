@@ -66,6 +66,18 @@ Move the same piece of work one step up (GPT → Fable → Opus) when any of the
 In `save` and `lead-only`, a thread does not move up to Claude by itself: when GPT fails it stops and reports to
 the lead, which decides between Opus now and waiting for the reset. When Opus fails too, the lead asks the user.
 
+## 3a. Fixed rules for work given to GPT (D7)
+
+Every brief to GPT carries them, and the Claude side that hands the work out checks the result against them before it is committed or reported:
+
+- do not change tests to fit the code: fix the code, or report why a test is wrong;
+- do not touch changes you did not make (other threads', the user's, uncommitted work);
+- do not delete or weaken existing features outside the task;
+- finish the task or say exactly what is left: no half-done work reported as done;
+- precision work the user named (`by hand, no scripts`) is never given to GPT.
+
+The aim is more work on GPT without more redo. The lead looks at the redo count once a week (`TW model-log --summary`, the `redo` share per type for GPT) in its weekly note; a rising share for a type is a reason to brief that type better or move it up a step (section 3).
+
 ## 4. The learning table
 
 Threads add one line to DONE: `models: <type>=<model>:ok|redo ...` (types: `code, test, read, review1, review2,

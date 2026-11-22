@@ -5679,6 +5679,7 @@ class RoutingAndChecks(TwCase):
         self.env["TW_NOW"] = "2026-06-01T10:00:00-04:00"
         self.tw("task", "add", "T1", "--title", "package build")
         self.tw("plan", "approve", "--user-said", "approved")
+        self.tw("thread", "add", "busy", "--session", "s-busy", "--status", "working")  # R65: an idle team is never due
         self.tw("quota", "--config-dir", str(self.dir / "empty-config"), "--codex-dir", str(self.dir / "empty-codex"), "--json")
         due = json.loads(self.tw("quota", "--due", "--json").stdout)
         self.assertTrue(due["due"])
@@ -6053,6 +6054,66 @@ class T57Round3(TwCase):
         import tw
         self.assertEqual(tw._decision_tokens("为什么选择蓝色怎么样"), tw._decision_tokens("为什么选择蓝色怎么样"))
         self.assertNotIn("为什", tw._decision_tokens("为什么主题不同怎么样"))
+
+
+class QuotaIdle(Quota):
+    """R65: nothing running means no quota check and nothing written; once work restarts the usual interval applies."""
+
+    def due(self):
+        return json.loads(self.tw("quota", "--due", "--json").stdout)
+
+    def test_idle_is_not_due_quietly_and_long_idle_restart_is_due(self):
+        self.tw("prefs", "--set", "language=en")
+        self.event({"seven_day": self.win(0.5), "five_hour": self.win(0.2)})
+        self.tw("thread", "add", "ui", "--session", "s-ui", "--status", "working")
+        self.tw("quota", "--config-dir", str(self.cfg), "--codex-dir", str(self.codex), "--json")
+        self.assertFalse(self.due()["due"])
+        self.tw("thread", "set", "ui", "--status", "idle")
+        before = (self.dir / ".teamwork" / "state.json").read_text(encoding="utf-8")
+        r = self.due()
+        self.assertEqual((r["due"], r.get("reason")), (False, "idle"))
+        self.assertIn("idle", self.tw("quota", "--due").stdout)
+        self.assertFalse(json.loads(self.tw("ready").stdout)["quota_due"])
+        self.assertEqual((self.dir / ".teamwork" / "state.json").read_text(encoding="utf-8"), before)  # nothing recorded
+        self.tw("task", "add", "T1", "--title", "page", "--owner", "ui")
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        self.assertFalse(self.due()["due"])  # short pause: no extra check
+        self.env["TW_NOW"] = "2099-01-01T00:00:00+00:00"  # long idle spell, then work again
+        self.assertTrue(self.due()["due"])
+        self.assertTrue(json.loads(self.tw("ready").stdout)["quota_due"])
+        self.assertNotIn("reason", self.due())
+
+    def test_idle_check_works_under_the_handover_write_lock(self):
+        st = self.state(); st["write_lock"] = {"ho": "H1"}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.assertEqual(self.due().get("reason"), "idle")
+        self.assertFalse(json.loads(self.tw("ready").stdout)["quota_due"])
+
+    def test_ready_with_work_to_send_after_long_idle_is_due(self):
+        self.event({"seven_day": self.win(0.5), "five_hour": self.win(0.2)})
+        self.tw("thread", "add", "ui", "--session", "s-ui", "--status", "working")
+        self.tw("quota", "--config-dir", str(self.cfg), "--codex-dir", str(self.codex), "--json")
+        self.tw("thread", "set", "ui", "--status", "idle")
+        self.tw("task", "add", "T1", "--title", "page", "--owner", "ui")
+        self.tw("plan", "approve", "--user-said", "approved")
+        self.env["TW_NOW"] = "2099-01-01T00:00:00+00:00"
+        out = json.loads(self.tw("ready").stdout)
+        self.assertEqual((out["ready"], out["quota_due"]), (["T1"], True))
+        self.assertEqual(self.due().get("reason"), "idle")  # --due alone still says idle
+
+    def test_landing_thread_and_review_task_count_as_running(self):
+        self.tw("thread", "add", "ui", "--session", "s-ui", "--status", "landing")
+        self.assertNotIn("reason", self.due())
+        self.tw("thread", "set", "ui", "--status", "idle")
+        self.tw("task", "add", "T1", "--title", "page", "--owner", "ui"); self.tw("task", "set", "T1", "--status", "dispatched")
+        self.tw("task", "set", "T1", "--status", "working"); self.tw("task", "set", "T1", "--status", "review")
+        self.assertNotIn("reason", self.due())
+
+    def test_planned_tasks_alone_count_as_idle_starting_thread_does_not(self):
+        self.tw("task", "add", "T1", "--title", "later")
+        self.assertEqual(self.due().get("reason"), "idle")
+        self.tw("thread", "add", "ui", "--session", "s-ui", "--status", "starting")
+        self.assertTrue(self.due()["due"])
 
 
 class T57Round3Core(Quota):

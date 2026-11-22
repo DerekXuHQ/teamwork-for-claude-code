@@ -48,7 +48,7 @@ Fable), the 5-hour window and the GPT weekly window, and maps them to one tier p
 At 100% total every Claude session stops, the lead included: `lead-only` is the floor kept for the lead.
 
 **Cadence.** The lead runs `TW quota` when it wakes and the last run is an hour old or more, and whenever the user
-asks. Quota is not part of every report. Several `--config-dir` folders are read one by one and the most severe tier decides. Notes (a stale cache, an inferred 0%, a state that could not be saved) end the line. When the output says `changed: yes`, the lead tells the user in one line
+asks. When nothing is running (no task dispatched, working or in review, no thread starting, working or landing) there is no check: `quota --due` and `ready`'s `quota_due` say not due (`reason: idle`) and record nothing; the usual interval since the last check applies once work starts again, so after an idle spell of `quota_every_minutes` or more the first check is due at once. Quota is not part of every report. Several `--config-dir` folders are read one by one and the most severe tier decides. Notes (a stale cache, an inferred 0%, a state that could not be saved) end the line. When the output says `changed: yes`, the lead tells the user in one line
 (new tier, what changes) and sends every thread one `INFO` with the tier and the routing change (`TW info`).
 Threads never read the quota themselves.
 

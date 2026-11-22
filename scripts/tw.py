@@ -185,7 +185,7 @@ LABELS = {
         "stale_recorded": "Already recorded; updated the existing stale result",
         "sensitive_guard": "sensitive tier: you said you want to review this kind of command",
         "decided_warning": "This may already be decided: {items}; check decided first",
-        "decided_none": "no matches", "quota_due": "due", "quota_not_due": "not due · {minutes} minutes remaining",
+        "decided_none": "no matches", "quota_due": "due", "quota_idle": "not due · idle: nothing is running", "quota_not_due": "not due · {minutes} minutes remaining",
         "package_ok": "ok", "package_missing": "missing: {items}", "package_empty": "empty files: {items}",
         "package_bad": "package is corrupt or incomplete", "path_missing": "path not found",
         "route_fable": "gpt, with Claude handling fable",
@@ -352,7 +352,7 @@ LABELS = {
         "stale_recorded": "已记过，已更新原有过期结果",
         "sensitive_guard": "敏感档：这类命令你说过要看一眼",
         "decided_warning": "这件可能已经定过：{items}，先看 decided", "decided_none": "没有命中",
-        "quota_due": "该查额度了", "quota_not_due": "还没到时间 · 还剩 {minutes} 分钟",
+        "quota_due": "该查额度了", "quota_idle": "不用查 · 空闲：没有活在跑", "quota_not_due": "还没到时间 · 还剩 {minutes} 分钟",
         "package_ok": "齐全", "package_missing": "缺少：{items}", "package_empty": "空文件：{items}",
         "package_bad": "包坏了或不完整", "path_missing": "找不到这个路径",
         "route_fable": "gpt，Claude 侧给 fable",
@@ -2765,7 +2765,7 @@ def cmd_ready(a):
         json.dumps(
             {
                 "ready": ready,
-                "quota_due": quota_due(st),
+                "quota_due": quota_due(st, dispatching=bool(ready)),
                 "route_hints": {t: route_hint(st, t) for t in ready},
                 "urgent_unacked": urgent,
                 "blocked_by_lease": blocked,
@@ -4536,7 +4536,21 @@ def cmd_prefs(a):
 QUOTA_RANK = ("unknown", "normal", "pre-reset-burn", "burn-fable", "save", "lead-only")  # least to most severe
 
 
-def quota_due(st):
+QUOTA_BUSY_TASK = ("dispatched", "working", "review")
+
+
+def quota_idle(st):
+    """R65: nothing is running (no task out, no thread starting, working or landing), so the quota is not worth reading."""
+    return not any(t.get("status") in QUOTA_BUSY_TASK for t in st.get("tasks", {}).values()) \
+        and not any(t.get("status") in ("starting", "working", "landing") for t in st.get("threads", {}).values())
+
+
+def quota_due(st, dispatching=False):
+    """Not due while idle, and nothing is recorded (read-only, so it works under the handover write lock).
+    Idle periods take no checks, so once work starts again the usual interval since the last check makes the first
+    check due at once after any idle spell of quota_every_minutes or more; a short pause adds no extra check."""
+    if quota_idle(st) and not dispatching:  # ready with work to send out: route it with a fresh tier
+        return False
     interval = int(st.get("prefs", {}).get("quota_every_minutes", 60) or 60)
     last = _when(st.get("last_quota_at"))
     return last is None or (_when(now()) - last).total_seconds() >= interval * 60
@@ -4553,10 +4567,12 @@ def quota_due_minutes(st):
 def cmd_quota(a):
     """T55: the lead's quota check. Reads local files only; bad data counts as missing; exit code is always 0."""
     if a.due:
-        d = need(find_dir()); st = load(d); due = quota_due(st)
-        result = {"due": due, "minutes_remaining": 0 if due else quota_due_minutes(st)}
+        d = need(find_dir()); st = load(d); idle = quota_idle(st); due = quota_due(st)
+        result = {"due": due, "minutes_remaining": 0 if due or idle else quota_due_minutes(st)}
+        if idle: result["reason"] = "idle"
         print(json.dumps(result, ensure_ascii=False) if a.json else
-              (lab(st, "quota_due") if due else lab(st, "quota_not_due", minutes=result["minutes_remaining"])))
+              (lab(st, "quota_due") if due else lab(st, "quota_idle") if idle
+               else lab(st, "quota_not_due", minutes=result["minutes_remaining"])))
         return
     if getattr(a, "weekly", False):
         d = need(find_dir()); st = load(d)

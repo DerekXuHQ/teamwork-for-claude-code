@@ -114,6 +114,7 @@ They need a cloud environment and, to edit code, a GitHub repo the account can r
 
 ## §5b Models and quota (T55)
 
+- No work, no check: while nothing is running, `TW quota --due` answers not due (`idle`) and `ready` carries `quota_due: false`; the usual interval since the last check applies once work starts again, so after an idle spell of `quota_every_minutes` or more the first check is due at once.
 - `TW quota` reads local files only, no network and no credentials: the Claude windows from the newest session transcripts in each config folder (`CLAUDE_CONFIG_DIR`, default `~/.claude`; the state file `~/.claude.json`, whose usage cache is written only when someone opens `/usage`), and the GPT windows from `~/.codex/sessions`. Pass `--config-dir` (repeatable: each folder is read on its own, the most severe tier decides) / `--codex-dir` for other places. Nothing to install.
 - A running session's model cannot be changed by a tool. `create_session(model=...)` sets it for a new seat only; the user can switch any session by hand in claude.ai. `get_session` shows `configured_model`, `session_context.model` and `external_metadata.last_served_model` (the self-check compares them).
 - GPT runs through the codex plugin (`codex:codex-rescue`, or its companion script). `TW selfcheck` says whether `codex` is on the PATH; routing is in references/routing.md.

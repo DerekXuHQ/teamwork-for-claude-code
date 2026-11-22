@@ -3343,6 +3343,246 @@ class AuditFollowups(TwCase):
                                                     "--user-said", "Quixbar: edits only").stderr)
 
 
+class BoardBatch5(TwCase):
+    def test_ready_json_stays_on_stdout_and_notice_is_stderr(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "ui")
+        self.tw("thread", "add", "api")
+        for tid, owner in (("T1", "ui"), ("T2", "api")):
+            self.tw("task", "add", tid, "--title", tid, "--owner", owner)
+        self.tw("plan", "approve", "--user-said", "approved")
+        result = self.tw("ready")
+        self.assertIsInstance(json.loads(result.stdout), dict)
+        self.assertIn("接下来要开 2 个线程", result.stderr)
+
+    def test_board_collisions_reviews_and_folded_seats(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "ui")
+        self.tw("thread", "add", "api")
+        self.tw("task", "add", "T1", "--title", "one", "--owner", "ui", "--touches", "src/x")
+        self.tw("task", "add", "T2", "--title", "two", "--owner", "api", "--touches", "src/x/y")
+        board = self.tw("board").stdout
+        self.assertIn("撞车 / 等待", board)
+        self.assertIn("都要改", board)
+        self.tw("thread", "add", "old")
+        self.tw("thread", "set", "old", "--status", "resolved")
+        self.assertIn("已折叠：3 个（ui, api, old）", self.tw("board").stdout)
+        self.assertIn("old", self.tw("roster").stdout)
+        expanded = self.tw("board", "--all").stdout
+        self.assertIn("old", expanded)
+        self.assertNotIn("已折叠：", expanded)
+
+    def test_merge_waiting_rows_and_ready_collision_hint(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "ui")
+        self.tw("thread", "add", "api")
+        self.tw("task", "add", "T1", "--title", "one", "--owner", "ui", "--touches", "src/a")
+        self.tw("task", "add", "T2", "--title", "two", "--owner", "api", "--touches", "src/a/b")
+        state = self.state()
+        state["tasks"]["T1"].update(status="review", checks="pass", review={"result": "pass", "at": "2026-11-22T00:00:00+00:00"}, review_rounds=2)
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertIn("T1", self.tw("board").stdout)
+        ready = json.loads(self.tw("ready").stdout)
+        self.assertTrue(ready["waiting_to_merge"])
+        self.assertEqual(ready["collision_hint"], "先排顺序")
+
+    def test_latest_document_link_only(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("docs", "set", "board", "--link", "https://example.invalid/old")
+        self.tw("docs", "set", "board", "--link", "https://example.invalid/new")
+        current = self.tw("docs", "list").stdout
+        self.assertIn("new", current)
+        self.assertNotIn("old", current)
+        history = self.tw("docs", "list", "--all").stdout
+        self.assertIn("旧版，别用", history)
+        self.tw("thread", "add", "api")
+        self.tw("task", "add", "T1", "--title", "delivery", "--owner", "api")
+        self.tw("deliverable", "add", "artifact", "--task", "T1", "--link", "https://example.invalid/v1")
+        self.tw("deliverable", "add", "artifact v2", "--task", "T1", "--link", "https://example.invalid/v2")
+        self.assertEqual(self.state()["deliverables"][0]["history"][0]["link"], "https://example.invalid/v1")
+
+    def test_receipt_big_picture_warning(self):
+        self.tw("thread", "add", "api")
+        message = self.dir / "receipt.txt"
+        message.write_text("[tw:demo] ACK lead -> api -\n[Big picture: context]\n", encoding="utf-8")
+        out = self.tw("check-msg", str(message), "--json").stdout
+        self.assertIn("big-picture-receipt", out)
+
+    def test_missing_feature_requires_complete_test_word(self):
+        self.tw("prefs", "--set", "language=zh")
+        message = self.dir / "test-note.txt"
+        message.write_text("Not supported; this measurement is not a test.", encoding="utf-8")
+        result = self.tw("check-msg", str(message), ok=False)
+        self.assertIn("先说清怎么测的", result.stderr)
+        message.write_text("Not supported; reproduced on the current build.", encoding="utf-8")
+        self.assertNotIn("unsupported-without-test", self.tw("check-msg", str(message), ok=False).stderr)
+
+
+class Batch5Round3(TwCase):
+    def test_en_promise_heading_and_safe_task_ids(self):
+        self.tw("prefs", "--set", "language=en"); self.tw("promise", "add", "send a summary")
+        self.assertIn("## Open promises", self.tw("board").stdout)
+        self.tw("thread", "add", "ui", "--session", "s-ui")
+        memory = (self.dir / ".teamwork" / "MEMORY.md").read_text(encoding="utf-8")
+        for bad in ("../MEMORY", "a/b"):
+            r = self.tw("task", "add", bad, "--title", "x", "--owner", "ui", ok=False)
+            self.assertNotEqual(r.returncode, 0); self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual((self.dir / ".teamwork" / "MEMORY.md").read_text(encoding="utf-8"), memory)
+
+    def test_outward_word_forms_refused_inside_words_allowed(self):
+        outward = ("pushing to main now?", "deploying to prod?", "部署到生产？", "把分支合到 main？", "提PR吗", "tell the client?", "deleting old rows?")
+        inside = ("pushing layout B further?", "customerId as the field name?")
+        for q in outward + inside: self.tw("ask", q)
+        for n in range(1, len(outward) + 1):
+            self.assertNotEqual(self.tw("ask", "--default", str(n), "yes", "--undoable", ok=False).returncode, 0, outward[n - 1])
+        for n in range(len(outward) + 1, len(outward) + len(inside) + 1):
+            self.tw("ask", "--default", str(n), "yes", "--undoable")
+
+    def test_external_question_ignores_internal_and_gets_no_due_hint(self):
+        self.tw("prefs", "--set", "language=en"); self.tw("prefs", "--set", "default_after_minutes=0")
+        self.tw("ask", "send the invoice?", "--external")
+        self.assertNotIn("default time reached", self.tw("board").stdout)
+        self.assertNotEqual(self.tw("ask", "--default", "1", "go", "--undoable", "--internal", "trust me", ok=False).returncode, 0)
+
+    def test_takeover_waiting_matches_board_and_wrapup_skips_remarks(self):
+        cfg = str(self.dir.parent / (self.dir.name + "-cfg"))
+        self.tw("prefs", "--set", "language=en")
+        self.tw("thread", "add", "api", "--session", "sid", "--status", "idle"); self.tw("thread", "set", "api", "--disconnected")
+        self.tw("task", "add", "T1", "--title", "finish API", "--owner", "api")
+        self.tw("archive", "verify", "sid", "--stopped", "stopped", "--park", "user decides", "--config-dir", cfg)
+        self.assertNotIn("Waiting for you: none", self.tw("opening", "--takeover").stdout)
+        self.tw("req", "add", "nice weather", "--remark")
+        self.assertNotIn("nice weather", self.tw("wrapup").stdout)
+
+    def test_example_requests_cannot_be_linked_elsewhere(self):
+        self.tw("thread", "add", "ui", "--session", "s-ui"); self.tw("task", "add", "T1", "--title", "page", "--owner", "ui")
+        self.tw("req", "add", "like the old site", "--kind", "example")
+        self.assertNotEqual(self.tw("task", "set", "T1", "--req", "R1", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("feature", "add", "home", "--req", "R1", ok=False).returncode, 0)
+
+
+class Batch5Round2(TwCase):
+    def test_never_raise_refuses_cleanly_everywhere(self):
+        self.tw("prefs", "--set", "language=en")
+        self.tw("memory", "pricing", "--never-raise")
+        self.tw("thread", "add", "ui", "--session", "s-ui")
+        self.tw("task", "add", "T1", "--title", "page", "--owner", "ui")
+        for args in (("task", "add", "T2", "--title", "x", "--brief", "about pricing"), ("task", "set", "T1", "--title", "pricing again"),
+                     ("req", "add", "change pricing"), ("promise", "add", "pricing promise"), ("task", "add", "T3", "--title", "pricing task")):
+            r = self.tw(*args, ok=False)
+            self.assertNotEqual(r.returncode, 0, args)
+            self.assertNotIn("Traceback", r.stderr, args)
+            self.assertIn("never-raise", r.stderr, args)
+
+    def test_beyond_task_cannot_be_dispatched_by_status_and_examples_stay_out(self):
+        self.tw("thread", "add", "ui", "--session", "s-ui")
+        self.tw("task", "add", "T1", "--title", "page", "--owner", "ui", "--beyond", "also redo the header")
+        self.assertNotEqual(self.tw("task", "set", "T1", "--status", "dispatched", ok=False).returncode, 0)
+        self.tw("req", "add", "like the old site", "--kind", "example")
+        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "open", ok=False).returncode, 0)
+
+    def test_default_refused_for_outward_steps_and_due_hint(self):
+        self.tw("prefs", "--set", "language=en"); self.tw("prefs", "--set", "default_after_minutes=0")
+        self.tw("ask", "merge it into main and tell everyone?")
+        r = self.tw("ask", "--default", "1", "merged", "--undoable", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.tw("ask", "use layout A or B?")
+        self.assertIn("default time reached", self.tw("board").stdout)
+        self.tw("ask", "--default", "2", "layout A", "--undoable")
+
+    def test_parked_items_show_on_board_and_replaced_archive_has_no_broadcast(self):
+        cfg = str(self.dir.parent / (self.dir.name + "-cfg"))
+        self.tw("prefs", "--set", "language=en")
+        self.tw("thread", "add", "api", "--session", "sid", "--status", "idle"); self.tw("thread", "set", "api", "--disconnected")
+        self.tw("task", "add", "T1", "--title", "finish API", "--owner", "api")
+        self.tw("archive", "verify", "sid", "--stopped", "stopped", "--park", "user decides", "--config-dir", cfg)
+        self.assertIn("parked at archive", self.tw("board").stdout)
+        self.tw("thread", "add", "ui", "--session", "old1")
+        self.tw("thread", "reseat", "ui", "--session", "new1")
+        self.tw("thread", "set", "ui", "--status", "working", "--from-status")
+        self.tw("archive", "verify", "old1", "--stopped", "old1 idle", "--config-dir", cfg)
+        done = self.tw("archive", "done", "old1")
+        self.assertNotIn("now owned by", done.stdout + done.stderr)
+        json.loads(done.stdout)
+
+    def test_unsuitable_model_moves_up_via_cli(self):
+        self.tw("thread", "add", "ui", "--session", "s-ui")
+        self.tw("task", "add", "T1", "--title", "page", "--owner", "ui", "--route", "fable", "--work-kind", "code")
+        for r in ("redo", "ok", "redo"):
+            self.tw("model-log", "--model", "fable", "--type", "code", "--result", r, "--task", "T1")
+        msg = self.tw("task-msg", "T1").stdout
+        self.assertIn("Route/Model: opus", msg)
+        self.tw("task", "add", "T2", "--title", "x", "--owner", "ui", "--route", "opus", "--work-kind", "code")
+        for r in ("redo", "ok", "redo"):
+            self.tw("model-log", "--model", "opus", "--type", "code", "--result", r, "--task", "T2")
+        self.assertIn("Route/Model: opus", self.tw("task-msg", "T2").stdout)  # nothing higher: kept, not refused
+
+
+class LedgerBatch5(TwCase):
+    def test_temporary_rule_travels_only_in_its_scope(self):
+        self.tw("thread", "add", "ui", "--session", "s-ui")
+        self.tw("task", "add", "T2", "--title", "x", "--owner", "ui"); self.tw("task", "add", "T3", "--title", "y", "--owner", "ui")
+        self.tw("memory", "skip tests this round", "--temporary", "--scope", "T2")
+        self.assertIn("skip tests this round", self.tw("task-msg", "T2").stdout)
+        self.assertNotIn("skip tests this round", self.tw("task-msg", "T3").stdout)
+
+    def test_issue_similarity_uses_longer_text_denominator(self):
+        self.tw("issue", "add", "the build is red", "--owner", "")
+        separate = self.tw("issue", "add", "the page is red in dark mode", "--owner", "")
+        self.assertNotIn("已有 I1", separate.stdout)
+        self.tw("issue", "add", "login button broken on safari", "--owner", "")
+        duplicate = self.tw("issue", "add", "login button broken on safari 17", "--owner", "")
+        self.assertIn("I3", duplicate.stdout)
+
+    def test_issue_dedupe_request_kind_and_task_original_words(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "api")
+        self.tw("issue", "add", "登录按钮完全无法工作", "--owner", "api")
+        duplicate = self.tw("issue", "add", "登录按钮无法工作", "--owner", "api")
+        self.assertIn("已有 I1", duplicate.stdout)
+        self.assertEqual(len(self.state()["issues"]), 1)
+        self.tw("req", "add", "只是说明例子", "--kind", "example")
+        self.assertNotEqual(self.tw("task", "add", "T1", "--title", "例子任务", "--req", "R1", ok=False).returncode, 0)
+        self.tw("task", "add", "T2", "--title", "整理", "--user-said", "按原话保存")
+        message = self.tw("task-msg", "T2").stdout
+        self.assertIn("用户原话", message)
+        self.assertTrue((self.dir / ".teamwork" / "tasks" / "T2.md").exists())
+        self.tw("prefs", "--set", "language=zh")
+        fixed = self.tw("issue", "set", "I1", "--status", "fixed-on-branch", "--ref", "tw/demo@abc123")
+        self.assertIn("I1 修好了", fixed.stdout)
+
+    def test_never_raise_preference_boundary_and_original_coverage(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("memory", "pricing", "--never-raise")
+        self.assertNotEqual(self.tw("task", "add", "T1", "--title", "pricing task", ok=False).returncode, 0)
+        self.tw("task", "add", "T1", "--title", "ordinary", "--user-said", "user words")
+        task_msg = self.tw("task-msg", "T1").stdout
+        self.assertIn("user words", task_msg)
+        self.tw("memory", "偏好长板", "--pref", "--boundary", "不是不要短板")
+        self.assertIn("边界：不等于不是不要短板", self.tw("memory", "--standing-list").stdout +
+                      (self.dir / ".teamwork" / "MEMORY.md").read_text(encoding="utf-8"))
+        state = self.state()
+        state["tasks"]["T1"]["status"] = "done"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        result = json.loads(self.tw("wrapup", "--json").stdout)
+        self.assertTrue(any("user words" in x for x in result["sections"]["原话覆盖"]))
+
+    def test_proposal_default_and_temporary_scope(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("ask", "--proposal", "改进可以撤回的显示")
+        self.assertIn("提议：", self.tw("board").stdout)
+        self.tw("ask", "--default", "1", "采用新显示", "--undoable")
+        self.assertIn("待你确认", self.tw("board").stdout)
+        self.tw("memory", "短期规则", "--temporary", "--scope", "T1")
+        self.assertNotIn("短期规则", self.tw("memory", "--standing-list").stdout)
+        self.tw("ask", "--external", "publish it")
+        self.assertNotEqual(self.tw("ask", "--default", "2", "publish now", "--undoable", ok=False).returncode, 0)
+        self.tw("ask", "prepare a release", "--undoable")
+        rejected = self.tw("ask", "--default", "3", "release it", "--undoable", ok=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("--internal", rejected.stderr)
+
+
 class GuardSafeShapes(unittest.TestCase):
     """T36: nothing the skill tells a session to run, and nothing its scripts run, trips other plugins' guards."""
 
@@ -4839,7 +5079,7 @@ class LedgerStates(TwCase):
         self.assertNotEqual(self.tw("ask", "--default", "1", "choose A", ok=False).returncode, 0)
         self.tw("ask", "--default", "1", "choose A", "--undoable")
         board = (self.dir / ".teamwork" / "BOARD.md").read_text()
-        self.assertIn("按默认做：choose A（可改）", board)
+        self.assertIn("按默认做了：choose A，不满意随时换回", board)
         self.assertFalse(self.state()["questions"][0]["answered"])
         self.tw("ask", "--answer", "1", "yes")
         self.assertTrue(self.state()["decisions"][0]["answered"])
@@ -5361,7 +5601,7 @@ class ArchiveAndSeats(TwCase):
         candidates = json.loads(self.tw("archive", "candidates", "--json").stdout)
         self.assertEqual((candidates[0]["session_id"], candidates[0]["category"]), ("old", "replaced"))
         self.assertNotEqual(self.tw("archive", "done", "old", ok=False).returncode, 0)
-        self.tw("archive", "verify", "old", "--stopped", "get_session old: idle; final event 12:00")
+        self.tw("archive", "verify", "old", "--stopped", "get_session old: idle; final event 12:00", "--config-dir", str(self.dir / "claude-config"))
         self.tw("archive", "done", "old")
         failed_check = self.tw("archive", "check", "old", "--not-archived")
         self.assertIn("已知问题", failed_check.stderr)
@@ -5370,13 +5610,14 @@ class ArchiveAndSeats(TwCase):
         self.assertEqual(rec["check"], "failed")
         self.assertEqual(rec["history"][-1]["evidence"], "get_session old: idle; final event 12:00")
 
+
     def test_disconnected_requires_user_decision_and_clears_on_report(self):
         self.tw("thread", "add", "api", "--session", "sid", "--status", "idle")
         self.tw("thread", "set", "api", "--disconnected")
         rows = json.loads(self.tw("archive", "candidates", "--json").stdout)
         self.assertEqual(rows[0]["category"], "disconnected")
         self.assertIn("等你定", rows[0]["reason"])
-        self.tw("archive", "verify", "sid", "--stopped", "idle in get_session")
+        self.tw("archive", "verify", "sid", "--stopped", "idle in get_session", "--config-dir", str(self.dir / "claude-config"))
         self.assertIn("--user-said", self.tw("archive", "done", "sid", ok=False).stderr)
         self.tw("archive", "done", "sid", "--user-said", "归档这条断线会话")
         self.tw("thread", "set", "api", "--from-status")
@@ -5389,7 +5630,7 @@ class ArchiveAndSeats(TwCase):
         rows = json.loads(self.tw("archive", "candidates", "--json").stdout)
         self.assertEqual(rows[0]["category"], "idle-old")
         self.assertIn("先列给用户看", rows[0]["reason"])
-        self.tw("archive", "verify", "sid", "--stopped", "idle; final event timestamp checked")
+        self.tw("archive", "verify", "sid", "--stopped", "idle; final event timestamp checked", "--config-dir", str(self.dir / "claude-config"))
         self.assertIn("--user-said", self.tw("archive", "done", "sid", ok=False).stderr)
         self.tw("archive", "done", "sid", "--user-said", "先给我看过，确认归档")
 
@@ -5550,12 +5791,12 @@ class T57Round1(TwCase):
         self.tw("thread", "set", "api", "--status", "idle")
         self.assertNotIn("other-live", [x["session_id"] for x in json.loads(self.tw("archive", "candidates", "--json").stdout)])
         self.tw("thread", "set", "ui", "--disconnected")
-        self.tw("archive", "verify", "current", "--stopped", "会话已停")
+        self.tw("archive", "verify", "current", "--stopped", "会话已停", "--config-dir", str(self.dir / "claude-config"))
         self.tw("thread", "set", "ui", "--status", "working")
         self.assertNotEqual(self.tw("archive", "done", "current", "--user-said", "归档", ok=False).returncode, 0)
         self.tw("thread", "set", "ui", "--status", "idle")
         self.tw("thread", "set", "ui", "--disconnected")
-        self.tw("archive", "verify", "current", "--stopped", "再次确认已停")
+        self.tw("archive", "verify", "current", "--stopped", "再次确认已停", "--config-dir", str(self.dir / "claude-config"))
         self.tw("archive", "done", "current", "--user-said", "归档这条会话")
         self.assertEqual(self.state()["threads"]["ui"]["status"], "archived")
         self.assertNotIn("ui", json.loads(self.tw("threads", "--json").stdout)["other"])
@@ -5679,7 +5920,7 @@ class T57Round2(TwCase):
         self.tw("thread", "set", "ui", "--disconnected")
         st = self.state(); st["threads"]["ui"].update({"stuck_on": "cleanup", "waiting_for": "permission"})
         (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
-        self.tw("archive", "verify", "sid", "--stopped", "确认 sid 已停止")
+        self.tw("archive", "verify", "sid", "--stopped", "确认 sid 已停止", "--config-dir", str(self.dir / "claude-config"))
         self.tw("archive", "done", "sid", "--user-said", "用户原话：可以归档")
         archived_thread = self.state()["threads"]["ui"]
         self.assertNotIn("stuck_on", archived_thread); self.assertNotIn("waiting_for", archived_thread)
@@ -5691,7 +5932,7 @@ class T57Round2(TwCase):
         self.assertIn("归档复核失败：sid [ui]", self.tw("board").stdout)
         listed = json.loads(self.tw("archive", "list", "--json").stdout)
         self.assertEqual(listed["failed"][0]["session_id"], "sid")
-        self.tw("archive", "verify", "sid", "--stopped", "再次确认已停")
+        self.tw("archive", "verify", "sid", "--stopped", "再次确认已停", "--config-dir", str(self.dir / "claude-config"))
         self.tw("archive", "done", "sid", "--user-said", "用户原话：可以归档")
         listed = json.loads(self.tw("archive", "list", "--json").stdout)
         self.assertEqual(listed["archived"][0]["result"], "已核实并归档")
@@ -5830,7 +6071,7 @@ class T57Round3Core(Quota):
         spec.loader.exec_module(tw)
         asks = ("pnpm -r publish", "npm --tag beta publish", "yarn npm publish", "curl -sd a https://x.invalid",
                 "curl -Fa=b https://x.invalid", "curl -sX POST https://x.invalid", "timeout 30 git push",
-                "eval 'git push'", "find . -exec git push \;", "python -m twine upload d", "bash -c -- 'git push'",
+                "eval 'git push'", r"find . -exec git push \;", "python -m twine upload d", "bash -c -- 'git push'",
                 "FOO=1 git push origin main", "if true; then git push; fi")
         quiet = ("npm run publish", "npm run-script publish", "curl -odata https://x.invalid", "curl -sSL https://x.invalid",
                  "wget -d https://x.invalid", "curl -X GET https://x.invalid")
@@ -5893,6 +6134,66 @@ class ScreenShadow(TwCase):
         self.assertEqual(result["color_label"], "红")
         self.tw("prefs", "--set", "screen_mode=off")
         self.assertEqual(self.tw("screen", "ask", "lead").stdout.strip(), "体检已关")
+
+
+class ArchiveBatch5(TwCase):
+    def test_repeated_parked_archive_verify_reuses_pack_and_notice(self):
+        self.tw("thread", "add", "api", "--session", "sid", "--status", "idle")
+        self.tw("thread", "set", "api", "--disconnected")
+        self.tw("task", "add", "T1", "--title", "finish API", "--owner", "api")
+        for _ in range(2):
+            self.tw("archive", "verify", "sid", "--stopped", "confirmed stopped", "--park",
+                    "user will decide later", "--config-dir", str(self.dir / "claude-config"))
+        state = self.state()
+        self.assertEqual(len(state["archive_packs"]), 1)
+        self.assertEqual(sum(n.get("kind") == "parked" for n in state["notices"]), 1)
+
+    def test_current_session_archive_requires_handoff_of_open_task(self):
+        self.tw("thread", "add", "api", "--session", "sid", "--status", "idle")
+        self.tw("thread", "set", "api", "--disconnected")
+        self.tw("task", "add", "T1", "--title", "finish API", "--owner", "api")
+        cfg = str(self.dir.parent / (self.dir.name + "-cfg"))
+        blocked = self.tw("archive", "verify", "sid", "--stopped", "confirmed stopped", "--config-dir", cfg, ok=False)
+        self.assertIn("--handed-to", blocked.stderr)
+        self.tw("archive", "verify", "sid", "--stopped", "confirmed stopped", "--handed-to", "lead", "--config-dir", cfg)
+        self.assertEqual(self.state()["tasks"]["T1"]["owner"], "lead")
+
+    def test_park_and_pack_reuse_the_handover_extraction(self):
+        self.tw("thread", "add", "api", "--session", "sid", "--status", "idle")
+        self.tw("thread", "set", "api", "--disconnected")
+        self.tw("task", "add", "T1", "--title", "finish API", "--owner", "api")
+        tr = self.dir / ".teamwork" / "tr.jsonl"
+        tr.write_text(json.dumps({"type": "user", "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "origin": {"kind": "human"},
+                                  "message": {"content": "keep the export in CSV, never xlsx"}}) + "\n", encoding="utf-8")
+        self.tw("archive", "verify", "sid", "--stopped", "confirmed stopped", "--park", "user will decide later", "--transcript", str(tr), "--config-dir", str(self.dir / "claude-config"))
+        st = self.state()
+        self.assertTrue(any(n.get("kind") == "parked" and "T1" in n.get("text", "") for n in st.get("notices", [])))
+        pack = st["archive_packs"]["AR1"]
+        words = (Path(pack["dir"]) / "words.md").read_text(encoding="utf-8")
+        self.assertIn("keep the export in CSV", words)
+        self.assertTrue((Path(pack["dir"]) / "MANIFEST.json").exists())  # the full T58 pack, not a summary
+        self.tw("rebuild", "--apply")
+        self.assertIn("AR1", self.state()["archive_packs"])
+
+    def test_unmerged_branch_blocks_archive(self):
+        def git(*args):
+            subprocess.run(["git", "-C", str(self.dir), *args], check=True, capture_output=True)
+        git("init", "-q", "-b", "main"); git("config", "user.name", "t"); git("config", "user.email", "t@example.invalid")
+        (self.dir / "f.txt").write_text("a\n"); git("add", "f.txt"); git("commit", "-q", "-m", "init")
+        self.tw("thread", "add", "api", "--session", "sid", "--status", "idle")
+        self.tw("thread", "set", "api", "--disconnected")
+        branch = self.state()["threads"]["api"]["branch"]
+        git("switch", "-q", "-c", branch); (self.dir / "g.txt").write_text("b\n"); git("add", "g.txt"); git("commit", "-q", "-m", "work"); git("switch", "-q", "main")
+        cfg = str(self.dir.parent / (self.dir.name + "-cfg"))
+        blocked = self.tw("archive", "verify", "sid", "--stopped", "confirmed stopped", "--config-dir", cfg, ok=False)
+        self.assertIn(branch, blocked.stderr)
+
+    def test_outside_reviewer_cannot_be_a_past_owner(self):
+        self.tw("thread", "add", "ui", "--session", "s-ui"); self.tw("thread", "add", "api", "--session", "s-api")
+        self.tw("task", "add", "T1", "--title", "x", "--owner", "ui")
+        self.tw("task", "set", "T1", "--owner", "api")  # ui handed it over
+        r = self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "ui", "--outside", "--rounds", "1", ok=False)
+        self.assertNotEqual(r.returncode, 0)
 
 
 class SeatSwap(TwCase):
@@ -6546,3 +6847,99 @@ class ScreenShadow2(TwCase):
         self.tw("prefs", "--set", "language=zh")
         chinese = json.loads(self.tw("signals", "lead", "--json").stdout)
         self.assertEqual(chinese["color_label"], "绿")
+
+
+class ModelsBatch5(TwCase):
+    def test_gpt_private_accepts_cli_comma_and_json_lists(self):
+        self.tw("prefs", "--set", "gpt_private=alpha,beta")
+        self.assertEqual(self.state()["prefs"]["gpt_private"], ["alpha", "beta"])
+        self.tw("prefs", "--set", 'gpt_private=["secret path","customer"]')
+        self.assertEqual(self.state()["prefs"]["gpt_private"], ["secret path", "customer"])
+
+    def test_unrouted_task_msg_keeps_route_line_absent(self):
+        self.tw("thread", "add", "api")
+        self.tw("task", "add", "T1", "--title", "review", "--owner", "api")
+        message = self.tw("task-msg", "T1").stdout
+        self.assertIn("Goal: review", message)
+        self.assertNotIn("Brief:", message)  # same TASK as before batch 5 when no brief was given
+        self.assertNotIn("Route/Model:", message)
+
+    def test_gpt_down_records_undoable_fallback_and_ready_blocks_nonurgent(self):
+        self.tw("prefs", "--set", "language=zh")
+        out = self.tw("model-status", "gpt", "--down", "--why", "quota", "--until", "20:00")
+        self.assertIn("GPT 暂不可用", out.stdout)
+        self.assertTrue(self.state()["models"]["gpt"]["down"])
+        self.assertTrue(any("P0" in q["text"] for q in self.state()["questions"]))
+        self.tw("thread", "add", "api")
+        self.tw("task", "add", "T1", "--title", "review", "--owner", "api")
+        task = self.state(); task["tasks"]["T1"].update(status="approved", model="gpt")
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(task), encoding="utf-8")
+        self.assertIn("等 GPT 恢复", self.tw("task-msg", "T1", ok=False).stderr)
+        self.tw("model-status", "gpt", "--up")
+        self.assertNotIn("gpt", self.state()["models"])
+
+    def test_gpt_task_private_text_is_blocked_and_masked(self):
+        self.tw("prefs", "--set", "language=zh")
+        st = self.state(); st["prefs"]["gpt_private"] = ["secretphrase"]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.tw("task", "add", "T1", "--title", "send secretphrase", "--model", "gpt")
+        result = self.tw("task-msg", "T1", ok=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("secretphrase", result.stderr)
+        self.assertIn("不能给 GPT", result.stderr)
+
+    def test_private_path_and_word_boundaries(self):
+        self.tw("prefs", "--set", "language=zh")
+        st = self.state(); st["prefs"]["gpt_private"] = ["path: secret/**", "acme"]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.tw("task", "add", "T1", "--title", "mention secret/a.txt", "--model", "gpt")
+        self.assertNotEqual(self.tw("task-msg", "T1", ok=False).returncode, 0)
+        st = self.state(); st["prefs"]["gpt_private"] = ["acme"]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.tw("task", "add", "T2", "--title", "acmeville", "--model", "gpt")
+        self.assertEqual(self.tw("task-msg", "T2").returncode, 0)
+        self.tw("task", "add", "T3", "--title", "acme", "--model", "gpt")
+        self.assertNotEqual(self.tw("task-msg", "T3", ok=False).returncode, 0)
+
+
+class LeadBatch5(TwCase):
+    def test_new_user_facing_text_has_no_chinese_in_english_projects(self):
+        self.tw("prefs", "--set", "language=en")
+        self.tw("thread", "add", "ui", "--session", "s-ui")
+        self.tw("task", "add", "T1", "--title", "build page", "--owner", "ui")
+        outs = [self.tw("opening", "--takeover"), self.tw("notice", "add", "--kind", "needs-user", "--note", "approve deploy"),
+                self.tw("quota", "--weekly"), self.tw("model-status", "gpt", "--down", "--why", "quota"),
+                self.tw("model-status", "gpt", "--up"), self.tw("memory", "push the strengths", "--pref"), self.tw("board")]
+        for r in outs:
+            self.assertIsNone(re.search(r"[\u4e00-\u9fff]", r.stdout + r.stderr), r.stdout + r.stderr)
+
+    def test_takeover_opening_contains_unfinished_ledgers(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "api", "--session", "api-session", "--status", "working", "--summary", "修复接口")
+        self.tw("task", "add", "T1", "--title", "修复用户接口", "--owner", "api")
+        self.tw("promise", "add", "补文档")
+        self.tw("ask", "--proposal", "调整可撤回默认")
+        self.tw("issue", "add", "启动报错")
+        out = json.loads(self.tw("opening", "--takeover", "--json").stdout)
+        self.assertEqual(out["threads"][0]["seat"], "api")
+        self.assertIn("T1 修复用户接口", out["threads"][0]["task"])
+        self.assertEqual(out["promises"][0]["text"], "补文档")
+        self.assertEqual(out["asks"][0]["text"], "调整可撤回默认")
+        self.assertEqual(out["issues"][0]["text"], "启动报错")
+        self.assertTrue(out["lines"][-1].startswith("我先接着做能撤回的事"))
+
+    def test_takeover_caps_each_category_independently(self):
+        self.tw("prefs", "--set", "language=zh")
+        st = self.state()
+        st["threads"] = {f"t{i}": {"session_id": f"s{i}", "status": "working", "summary": f"task{i}"} for i in range(15)}
+        st["promises"] = [{"text": f"p{i}", "status": "open"} for i in range(7)]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        lines = json.loads(self.tw("opening", "--takeover", "--json").stdout)["lines"]
+        self.assertIn("另有 10 个线程，见 board", lines)
+        self.assertIn("另有 2 个承诺，见 board", lines)
+        self.assertEqual(sum(f"task{i}" in "\n".join(lines) for i in range(15)), 5)
+
+    def test_notice_needs_user_is_rendered_on_board(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("notice", "add", "--kind", "needs-user", "--note", "确认登录设备")
+        self.assertIn("这一步要你本人来点：确认登录设备", self.tw("board").stdout)

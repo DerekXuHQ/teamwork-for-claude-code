@@ -98,7 +98,7 @@ LABELS = {
         "requests": "Your requests (not closed)", "unreported": "Delivered, not yet reported to the user",
         "req_open": "open", "req_held": "held: waiting for your material", "req_dispatched": "dispatched", "req_delivered": "delivered (report it!)",
         "req_reported": "reported", "req_closed": "closed", "req_proposed": "proposed (waiting for a yes)",
-        "req_dropped": "dropped", "req_waiting_user": "waiting for your decision", "req_wont": "won't do (reason)", "req_landed": "landed (evidence)", "req_remark": "remark", "remark_heading": "Remarks (not dispatched)", "default_heading": "Defaulted decisions", "promise_heading": "Open promises", "default_prefix": "Defaulted: ", "can_change": " (can change)", "rcpt_remark": "recorded as a remark {r}, not dispatched", "rcpt_given": "recorded as {r}, given to {who}", "rcpt_open": "recorded as {r}, not dispatched yet", "default_undoable": "only something that can be undone may be done by default; an irreversible step waits for the user (add --undoable when it can be undone)", "followup": "follow-up",
+        "req_dropped": "dropped", "req_waiting_user": "waiting for your decision", "req_wont": "won't do (reason)", "req_landed": "landed (evidence)", "req_remark": "remark", "remark_heading": "Remarks (not dispatched)", "default_heading": "Waiting for your confirmation", "promise_heading": "Open promises", "default_prefix": "Going ahead by default: ", "can_change": " (change it any time)", "rcpt_remark": "recorded as a remark {r}, not dispatched", "rcpt_given": "recorded as {r}, given to {who}", "rcpt_open": "recorded as {r}, not dispatched yet", "default_undoable": "only something that can be undone may be done by default; an irreversible step waits for the user (add --undoable when it can be undone)", "followup": "follow-up",
         "no_threads": "(no threads yet)",
         "t_created": "created", "t_updated": "updated", "t_reported": "reported", "t_closed": "closed",
         "t_where": "where", "t_thread": "thread", "t_session": "session", "t_branch": "branch", "t_log": "log",
@@ -114,8 +114,8 @@ LABELS = {
         "s_none_yet": "(none yet)", "s_requests": "Your requests", "s_none_open": "(none open)",
         "s_waiting": "Waiting on you", "s_issues": "Known issues", "s_missing": "missing",
         "s_all": "Every requirement (strike out what is stale)", "s_ungrouped": "(no phase or category)",
-        "merge_waiting": "Waiting to merge: {n} branch(es), oldest {m} min ({tasks})", "owner": "owner",
-        "d_draft": "draft", "d_final": "final", "i_open": "open", "i_fixed-on-branch": "fixed on a branch",
+        "merge_waiting": "Waiting to merge: {n} branch(es), oldest {m} min ({tasks})", "waiting_merge_heading": "Waiting to merge", "collision_heading": "Collisions / waiting", "issue_fixed_broadcast": "{id} fixed: {text} (fixed by {who}); do not report it again", "folded_threads": "Folded: {n} ({names})", "all_threads": "All threads", "collision_tasks": "{a} ({owner_a}) and {b} ({owner_b}) both touch {path}", "dependency_task": "{task} ({owner}) is waiting for {dep} ({dep_owner})", "proposal_prefix": "Proposal: ", "original_words": "User's words", "req_not_request": "This is an example/comment, not a task", "beyond_task": "Task {task} goes beyond the user's intent: {text}", "beyond_wait": "{task}: beyond the user's intent; wait for the answer before dispatch", "collision_order": "plan the order first", "issue_duplicate": "Already {id}: {text}; use issue set {id} --note to append", "wrapup_coverage": "Original words coverage", "default_external": "External actions cannot be done by default", "answer_revert": "Revert if needed: {what}", "owner": "owner", "reporters": "reported by",
+        "d_draft": "draft", "d_final": "final", "i_open": "open", "i_fixed": "fixed", "i_fixed-on-branch": "fixed on a branch",
         "i_merged": "merged", "i_verified": "verified", "qa_pending": "Merged, regression not run yet",
         "quota_deny": "Unsuitable model combinations", "features": "Feature ledger", "reconcile": "Reconcile",
         "reconcile_badge": "🔴 Reconcile: {n} mismatches → TW reconcile", "wrapup": "Wrap-up self-check",
@@ -230,6 +230,7 @@ LABELS = {
         "succ_reason_sep": "; ",
         "succ_triggers": "triggers", "succ_subscriptions": "subscriptions",
         "succ_status_row": "{id} {seat} {phase} → {next}", "succ_redacted": "[redacted]",
+        "archive_handover_needed": "Hand over first: {items}. Use --handed-to <thread|lead> or --park \"<why>\".",
         "succ_verify_self": "Self-check: compare tasks, branch, head, rules and requests with the pack before you send the receipt.",
         "succ_retire_needs_archive": "Archive the old session first: archive verify, done and check.",
         "succ_no_file_ops": "transcript has no readable file-operation records", "succ_no_commands": "transcript has no Bash command records", "succ_no_urls": "transcript has no URLs",
@@ -278,10 +279,10 @@ LABELS = {
         "notice_foreign_session": "不是本项目的会话",
         "t_other": "分支上其他未合并的工作", "t_no_tasks": "没有关联任务",
         "s_title": "进展一览", "s_updated": "更新于", "s_deliverables": "交付物", "s_none_yet": "（还没有）",
-        "s_requests": "你提的事", "s_none_open": "（没有未完成的）", "s_waiting": "等你处理", "s_issues": "已知问题",
+        "s_requests": "你提的事", "s_none_open": "（没有未完成的）", "s_waiting": "等你处理", "s_issues": "已知问题", "default_heading": "待你确认", "default_prefix": "按默认做了：", "can_change": "，不满意随时换回", "issue_fixed_broadcast": "{id} 修好了：{text}（{who}修的），别再报",
         "s_missing": "还缺", "s_all": "全部需求（过时的划掉）", "s_ungrouped": "（未分阶段或类别）",
-        "merge_waiting": "等待合并：{n} 个分支，最早的已等 {m} 分钟（{tasks}）", "owner": "负责",
-        "d_draft": "草稿", "d_final": "定稿", "i_open": "未修", "i_fixed-on-branch": "已在分支上修好",
+        "merge_waiting": "等待合并：{n} 个分支，最早的已等 {m} 分钟（{tasks}）", "waiting_merge_heading": "等合并", "collision_heading": "撞车 / 等待", "folded_threads": "已折叠：{n} 个（{names}）", "all_threads": "完整线程列表", "collision_tasks": "{a}（{owner_a}）和 {b}（{owner_b}）都要改 {path}", "dependency_task": "{task}（{owner}）在等 {dep}（{dep_owner}）", "proposal_prefix": "提议：", "original_words": "用户原话", "req_not_request": "这是举例/评论，不派任务", "beyond_task": "任务 {task} 超出原意：{text}", "beyond_wait": "{task}：超出原意，等 ask 被回答后才能派出", "collision_order": "先排顺序", "issue_duplicate": "已有 {id}：{text}，用 issue set {id} --note 追加", "wrapup_coverage": "原话覆盖", "default_external": "看起来是对外或不可撤回的事，不能按默认做；确实不是就加 --internal \"<理由>\"", "answer_revert": "换回：{what}", "owner": "负责", "reporters": "报告人",
+        "d_draft": "草稿", "d_final": "定稿", "i_open": "未修", "i_fixed": "已修好", "i_fixed-on-branch": "已在分支上修好",
         "i_merged": "已合并", "i_verified": "已验证", "qa_pending": "已合并、还没跑回归",
         "quota_deny": "不适合名单", "features": "功能清单", "reconcile": "三方对账",
         "reconcile_badge": "🔴 对账：{n} 处对不上 → TW reconcile", "wrapup": "收工自查",
@@ -391,6 +392,7 @@ LABELS = {
         "succ_reason_sep": "；",
         "succ_triggers": "定时提醒", "succ_subscriptions": "订阅",
         "succ_status_row": "{id} {seat} {phase} → {next}", "succ_redacted": "[含打码]",
+        "archive_handover_needed": "先交接：{items}。用 --handed-to <线程|lead> 指定接手人，或 --park \"<为什么先挂着>\"。",
         "succ_verify_self": "自检：请核对 tasks、branch、head、rules、requests",
         "succ_retire_needs_archive": "先走 archive verify/done/check",
         "succ_no_file_ops": "对话记录没有可读的文件操作记录", "succ_no_commands": "对话记录没有 Bash 命令记录", "succ_no_urls": "对话记录没有 URL",
@@ -422,6 +424,92 @@ LABELS = {
 def lab(st, key, **kw):
     code = (st.get("prefs", {}).get("language") or "en").strip().lower().split("-")[0]
     return LABELS.get(code, LABELS["en"]).get(key, LABELS["en"].get(key, key)).format(**kw)  # unknown: the key
+
+
+MODEL_STATUS_LABELS = {
+    "en": {"model_down": "{model} unavailable: {why}; expected recovery {until}",
+           "model_reason_quota": "quota", "model_reason_connection": "connection", "model_reason_other": "other",
+           "model_private_hit": "This content cannot go to GPT: {hit}; reassign to Claude or remove private content",
+           "takeover_final": "I will continue reversible work; reply ‘okay’ or tell me what to change.",
+           "auto_note": "Managed mode is active. You may still be asked about archiving, safety checks before some commands, and plugin confirmations; those do not mean managed mode failed.",
+           "gpt_private_question": "Which kinds of content should GPT not see? Say them once (saved in gpt_private).",
+           "ready_notice": "Next, {n} threads need opening; you may need to confirm {n} times",
+           "gpt_down_p0": "GPT is unavailable; consider assigning this P0 task to Claude",
+           "gpt_down_wait": "Waiting for GPT to recover",
+           "check_msg_test_warning": "warning unsupported-without-test: say how it was tested",
+           "change_unknown": "(previous value not recorded)", "change_empty": "No tracked environment changes recorded",
+           "model_switched": "{initial} is unsuitable for {kind}; switched to {model}", "model_no_higher": "{initial} is unsuitable for {kind} and no higher model is available; kept it", "needs_user": "This step needs you to click it yourself: ", "boundary_hint": "Record the boundary too (--boundary: what it does not mean)", "pref_prefix": "Preference: ", "pref_boundary": " (boundary: does not mean {b})", "old_link": "old version, do not use", "big_picture_receipt": "A receipt between sessions should not start with the big-picture header", "never_raise_hit": 'Hits a never-raise topic: {hit}. If the user\'s words allow it, use --override "<their words>"', "lead_relay": "Consider a new lead (succ start lead); the ledger, board and feature list carry over as they are", "weekly": "This week: Fable used {fable} times, GPT {gpt} times, {redo} redone and thrown away", "model_up": "{model} is back", "gpt_default_q": "Default: if you do not answer within {minutes} minutes, Claude takes over P0 work and lower-priority work waits for GPT", "gpt_deny_q": "Put GPT's {kind} work on the unsuitable list?", "model_escalated": "{model} does poorly at {kind}; switched to {next}. Reason: 2 of the last 3 were redone", "tk_head": "Taking over: {project} — {goal}; {n} threads", "tk_none": "none", "tk_more": "{n} more {what}, see board", "tk_thread": "{seat}: {status}; {task}; last report {at}", "tk_threads": "threads", "tk_promises_h": "Promised, not done: ", "tk_promises": "promises", "tk_asks_h": "Waiting for you: ", "tk_asks": "questions", "tk_issues_h": "Problems found: ", "tk_issues": "issues", "archive_broadcast": "{seat} is now owned by {who}; delivery: {where}", "env_heading": "Environment and process changes", "takeover_hint": "Run opening --takeover and send it to the user", "default_due": "default time reached: apply it with ask --default {n} if it can be undone", "parked": "parked at archive ({seat}, {why}): ",
+           "default_external": "This looks external or irreversible and cannot be defaulted; if it is not, add --internal \"<reason>\""},
+    "zh": {"model_down": "{model} 暂不可用：{why}，预计 {until} 恢复",
+           "model_reason_quota": "额度", "model_reason_connection": "连接", "model_reason_other": "其他原因",
+           "model_private_hit": "这段不能给 GPT：{hit}；改派 Claude 或去掉私有内容",
+           "takeover_final": "我先接着做能撤回的事；你回『好』或提修改就行。",
+           "auto_note": "托管生效后仍可能被问：归档会话、某些命令执行前的安全确认、插件弹出的确认——这些不是托管失灵。",
+           "gpt_private_question": "哪类东西不想给 GPT 看，一句话划出去（存进 gpt_private）。",
+           "ready_notice": "接下来要开 {n} 个线程，可能要点 {n} 下确认",
+           "gpt_down_p0": "GPT 暂不可用，P0 任务建议改派 Claude",
+           "gpt_down_wait": "等 GPT 恢复",
+           "check_msg_test_warning": "warning unsupported-without-test: 先说清怎么测的",
+           "change_unknown": "（未记录原值）", "change_empty": "没有记录到环境和做法变化",
+           "model_switched": "{initial} 不适合 {kind}，已换 {model}", "model_no_higher": "{initial} 不适合 {kind}，没有更高一级可用；保留原模型", "needs_user": "这一步要你本人来点：", "boundary_hint": "记一下边界（--boundary：它不等于什么）", "pref_prefix": "偏好：", "pref_boundary": "（边界：不等于{b}）", "old_link": "旧版，别用", "big_picture_receipt": "会话间回执不要大局观开头", "never_raise_hit": '命中禁区：{hit}；如用户原话允许，使用 --override "<用户原话>"', "lead_relay": "建议换一个新 lead（succ start lead），台账、看板、功能清单原样接上", "weekly": "这周 Fable 用了 {fable} 次、GPT 用了 {gpt} 次，返工作废 {redo} 次", "model_up": "{model} 已恢复", "gpt_default_q": "默认：{minutes} 分钟内你没回，P0 的活由 Claude 接着做，低优先的先停，等 GPT 恢复", "gpt_deny_q": "要把 GPT 的 {kind} 列进不适合吗", "model_escalated": "{model} 做不好 {kind}，已换 {next}，原因：最近 3 次 2 次返工", "tk_head": "接手：{project} — {goal}；{n} 个线程", "tk_none": "无", "tk_more": "另有 {n} 个{what}，见 board", "tk_thread": "{seat}：{status}；{task}；最后汇报 {at}", "tk_threads": "线程", "tk_promises_h": "答应未做：", "tk_promises": "承诺", "tk_asks_h": "等你：", "tk_asks": "问题", "tk_issues_h": "发现问题：", "tk_issues": "问题", "archive_broadcast": "{seat} 现在由 {who} 管；交付在 {where}", "env_heading": "环境和做法有什么变化", "takeover_hint": "跑 opening --takeover 发给用户", "default_due": "已到默认时间：能撤回的话用 ask --default {n} 落默认", "parked": "归档时挂起（{seat}，{why}）：",
+           "default_external": "看起来是对外或不可撤回的事，不能按默认做；确实不是就加 --internal \"<理由>\""},
+}
+
+
+def model_lab(st, key, **kw):
+    code = (st.get("prefs", {}).get("language") or "en").strip().lower().split("-")[0]
+    return MODEL_STATUS_LABELS.get(code, MODEL_STATUS_LABELS["en"])[key].format(**kw)
+
+
+def _private_hits_text(text, terms, paths):
+    raw = text.encode("utf-8", "replace")
+    hits = []
+    for term in terms:
+        if not term: continue
+        if re.fullmatch(r"[A-Za-z0-9_]+", term):
+            if re.search(r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])", text, re.I): hits.append(("*****", "private word"))
+        elif _bytes_has(raw, _needles([term])): hits.append(("*****", "private word"))
+    # Match each path-like token using the guard's gitignore glob matcher.
+    for i, rule in enumerate(paths, 1):
+        if any(_path_rule_hit(token, rule) for token in re.findall(r"[\w./\\-]+", text)):
+            hits.append(("*****", f"private path rule #{i}"))
+    return hits
+
+
+def _task_dispatch_model(st, tid):
+    task = st.get("tasks", {}).get(tid, {})
+    requested = task.get("route") or task.get("model") or (st.get("threads", {}).get(task.get("owner") or "") or {}).get("model")
+    if requested not in MODELS:
+        return None
+    kind = task.get("kind") or task.get("type")
+    order = ("gpt", "fable", "opus")
+    initial = requested
+    choices = list(order[order.index(initial):])
+    for model in choices:
+        if kind and _denied(st, kind, model): continue
+        if model == "gpt" and st.get("models", {}).get("gpt", {}).get("down"):
+            urgent = bool(task.get("urgent") or task.get("priority") == "P0")
+            if urgent: return {"model": "fable", "status": None, "reason": model_lab(st, "gpt_down_p0")}
+            return {"model": "gpt", "status": model_lab(st, "gpt_down_wait"), "reason": None}
+        reason = (model_lab(st, "model_switched", initial=initial, kind=kind, model=model) if model != initial and kind else None)
+        return {"model": model, "status": None, "reason": reason}
+    return {"model": initial, "status": model_lab(st, "model_no_higher", initial=initial, kind=kind), "reason": None}
+
+
+def _seat_change_summary(d, st, seat, start):
+    events = []
+    try:
+        for line in (d / "log.jsonl").read_text(encoding="utf-8").splitlines():
+            try: row = json.loads(line)
+            except ValueError: continue
+            if row.get("t", "") >= (start or "") and row.get("ev") in ("prefs", "lead", "thread-set", "task-set"):
+                events.append({"at": row.get("t"), "event": row.get("ev"), "mode": row.get("mode"), "set": row.get("set"),
+                               "branch": row.get("branch"), "base": row.get("base"), "session": row.get("session")})
+    except OSError: pass
+    mem = (d / "MEMORY.md").read_text(encoding="utf-8") if (d / "MEMORY.md").exists() else ""
+    added = [line[2:] for line in mem.splitlines() if line.startswith("- ") and "_(added" in line and
+             (not start or line.split("_(added", 1)[-1][:20] >= start[:10])]
+    return events, added
 
 
 REQ_STATUSES = ["open", "held", "proposed", "dispatched", "delivered", "reported", "waiting_user", "landed", "wont", "remark", "closed", "dropped"]
@@ -709,6 +797,11 @@ def snapshots(st, ev):
         snap["snap_promises"] = st.get("promises", [])
     if ev.get("ev", "").startswith("archive-"):
         snap["snap_archive"] = st.get("archive", {})
+        if ev.get("ev") == "archive-verify":
+            snap.update(snap_tasks=st.get("tasks", {}), snap_questions=st.get("questions", []),
+                        snap_issues=st.get("issues", []), snap_notices=st.get("notices", []),
+                        snap_archive_packs=st.get("archive_packs", {}),
+                        snap_archive_handoffs=st.get("archive_handoffs", []))
     if ev.get("ev", "").startswith("screen-"):
         snap["snap_screens"] = st.get("screens", {})
     if ev.get("ev", "").startswith("succ-"):
@@ -730,6 +823,8 @@ def snapshots(st, ev):
         snap["snap_qa_pending"] = st.get("qa_pending", [])
     if ev.get("ev", "").startswith("model-deny-"):
         snap["snap_model_deny"] = st.get("model_deny", [])
+    if ev.get("ev", "").startswith("model-status-"):
+        snap["snap_models"] = st.get("models", {})
     if "roster_version" in st:
         snap["snap_roster_version"] = st["roster_version"]
     return snap
@@ -842,6 +937,7 @@ def session_args(st, name):
     w = permission_warning(st)
     if w:
         out["permission_warning"] = w
+    if st.get("lead", {}).get("permission_mode") == "auto": out["managed_note"] = model_lab(st, "auto_note")
     return out
 
 
@@ -854,13 +950,13 @@ def title_warning(title):
 # ------------------------------------------------------------------ rendering
 
 
-def render_roster(st, for_thread=None):
+def render_roster(st, for_thread=None, board=False, all_threads=False):
     lead = st["lead"]
     lines = [
         f"- lead | rc | session_id={lead.get('session_id') or '(unset)'} | coordinator: plans, routes, merges, talks to the user"
     ]
     for name, t in st["threads"].items():
-        if t["status"] == "archived":
+        if not all_threads and (t["status"] == "archived" or (board and (t["status"] == "resolved" or (t["status"] == "planned" and not t.get("session_id"))))):
             continue
         me = "   <- YOU" if name == for_thread else ""
         owns = ", ".join(t.get("owns", [])) or "-"
@@ -972,7 +1068,7 @@ def task_followups(d, st, a):
                      ensure_ascii=False, indent=2))
 
 
-def render_groups(st):
+def render_groups(st, board=False, all_threads=False):
     order = ["waiting", "stuck", "review", "working", "starting", "landing", "planned", "idle"]
     stuck = stuck_threads(st)
     out = []
@@ -988,13 +1084,14 @@ def render_groups(st):
                                f"{t.get('summary') or '-'}")
             continue
         if g == "idle":
-            names = [n for n, t in st["threads"].items() if t["status"] in ("idle", "resolved")]
+            names = [n for n, t in st["threads"].items() if t["status"] in (("idle", "resolved") if all_threads else ("idle",))]
             if names:
                 details = [f"{n} — {_screen_label(st, n)}" for n in names if _screen_label(st, n)]
                 out.append(lab(st, "completed", n=len(names), names=", ".join(names)) +
                            (("\n" + "\n".join(f"  {x}" for x in details)) if details else ""))
             continue
-        names = [n for n, t in st["threads"].items() if t["status"] == g and n not in stuck]
+        names = [n for n, t in st["threads"].items() if t["status"] == g and n not in stuck and
+                 not (board and not all_threads and g == "planned" and not t.get("session_id"))]
         if not names:
             continue
         out.append(f"**{lab(st, g)}**")
@@ -1012,7 +1109,7 @@ def render_groups(st):
     return "\n".join(out) or lab(st, "no_threads")
 
 
-def render_board(st):
+def render_board(st, all_threads=False):
     approved = (
         "APPROVED"
         if st.get("plan_approved")
@@ -1030,6 +1127,10 @@ def render_board(st):
         out += docs + [""]
     if recent.get("count"):
         out += [lab(st, "reconcile_badge", n=recent["count"]), ""]
+    for model, status in st.get("models", {}).items():
+        if status.get("down"):
+            reason = model_lab(st, "model_reason_" + status.get("why", "other"))
+            out += [model_lab(st, "model_down", model=model.upper(), why=reason, until=status.get("until") or "?"), ""]
     current_sids = {t.get("session_id") for t in st.get("threads", {}).values()  # back at work: no longer a failed archive
                     if t.get("session_id") and t.get("status") in ("working", "starting", "waiting", "review", "landing")}
     failed_archives = [(sid, rec) for sid, rec in st.get("archive", {}).items()
@@ -1063,17 +1164,24 @@ def render_board(st):
         "",
         f"## {lab(st, 'overview')}",
         "",
-        render_groups(st),
+        render_groups(st, board=True, all_threads=all_threads),
     ]
     open_q = [
         (i, q) for i, q in enumerate(st.get("questions", [])) if not q.get("answered")
     ]
-    if open_q:
-        out += ["", f"## {lab(st, 'questions')}", ""] + [
-            f"- [{i + 1}] ({q['from']}) {_md(q['text'])}" + (" — " + lab(st, "default_prefix") + _md(q["defaulted"]["what"])
-                                                            + lab(st, "can_change") if q.get("defaulted") else "")
-            for i, q in open_q
-        ]
+    due_after = int(str(st.get("prefs", {}).get("default_after_minutes", 30)).strip() or 30)
+    waiting = [
+        f"- [{i + 1}] ({q['from']}) " + (lab(st, "proposal_prefix") if q.get("kind") == "proposal" else "") + _md(q['text'])
+        + (" — " + lab(st, "default_prefix") + _md(q["defaulted"]["what"]) + lab(st, "can_change") if q.get("defaulted")
+           else " — " + model_lab(st, "default_due", n=i + 1) if q.get("t") and (_minutes_since(q["t"]) or 0) >= due_after
+           and not q.get("external") and not q.get("beyond") and not DEFAULT_OUTWARD_RE.search(q.get("text", "")) else "")
+        for i, q in open_q
+    ] + ["- " + model_lab(st, "needs_user") + _md(x.get("text", ""))
+         for x in st.get("notices", []) if not x.get("done") and x.get("kind") == "needs-user"] \
+      + ["- " + model_lab(st, "parked", seat=x.get("original_owner") or "-", why=x.get("reason") or "-") + _md(x.get("text", ""))
+         for x in st.get("notices", []) if not x.get("done") and x.get("kind") == "parked"]
+    if waiting:  # one "waiting on the user" section: questions, proposals, steps only they can click, work parked at an archive
+        out += ["", f"## {lab(st, 'questions')}", ""] + waiting
     w = merge_waiting(st)
     if w:
         out += ["", lab(st, "merge_waiting", n=len(w), m=w[0]["minutes"] if w[0]["minutes"] is not None else "?",
@@ -1084,8 +1192,55 @@ def render_board(st):
     deny = [x for x in st.get("model_deny", []) if not x.get("allowed_at")]
     if deny:
         out += ["", f"## {lab(st, 'quota_deny')}", ""] + [f"- {x.get('type')} — {x.get('model')}" for x in deny]
-    out += ["", f"## {lab(st, 'roster')}", "", render_roster(st), "", f"## {lab(st, 'plan')}", "", render_tasks(st)]
+    out += ["", f"## {lab(st, 'roster')}", "", render_roster(st, board=True, all_threads=all_threads), "", f"## {lab(st, 'plan')}", "", render_tasks(st)]
+    folded = [n for n, t in st.get("threads", {}).items() if t.get("status") in ("resolved", "archived") or
+              (t.get("status") == "planned" and not t.get("session_id"))]
+    if folded and not all_threads:
+        out += ["", lab(st, "folded_threads", n=len(folded), names=", ".join(folded))]
+    elif all_threads and folded:
+        out += ["", lab(st, "all_threads") + ":", ""] + [f"- {n} — {t.get('title') or n} — {t.get('status')}" for n, t in st.get("threads", {}).items() if n in folded]
+    merges = merge_board_rows(st)
+    if merges: out += ["", f"## {lab(st, 'waiting_merge_heading')}", ""] + merges
+    collisions = board_collisions(st)
+    if collisions: out += ["", f"## {lab(st, 'collision_heading')}", ""] + collisions
     return "\n".join(out) + "\n"
+
+
+def merge_board_rows(st):
+    rows = []
+    for tid, task in st.get("tasks", {}).items():
+        if task.get("status") != "review" and not ((task.get("review") or {}).get("result") in PASSING and task.get("status") != "done"):
+            continue
+        rv = task.get("review") or {}
+        owner_branch = (st.get("threads", {}).get(task.get("owner") or "") or {}).get("branch")
+        rows.append(f"- {tid}: {task.get('title', tid)} — {task.get('branch') or owner_branch or '-'} — "
+                    f"{rv.get('result', 'none')} ({task.get('review_rounds', 0)}), checks {task.get('checks', 'none')}")
+    return rows
+
+
+def board_collisions(st):
+    rows, tasks = [], st.get("tasks", {})
+    active = [(i, t) for i, t in tasks.items() if t.get("status") not in ("done", "dropped", "recalled")]
+    for ix, (tid, task) in enumerate(active):
+        for oid, other in active[ix + 1:]:
+            if task.get("owner") == other.get("owner"): continue
+            clashes = set()
+            for a in task.get("touches", []):
+                for b in other.get("touches", []):
+                    if not paths_overlap(a, b): continue
+                    aa, bb = str(a).rstrip("/"), str(b).rstrip("/")
+                    clashes.add(min(aa, bb, key=len) if not any(x in aa + bb for x in "*?[]{") and
+                                (aa == bb or aa.startswith(bb + "/") or bb.startswith(aa + "/")) else aa)
+            for path in sorted(clashes):
+                rows.append("- " + lab(st, "collision_tasks", a=tid, owner_a=task.get("owner") or "-", b=oid,
+                                         owner_b=other.get("owner") or "-", path=path))
+    for tid, task in active:
+        for dep in task.get("deps", []):
+            other = tasks.get(dep, {})
+            if other and other.get("status") not in ("done", "dropped", "recalled") and task.get("owner") != other.get("owner"):
+                rows.append("- " + lab(st, "dependency_task", task=tid, owner=task.get("owner") or "-", dep=dep,
+                                         dep_owner=other.get("owner") or "-"))
+    return rows
 
 
 ISSUE_STATUSES = ("open", "fixed-on-branch", "merged", "verified")
@@ -1095,7 +1250,9 @@ DELIVERABLE_STATUSES = ("draft", "final")
 def render_issue(i, st=None):
     st = st or {}
     return (f"- {i['id']} [{lab(st, 'i_' + i['status'])}] {_md(i['text'])} ({lab(st, 'owner')}: {i.get('owner') or '-'}"
-            + (f"; {i['ref']}" if i.get("ref") else "") + ")")
+            + (f"; {i['ref']}" if i.get("ref") else "")
+            + (f"; {lab(st, 'reporters')}: {', '.join(i.get('reporters', []))}"
+               if [x for x in i.get("reporters", []) if x != i.get("owner")] else "") + ")")
 
 
 def _where(x):
@@ -1115,7 +1272,7 @@ def render_share(st):
     L = lambda k, **kw: lab(st, k, **kw)
     out = [f"# {st['project']}: {L('s_title')}", "", f"{L('s_updated')} {st.get('updated', '-')[:16].replace('T', ' ')}",
            ""]
-    dl = st.get("deliverables", [])
+    dl = [x for x in st.get("deliverables", []) if x.get("status") != "superseded"]
     out += [f"## {L('s_deliverables')}", ""] + ([f"{i + 1}. **{_md(x['name'])}** — {L('d_' + x['status'])}"
                                                  + (f" — {x['link']}" if x.get("link") else "")
                                                  + (f" ({L('s_missing')}: {_md(x['missing'])})" if x.get("missing")
@@ -1703,12 +1860,25 @@ def cmd_task(a):
     if getattr(a, "urgent_minutes", None) is not None and a.urgent_minutes < 1:
         sys.exit("--urgent-minutes: positive whole minutes")
     if a.action == "add":
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", a.id) or ".." in a.id:
+            sys.exit(f"bad task id {a.id!r}: use letters, digits, '.', '_' or '-' (e.g. T12)")
         if a.id in st["tasks"]:
             sys.exit(f"task {a.id} exists")
         if a.owner and a.owner not in st["threads"]:
             sys.exit(f"unknown owner {a.owner} (add the thread first)")
+        if getattr(a, "req", None):
+            q = st.get("requests", {}).get(a.req)
+            if not q: sys.exit(f"unknown request {a.req}")
+            if q.get("kind", "request") != "request": sys.exit(lab(st, "req_not_request"))
+            q.setdefault("tasks", []).append(a.id)
+        said = (getattr(a, "user_said", None) or (q.get("text", "") if getattr(a, "req", None) else "")).strip()
+        check_never_raise(d, " ".join(x for x in (a.title or a.id, said, getattr(a, "brief", None), a.accept, getattr(a, "beyond", None) or "") if x),
+                          getattr(a, "override", None))
         st["tasks"][a.id] = {
             "title": a.title or a.id,
+            **({"brief": a.brief} if getattr(a, "brief", None) else {}),
+            **({"kind": a.work_kind} if getattr(a, "work_kind", None) else {}),
+            **({"user_said": said} if said else {}),
             "owner": a.owner,
             "deps": csv(a.deps),
             "accept": a.accept or "",
@@ -1717,13 +1887,19 @@ def cmd_task(a):
             **({"model": a.model.strip()} if (a.model or "").strip() else {}),
             **({"route": a.route} if a.route else {}),
             **({"no_scripts": True} if a.no_scripts else {}),
+            **({"beyond": a.beyond, "needs_ask": True} if getattr(a, "beyond", None) else {}),
             "status": "approved" if st["plan_approved"] else "planned",
             "notes": "",
             "created": now(),
             **({"urgent": True, "urgent_minutes": a.urgent_minutes if a.urgent_minutes is not None else st.get("prefs", {}).get("urgent_ack_minutes", 5)}
                if getattr(a, "urgent", False) or getattr(a, "urgent_minutes", None) is not None else {}),
         }
+        task_dir = d / "tasks"; task_dir.mkdir(exist_ok=True)
+        (task_dir / f"{a.id}.md").write_text(f"# {a.id}\n\nGoal: {a.title or a.id}\n" + (f"Brief: {a.brief}\n" if getattr(a, "brief", None) else "") + f"Done when: {a.accept or '-'}\n" + (f"\n{lab(st, 'original_words')}: {said}\n" if said else ""), encoding="utf-8")
         save(d, st, {"ev": "task-add", "task": a.id, "owner": a.owner})
+        if getattr(a, "beyond", None):
+            st = load(d); st["questions"].append({"from": "lead", "text": lab(st, "beyond_task", task=a.id, text=a.beyond), "kind": "beyond", "task": a.id, "answered": False, "t": now()})
+            save(d, st, {"ev": "question", "from": "lead", "text": st["questions"][-1]["text"]})
         warn = topic_mismatch(st, a.owner, a.title)  # no --title: nothing to compare yet
         if warn:
             print(warn, file=sys.stderr)
@@ -1790,8 +1966,16 @@ def cmd_task(a):
         old_deps = list(k.get("deps") or [])
         if a.deps is not None:
             k["deps"] = csv(a.deps)
+        if a.title or getattr(a, "brief", None) or a.accept:
+            check_never_raise(d, " ".join(x for x in (a.title, getattr(a, "brief", None), a.accept) if x), getattr(a, "override", None))
+        if getattr(a, "req", None) and st.get("requests", {}).get(a.req, {}).get("kind", "request") != "request":
+            sys.exit(lab(st, "req_not_request"))
         if a.title:
             k["title"] = a.title
+        if getattr(a, "brief", None):
+            k["brief"] = a.brief
+        if getattr(a, "work_kind", None):
+            k["kind"] = a.work_kind
         if a.touches is not None:
             k["touches"] = check_touches(a.touches)
         if a.model is not None:
@@ -1847,6 +2031,16 @@ def cmd_task(a):
             if not reviewer_independent(a.reviewer, owner):
                 sys.exit(f"{a.reviewer} owns {a.id}: the reviewer must be someone without its context "
                          f"(e.g. {owner}/subagent, a fresh subagent the owner starts)")
+            if getattr(a, "outside", False):
+                participants = {owner, *(k.get("past_owners") or [])}
+                for event in _read_log(d):
+                    if event.get("task") != a.id: continue
+                    if str(event.get("type", event.get("message_type", ""))).upper() == "HANDOFF" or event.get("ev") in ("task-msg", "route"):
+                        participants.update(x for x in (event.get("from"), event.get("to"), event.get("sender"), event.get("receiver"), event.get("thread"), event.get("owner")) if x)
+                if not reviewer_independent(a.reviewer, "user") and a.reviewer.strip().lower() == "user":
+                    participants.discard("user")
+                if any(not reviewer_independent(a.reviewer, participant) for participant in participants):
+                    sys.exit(f"{a.reviewer} participated in {a.id}; outside review requires a reviewer with no task history")
             prev = int(k.get("review_rounds") or 0)
             if a.rounds is not None and a.rounds < max(prev, 1):
                 sys.exit(f"{a.id}: {prev} review rounds are already recorded; --rounds only goes up "
@@ -1883,6 +2077,7 @@ def cmd_task(a):
                 void(f"replaced by a {a.review} verdict")
             k["review_rounds"] = rounds
             k["review"] = {"result": a.review, "reviewer": a.reviewer.strip(), "note": a.review_note or "",
+                           **({"outside": True} if getattr(a, "outside", False) else {}),
                            "round": rounds, "cap": review_max(st), "at": now(),
                            **({"remaining": remaining} if remaining else {})}
             if a.review in PASSING:  # the new verdict lists the same finding again: its follow-up stands
@@ -1903,6 +2098,8 @@ def cmd_task(a):
         if a.status and a.status != k["status"]:
             if a.status == "approved" and not st.get("plan_approved"):
                 sys.exit(f"{a.id}: tasks are approved with the plan: `plan approve --user-said ...` once the user agrees")
+            if a.status == "dispatched" and k.get("needs_ask") and any(not q.get("answered") and q.get("task") == a.id for q in st.get("questions", [])):
+                sys.exit(lab(st, "beyond_wait", task=a.id))
             if a.status == "dispatched":
                 deps = list(dict.fromkeys(old_deps + (k.get("deps") or [])))  # clearing deps here skips nothing
                 open_deps = [x for x in deps if st["tasks"].get(x, {}).get("status") != "done"]
@@ -2555,6 +2752,15 @@ def cmd_ready(a):
     ]
     lease_warnings = []
     ready, blocked, by_topic = plan_ready(st, ready, lease_warnings)
+    route_status = {t: _task_dispatch_model(st, t) for t in ready}
+    for task, info in route_status.items():
+        if info and info.get("status"):
+            lease_warnings.append(f"{task}: {info['status']}")
+    to_open = {st["tasks"][tid].get("owner") for tid in ready
+               if st["tasks"][tid].get("owner") and not (st.get("threads", {}).get(st["tasks"][tid].get("owner"), {}).get("session_id"))}
+    notice = (model_lab(st, "ready_notice", n=len(to_open)) if len(to_open) >= 2 else None)
+    if notice:
+        print(notice, file=sys.stderr)
     print(
         json.dumps(
             {
@@ -2573,9 +2779,17 @@ def cmd_ready(a):
                 "slots": (max(0, st["prefs"]["max_parallel"] - busy) if st["prefs"].get("max_parallel") else "unlimited"),
                 "stuck": stuck_threads(st),
                 "merge_waiting": merge_waiting(st),
+                "waiting_to_merge": [{"task": tid, "branch": k.get("branch") or (st.get("threads", {}).get(k.get("owner") or "") or {}).get("branch"), "review": (k.get("review") or {}).get("result", "none"),
+                                      "rounds": k.get("review_rounds", 0), "checks": k.get("checks", "none")}
+                                     for tid, k in st.get("tasks", {}).items() if k.get("status") == "review" or
+                                     ((k.get("review") or {}).get("result") in PASSING and k.get("status") != "done")],
+                "collisions": board_collisions(st),
+                "collision_hint": lab(st, "collision_order") if board_collisions(st) else None,
                 **({"merge_overdue": "the oldest reviewed branch has waited longer than stuck_minutes: merge it, or "
                                      "tell the user why it waits"} if merge_overdue(st) else {}),
                 "models": {t: m for t in ready for m in [task_model(st, t)] if m},
+                "model_routes": route_status,
+                "ready_notice": notice,
                 "unreported_requests": {r: q["text"] for r, q in unreported(st).items()},
                 "rc_capacity_note": "a Remote Control server holds 32 sessions by default, shared by every project and lead on it; cloud threads do not count",
                 **({"permission_warning": permission_warning(st)} if permission_warning(st) else {}),
@@ -2813,6 +3027,8 @@ def cmd_route(a):
 def cmd_ask(a):
     d = need(find_dir())
     st = load(d)
+    if a.proposal:
+        a.text = a.proposal
     if a.answer is not None:
         n = a.answer
         if not 1 <= n <= len(st["questions"]):
@@ -2823,6 +3039,7 @@ def cmd_ask(a):
                      + "; ask a new question if the user changed their mind")
         if q.get("defaulted") and not (a.text or "").strip():
             sys.exit(f"question {n} was done by default: record the user's answer (`ask --answer {n} \"<their words>\"`)")
+        was_default = q.get("defaulted", {}).get("what") if q.get("defaulted") else None
         q["answered"] = True
         for dec in st.get("decisions", []):
             if dec.get("question") == n and not dec.get("answered"):
@@ -2830,6 +3047,8 @@ def cmd_ask(a):
                 dec.update(answered=True, answer=a.text or "", answered_at=now())
         if a.text:
             q["answer"] = a.text
+        if was_default and a.text and a.text.strip() != was_default:
+            print(lab(st, "answer_revert", what=was_default), file=sys.stderr)
         save(d, st, {"ev": "answered", "n": n})
     elif a.default is not None:
         n = a.default
@@ -2840,6 +3059,16 @@ def cmd_ask(a):
         if st["questions"][n - 1].get("defaulted"):
             sys.exit(f"question {n} was already done by default: {st['questions'][n - 1]['defaulted']['what']}")
         q = st["questions"][n - 1]; what = (a.text or "").strip()
+        external_words = DEFAULT_OUTWARD_RE
+        if q.get("external"):
+            sys.exit(lab(st, "default_external"))
+        if external_words.search(q.get("text", "") + " " + what):
+            if getattr(a, "internal", None):
+                log(d, {"ev": "default-internal", "question": n, "reason": a.internal})
+            else:
+                sys.exit(lab(st, "default_external"))
+        if q.get("kind") == "proposal" and not a.undoable:
+            sys.exit(lab(st, "default_undoable"))
         if not what: sys.exit("default needs a description")
         q["defaulted"] = {"what": what, "at": now()}
         st.setdefault("decisions", []).append({"kind": "default", "question": n, "what": what, "at": now()})
@@ -2863,8 +3092,13 @@ def cmd_ask(a):
             print(lab(st, "decided_warning", items=lab(st, "decided_sep").join(
                 f"{decision_source_label(st, h['source'])}{lab(st, 'decided_source_sep')}{h['text']}" for h in possible[:3])),
                   file=sys.stderr)
+        check_never_raise(d, a.text, getattr(a, "override", None))
         st["questions"].append(
-            {"from": a.frm, "text": a.text, "t": now(), "answered": False, **({"need_thread": nt} if nt else {})}
+            {"from": a.frm, "text": a.text, "t": now(), "answered": False,
+             **({"kind": "proposal"} if a.proposal else {}),
+             **({"kind": getattr(a, "_question_kind")} if getattr(a, "_question_kind", None) else {}),
+             **({"external": True} if a.external else {}),
+             **({"need_thread": nt} if nt else {})}
         )
         save(d, st, {"ev": "question", "from": a.frm, "text": a.text})
     print(render_board(st))
@@ -2913,7 +3147,14 @@ def cmd_memory(a):
             save(d, st, {"ev": "standing"})
         print(lab(st, "standing", text=a.text))
         return
-    mark = " _(temporary: confirm with the user before enforcing it later)_" if a.temporary else ""
+    boundary = getattr(a, "boundary", None)
+    if a.pref:
+        st = load(d)
+        if not boundary: print(model_lab(st, "boundary_hint"), file=sys.stderr)
+        a.text = model_lab(st, "pref_prefix") + a.text + (model_lab(st, "pref_boundary", b=boundary) if boundary else "") + " _(preference)_"
+    scope = getattr(a, "scope", None)
+    if a.temporary and not scope: scope = now()[:10]
+    mark = (f" _(temporary: confirm with the user before enforcing it later; scope={scope})_" if a.temporary else "")
     line = f"- {a.text}{mark}  _(added {now()[:10]})_\n"
     path = d / "MEMORY.md"
     text = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -2967,6 +3208,7 @@ def cmd_feature(a):
         if a.status == "dropped" and not a.reason: sys.exit("dropped requires --reason")
         for rid in reqs:
             if rid not in st.get("requests", {}): sys.exit(f"unknown request {rid}")
+            if st["requests"][rid].get("kind", "request") != "request": sys.exit(lab(st, "req_not_request"))
         for tid in tasks:
             if tid not in st.get("tasks", {}): sys.exit(f"unknown task {tid}")
         fid = f"F{max([int(x[1:]) for x in rows if re.fullmatch(r'F\d+', x)] or [0])+1}"
@@ -3046,7 +3288,20 @@ def cmd_reconcile(a):
 def cmd_wrapup(a):
     d = need(find_dir()); st = load(d); rows = _run_reconcile(st); save(d, st, {"ev": "reconcile"})
     p = st.get("prefs", {}); limit = p.get("stuck_minutes", STUCK_DEFAULT); cur = dt.datetime.fromisoformat(now())
+    original_cover = []
+    for rid, req in st.get("requests", {}).items():
+        linked = [tid for tid, task in st.get("tasks", {}).items()
+                  if task.get("status") == "done" and (tid in (req.get("tasks") or []) or rid in (task.get("requests") or []))]
+        if linked:
+            original_cover.append(f"{rid}: {req.get('text', '')} → {', '.join(tid + (('@' + str(st['tasks'][tid].get('merged_sha'))[:7]) if st['tasks'][tid].get('merged_sha') else '') for tid in linked)}")
+        elif req.get("kind", "request") == "request" and req.get("status") not in REQ_END + ("remark",):
+            started = req.get("tasks") or any(rid in (t.get("requests") or []) for t in st.get("tasks", {}).values())
+            original_cover.append(f"{lab(st, 'still_working' if started else 'missed')}: {rid}: {req.get('text', '')}")
+    for tid, task in st.get("tasks", {}).items():
+        if task.get("status") == "done" and task.get("user_said"):
+            original_cover.append(f"{task['user_said']} → {tid}" + (f"@{str(task['merged_sha'])[:7]}" if task.get("merged_sha") else ""))
     sections = {lab(st, "heard_unrecorded"): [lab(st, "selfcheck_reminder")],
+        lab(st, "wrapup_coverage"): original_cover,
         lab(st, "recorded_not_dispatched"): [f"{r}: {q['text']}" for r,q in st.get("requests",{}).items() if q.get("status")=="open"],
         lab(st, "dispatched_no_reply"): [f"{t}: {x.get('title','')}" for t,x in st.get("tasks",{}).items() if x.get("status")=="dispatched" and x.get("dispatched_at") and (cur-dt.datetime.fromisoformat(x['dispatched_at'])).total_seconds()>limit*60],
         lab(st, "replied_not_reported"): [r for r,q in st.get("requests",{}).items() if q.get("status")=="delivered"] + [t for t,x in st.get("tasks",{}).items() if x.get("status")=="done" and any(t in q.get("tasks",[]) and q.get("status") not in REQ_SETTLED + ("delivered",) for q in st.get("requests",{}).values())],
@@ -3086,7 +3341,7 @@ def cmd_board(a):
         print("SHARE.md written: put this text into a doc visible only in the user's own account and update it on "
               "each report (IL-13, IL-14); sharing it further is the user's decision", file=sys.stderr)
         return
-    print(render_board(st))
+    print(render_board(st, all_threads=getattr(a, "all", False)))
 
 
 CARD_KINDS = ("compare", "plan", "read", "done", "status")
@@ -3165,12 +3420,20 @@ def cmd_docs(a):
     if a.action == "set":
         if not a.which or not (a.link or "").strip():
             sys.exit(f"usage: docs set {'|'.join(DOC_KINDS)} --link <url> [--note \"<one line>\"]")
-        rows[a.which] = {"link": a.link.strip(), "note": " ".join((a.note or "").split())}
+        old = rows.get(a.which) or {}
+        history = list(old.get("history", []))
+        if old.get("link") and old.get("link") != a.link.strip():
+            history.append({"link": old["link"], "note": old.get("note", ""), "superseded": True, "at": now()})
+        rows[a.which] = {"link": a.link.strip(), "note": " ".join((a.note or "").split()), "history": history}
         save(d, st, {"ev": "docs-set", "which": a.which})
         print(a.which)
         return
-    print("\n".join(f"{lab(st, 'doc_' + k)} ({k}): {rows[k]['link']}" + (f" — {rows[k]['note']}" if rows[k].get("note") else "")
-                    for k in DOC_KINDS if k in rows) or lab(st, "no_items"))
+    lines = [f"{lab(st, 'doc_' + k)} ({k}): {rows[k]['link']}" + (f" — {rows[k]['note']}" if rows[k].get("note") else "")
+             for k in DOC_KINDS if k in rows]
+    if getattr(a, "all", False):
+        for k in DOC_KINDS:
+            for h in (rows.get(k) or {}).get("history", []): lines.append(f"{lab(st, 'doc_' + k)} ({k}): {h['link']} — " + model_lab(st, "old_link"))
+    print("\n".join(lines) or lab(st, "no_items"))
 
 
 def cmd_issue(a):
@@ -3179,7 +3442,7 @@ def cmd_issue(a):
     st = load(d)
     iss = st.setdefault("issues", [])
     if a.action == "list":
-        rows = [i for i in iss if a.all or i.get("status") != "verified"]
+        rows = [i for i in iss if a.all or i.get("status") not in ("fixed", "verified")]
         print("\n".join(render_issue(i, st) for i in rows) or "(no known issues)")
         return
     if a.action == "add":
@@ -3187,35 +3450,68 @@ def cmd_issue(a):
             sys.exit('usage: issue add "<what is wrong>" --owner <thread>')
         if a.owner and a.owner not in st["threads"]:
             sys.exit(f"unknown owner {a.owner}")
+        words = _tokens(a.text)
+        match = None
+        for candidate in iss:
+            if candidate.get("status") in ("fixed", "verified"):
+                continue
+            existing_words = _tokens(candidate.get("text", ""))
+            same_ref = bool(a.ref and a.ref == candidate.get("ref"))
+            similar = bool(words and existing_words and min(len(words), len(existing_words)) >= 3
+                           and len(words & existing_words) / max(len(words), len(existing_words)) >= .6)
+            if same_ref or similar:
+                match = candidate
+                break
+        if match and not a.new:
+            reporters = match.setdefault("reporters", [])
+            reporter = a.also or a.owner
+            if reporter and reporter not in st.get("threads", {}): sys.exit(f"unknown owner {reporter}")
+            if reporter and reporter not in reporters:
+                reporters.append(reporter); match["updated"] = now()
+                save(d, st, {"ev": "issue-also", "issue": match["id"], "thread": reporter})
+            print(lab(st, "issue_duplicate", id=match["id"], text=match["text"]))
+            return
         i = {"id": f"I{len(iss) + 1}", "text": " ".join(a.text.split()), "owner": a.owner or None, "status": "open",
-             "ref": "", "created": now(), "updated": now()}
+             "ref": a.ref or "", "reporters": [a.owner] if a.owner else [], "created": now(), "updated": now()}
         iss.append(i)
     else:
         i = next((x for x in iss if x["id"] == a.text), None)
         if not i:
             sys.exit(f"unknown issue {a.text}; known: {', '.join(x['id'] for x in iss) or '-'}")
-        if a.status:
-            if a.status not in ISSUE_STATUSES:
-                sys.exit(f"status: one of {', '.join(ISSUE_STATUSES)}")
-            if a.status == "fixed-on-branch" and not (a.ref or i.get("ref") if a.ref is None else a.ref):
-                sys.exit("fixed-on-branch needs --ref <branch>@<commit>: QA tests only what is merged")
-            if a.status == "merged" and not (i.get("ref") if a.ref is None else a.ref):
-                sys.exit("merged needs --ref <base>@<commit> (or the fix's ref from fixed-on-branch): QA tests that "
-                         "commit, not whatever is on the base now")
-            if a.status == "verified" and i["status"] != "merged":
-                sys.exit(f"{i['id']} is {i['status']}: QA verifies only a merged fix (set it to merged first)")
-            if a.status == "open":
-                i["ref"] = ""  # a reopened issue has no fix yet
-            i["status"] = a.status
+    old_status = i.get("status")
+    if a.status:
+        if a.status == "fixed":
+            sys.exit("fixed is retired; use fixed-on-branch --ref <branch>@<commit>")
+        if a.status not in ISSUE_STATUSES:
+            sys.exit(f"status: one of {', '.join(ISSUE_STATUSES)}")
+        if a.status == "fixed-on-branch" and not (a.ref or i.get("ref") if a.ref is None else a.ref):
+            sys.exit("fixed-on-branch needs --ref <branch>@<commit>: QA tests only what is merged")
+        if a.status == "merged" and not (i.get("ref") if a.ref is None else a.ref):
+            sys.exit("merged needs --ref <base>@<commit> (or the fix's ref from fixed-on-branch): QA tests that "
+                     "commit, not whatever is on the base now")
+        if a.status == "verified" and i["status"] != "merged":
+            sys.exit(f"{i['id']} is {i['status']}: QA verifies only a merged fix (set it to merged first)")
+        if a.status == "open":
+            i["ref"] = ""
+        i["status"] = a.status
         if a.ref is not None:
             i["ref"] = a.ref
         if a.owner is not None:
             if a.owner and a.owner not in st["threads"]:
                 sys.exit(f"unknown owner {a.owner}")
             i["owner"] = a.owner or None
+        if a.also:
+            if a.also not in st.get("threads", {}): sys.exit(f"unknown owner {a.also}")
+            reporters = i.setdefault("reporters", [])
+            if a.also not in reporters: reporters.append(a.also)
+        if a.note:
+            i.setdefault("notes", []).append({"text": a.note, "at": now()})
         i["updated"] = now()
     save(d, st, {"ev": f"issue-{a.action}", "issue": i["id"], "status": i["status"]})
     print(render_issue(i, st))
+    if a.action == "set" and a.status in ("fixed-on-branch", "merged", "verified") and old_status != i["status"]:
+        who = a.owner or i.get("owner") or "lead"
+        print(lab(st, "issue_fixed_broadcast", id=i["id"], text=i["text"], who=who))
     if a.action == "add":
         print(f"broadcast it: tw.py info --issue {i['id']}")
 
@@ -3335,6 +3631,9 @@ def cmd_check_msg(a):
     """IL-11, IL-16, IL-19: read a hand-written message (or, with --prompt, a session prompt) before sending it.
     Problems fail (exit 1); warnings are for the lead to judge and do not."""
     raw = (sys.stdin.read() if a.file == "-" else Path(a.file).read_text(encoding="utf-8")).lstrip("\ufeff")
+    unsupported = re.search(r"缺功能|不支持|没有这个功能|not supported|missing feature|doesn't support", raw, re.I)
+    tested = re.search(r"测了|测过|测试|试了|试过|跑了|运行了|\b(?:tested|tried|ran|reproduced)\b", raw, re.I)
+    if unsupported and not tested: print(model_lab(load(need(find_dir())), "check_msg_test_warning"), file=sys.stderr)
     if a.user:  # I2: a message for the user reads like a report, not like a terminal
         if a.prompt:
             sys.exit("--user or --prompt, not both")
@@ -3380,6 +3679,8 @@ def cmd_check_msg(a):
                     or st and tid != "-" and tid not in st.get("tasks", {})]
             if bad:
                 add("header", ", ".join(bad) + f"; known types: {', '.join(MSG_TYPES)}")
+            if body.splitlines() and re.match(r"\s*(?:\[Big picture|【大局观)", body.splitlines()[0], re.I):
+                add("big-picture-receipt", model_lab(st, "big_picture_receipt"), "warning")
         fields, blines = {}, [ln for ln in body.splitlines()]
         for i, ln in enumerate(blines):  # the raw lines: a value in backticks is a value
             f = FIELD_RE.match(ln)
@@ -3477,7 +3778,10 @@ def cmd_deliverable(a):
             sys.exit(lab(st, "deliverable_link_required"))
         existing = next((y for y in dl if a.task and y.get("task") == a.task and y.get("dispatch_v") == version), None)
         if existing:
-            x = existing; x["link"] = a.link or x.get("link", ""); x["status"] = a.status or x.get("status", "draft"); x["at"] = now()
+            x = existing
+            if a.link and x.get("link") and x["link"] != a.link:
+                x.setdefault("history", []).append({"link": x["link"], "at": now(), "superseded": True})
+            x["link"] = a.link or x.get("link", ""); x["status"] = a.status or x.get("status", "draft"); x["at"] = now()
         else:
             if not a.name.strip():
                 sys.exit('usage: deliverable add "<name>" --link <url> [--status draft|final] [--missing "<what>"]')
@@ -3488,6 +3792,8 @@ def cmd_deliverable(a):
         x = next((y for y in dl if y["id"] == a.name), None)
         if not x:
             sys.exit(f"unknown deliverable {a.name}; known: {', '.join(y['id'] for y in dl) or '-'}")
+        if a.link is not None and x.get("link") and x["link"] != a.link:
+            x.setdefault("history", []).append({"link": x["link"], "at": now(), "superseded": True})
         for k in ("status", "link", "missing", "req"):
             if getattr(a, k) is not None:
                 x[k] = getattr(a, k)
@@ -3582,6 +3888,11 @@ def cmd_task_msg(a):
     d = need(find_dir()); st = load(d)
     if a.id not in st["tasks"]: sys.exit(f"unknown task {a.id}")
     k = st["tasks"][a.id]
+    dispatch_model = _task_dispatch_model(st, a.id)
+    if dispatch_model and dispatch_model.get("status"):
+        print(dispatch_model["status"], file=sys.stderr)
+    if k.get("needs_ask") and any(not q.get("answered") and q.get("task") == a.id for q in st.get("questions", [])):
+        sys.exit(lab(st, "beyond_wait", task=a.id))
     if a.dispatch:
         if k.get("status") != "dispatched":
             # Reuse task command's transition checks by invoking the normal CLI path.
@@ -3593,12 +3904,55 @@ def cmd_task_msg(a):
     if not a.dispatch and k.get("status") != "dispatched":
         print(f"preview only: {a.id} is {k.get('status')}, not dispatched; send with --dispatch (records it first)", file=sys.stderr)
     owner = k.get("owner") or "?"; v = int(k.get("dispatch_v") or 0)
-    lines = [f"[tw:{tag(st)}] TASK lead -> {owner} {a.id}", f"Goal: {k.get('title') or a.id}", f"Done when: {k.get('accept') or '-'}"]
-    route = k.get("route") or k.get("model")
-    if route: lines.append(f"Route/Model: {route}")
+    lines = [f"[tw:{tag(st)}] TASK lead -> {owner} {a.id}", f"Goal: {k.get('title') or a.id}",
+             *([f"Brief: {k['brief']}"] if k.get("brief") and k.get("brief") != k.get("title") else []), f"Done when: {k.get('accept') or '-'}"]
+    route = (dispatch_model or {}).get("model") or k.get("route") or k.get("model")
+    if route: lines.append(f"Route/Model: {route}" + (f" — {dispatch_model['reason']}" if dispatch_model and dispatch_model.get("reason") else ""))
     lines.append(f"Dispatch: v{v}")
     lines.extend(lab(st, "standing", text=x) for x in st.get("standing", []))
-    print("\n".join(lines))
+    if k.get("user_said"): lines += [lab(st, "original_words") + ":", k["user_said"]]
+    memory = (d / "MEMORY.md").read_text(encoding="utf-8") if (d / "MEMORY.md").exists() else ""
+    for line in memory.splitlines():
+        if "_(temporary:" in line and "scope=" in line:
+            m = re.search(r"scope=([^; )]+)", line)
+            if m and m.group(1) in (a.id, now()[:10]): lines.append(line[2:].split(" _(temporary:", 1)[0])
+        if "_(preference)_" in line or line.startswith("- 偏好："): lines.append(line[2:].split(" _(", 1)[0])
+    check_never_raise(d, "\n".join(lines), getattr(a, "override", None))
+    message = "\n".join(lines)
+    if route == "gpt":
+        terms, paths, _ = load_private(d, [str(d / "GPT_PRIVATE.md")])
+        for raw in st.get("prefs", {}).get("gpt_private", []) if isinstance(st.get("prefs", {}).get("gpt_private", []), list) else []:
+            item = str(raw)
+            if item.lower().startswith("path:"):
+                paths.append(item.split(":", 1)[1].strip())
+            elif item.strip():
+                terms.append(item.strip())
+        hit = _private_hits_text(message, terms, paths)
+        if hit:
+            sys.exit(model_lab(st, "model_private_hit", hit=hit[0][1]))
+    task_dir = d / "tasks"; task_dir.mkdir(exist_ok=True)
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", a.id) and ".." not in a.id:
+        (task_dir / f"{a.id}.md").write_text(message + "\n", encoding="utf-8")
+    print(message)
+
+
+# Steps a default must never take (G7, IL-1): outward, shared or hard to undo. Chinese words match anywhere;
+# English ones by stem at a word start (merging, deleting ...), so "pushing layout B further" or "customerId" do not count.
+DEFAULT_OUTWARD_RE = re.compile(
+    r"发布|发版|公开|推送|强推|邮件|发给|发到|转发|分享|通知|客户|供应商|上线|部署|合并|合进|合到|并入|主干|付款|支付|转账|购买|归档|删除|删掉|清空|对外"
+    r"|(?<![A-Za-z])PR(?![A-Za-z])"
+    r"|\b(?:releas\w*|publish\w*|push\w*\s+(?:to|the|it)|force[- ]push\w*|deploy\w*|e-?mail\w*|send\w*\s+(?:to|it|the)|tell\w*\s+the"
+    r"|customers?|clients?|vendors?|merg\w*|pull requests?|pay|pays|paid|paying|payments?|invoic\w*|purchas\w*|upload\w*|submit\w*"
+    r"|post\w*\s+(?:it|to|on)|shar\w*\s+(?:it|with|to)|tweet\w*|announc\w*|notif\w*|archiv\w*|delet\w*|remov\w*\s+(?:the|all)|slack)\b", re.I)
+
+
+def check_never_raise(d, text, override=None):
+    st = load(d)
+    memory = (d / "MEMORY.md").read_text(encoding="utf-8") if (d / "MEMORY.md").exists() else ""
+    topics, _ = _memory_topics(memory, "never_raise")
+    hit = next((topic for topic in topics if _mentions(text, topic)), None)
+    if hit and not override: sys.exit(model_lab(st, "never_raise_hit", hit=hit))
+    if hit and override: log(d, {"ev": "never-raise-override", "topic": hit, "user_said": override})
 
 
 def cmd_promise(a):
@@ -3607,6 +3961,7 @@ def cmd_promise(a):
     if a.action == "add":
         if a.req and a.req not in st.get("requests", {}): sys.exit(f"unknown request {a.req}")
         if not (a.text or "").strip(): sys.exit('usage: promise add "<what you told the user you would do>"')
+        check_never_raise(d, a.text, getattr(a, "override", None))
         x = {"id": f"P{max([int(y['id'][1:]) for y in rows if y.get('id','')[1:].isdigit()] or [0])+1}", "text": a.text, "req": a.req, "status": "open", "evidence": "", "created": now()}; rows.append(x)
         save(d, st, {"ev": "promise-add"}); print(json.dumps(x, ensure_ascii=False)); return
     pid = a.id or a.text
@@ -3660,6 +4015,11 @@ def cmd_threads(a):
 def cmd_notice(a):
     d = need(find_dir()); st = load(d); rows = st.setdefault("notices", [])
     if a.action == "add":
+        if a.kind == "needs-user":
+            if not (a.text or "").strip(): sys.exit('notice add --kind needs-user requires --note')
+            x = {"thread": "lead", "session": st.get("lead", {}).get("session_id"), "ref": f"needs-user:{len(rows)+1}",
+                 "kind": "needs-user", "text": a.text.strip(), "at": now(), "done": False}
+            rows.append(x); save(d, st, {"ev": "notice-add"}); print(model_lab(st, "needs_user") + x["text"]); return
         if not a.thread or not a.session or not a.ref: sys.exit("notice add needs --thread T --session S --ref REF")
         t = st["threads"].get(a.thread)
         if not t: sys.exit(f"unknown thread {a.thread}")
@@ -4040,6 +4400,13 @@ def cmd_signals(a):
     color_label = lab(st, "signal_color_" + color)
     relay_count=_succ_relay_count(st,seat)
     result = {"seat": seat, "counts": counts, "color": color, "color_label": color_label, "bad_lines": bad_lines, "at": now(), "transcript": found,"relay_count_today":relay_count}
+    if seat == "lead":
+        hist = st.get("lead", {}).get("sessions", [])
+        try:
+            age = max(0, (dt.datetime.fromisoformat(now()) - dt.datetime.fromisoformat(hist[-1]["from"])).total_seconds() / 3600) if hist and hist[-1].get("from") else 0
+        except (ValueError, TypeError): age = 0
+        if age >= float(st.get("prefs", {}).get("lead_relay_hours", 12)) or counts.get("compact", 0) >= 2:
+            result["lead_relay"] = model_lab(st, "lead_relay")
     if not st.get("write_lock"):
         st.setdefault("signals", {})[seat] = result; save(d, st, {"ev": "signals"})
     if color == "red": msg = lab(st, "signal_red", n=relay_count, limit=st.get("prefs", {}).get("relay_max_per_day", 2))
@@ -4051,6 +4418,7 @@ def cmd_signals(a):
         deadline = st.get("prefs", {}).get("deadline") or next((t.get("deadline") for t in st.get("tasks", {}).values() if t.get("deadline")), None)
         if deadline: msg += lab(st,"signal_sep") + lab(st,"signal_deadline")
     if not found: msg += lab(st,"signal_sep") + lab(st,"signal_no_transcript")
+    if result.get("lead_relay"): msg += lab(st, "signal_sep") + result["lead_relay"]
     if bad_lines: msg += lab(st,"signal_sep") + lab(st,"signals_bad_lines",n=bad_lines)
     if a.json: print(json.dumps(result, ensure_ascii=False))
     else: print(msg)
@@ -4084,6 +4452,15 @@ def cmd_prefs(a):
         if k == "archive_idle_days" and (not v.isdigit() or int(v) < 1):
             sys.exit("archive_idle_days: a positive whole number of days")
         cur = st["prefs"].get(k)
+        if k == "gpt_private":
+            try:
+                parsed = json.loads(v)
+            except (ValueError, TypeError):
+                parsed = csv(v)
+            if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
+                sys.exit("gpt_private: use a comma list or JSON string list")
+            st["prefs"][k] = [item.strip() for item in parsed if item.strip()]
+            continue
         if k in ("check_cmd", "language", "short_name", "thread_permission_mode", "skill_edge", "spawn_policy", "perm_policy", "gpt_policy", "screen_mode"):
             st["prefs"][k] = v  # text, never coerced (check_cmd=true is a command)
         elif isinstance(cur, bool) or v.lower() in ("true", "false", "yes", "no", "on", "off"):
@@ -4180,6 +4557,18 @@ def cmd_quota(a):
         result = {"due": due, "minutes_remaining": 0 if due else quota_due_minutes(st)}
         print(json.dumps(result, ensure_ascii=False) if a.json else
               (lab(st, "quota_due") if due else lab(st, "quota_not_due", minutes=result["minutes_remaining"])))
+        return
+    if getattr(a, "weekly", False):
+        d = need(find_dir()); st = load(d)
+        start = (dt.date.today() - dt.timedelta(days=dt.date.today().weekday())).isoformat()
+        rows = []
+        try:
+            rows = [json.loads(line) for line in (d / "model-log.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+        except (OSError, ValueError): pass
+        rows = [x for x in rows if str(x.get("at", ""))[:10] >= start and x.get("result") in ("ok", "redo")]
+        fable = sum(x.get("model") == "fable" for x in rows); gpt = sum(x.get("model") == "gpt" for x in rows)
+        redo = sum(x.get("result") == "redo" and x.get("model") in ("fable", "gpt") for x in rows)
+        print(model_lab(st, "weekly", fable=fable, gpt=gpt, redo=redo))
         return
     if quota_reader is None:
         print("quota: scripts/quota.py is missing next to tw.py (reinstall teamwork) · tier unknown · changed: no")
@@ -4309,6 +4698,30 @@ def _denied(st, typ, model):
                for x in st.get("model_deny", []))
 
 
+def cmd_model_status(a):
+    d = need(find_dir()); st = load(d); models = st.setdefault("models", {})
+    model = a.model
+    if a.up:
+        models.pop(model, None)
+        save(d, st, {"ev": "model-status-up", "model": model})
+        print(model_lab(st, "model_up", model=model.upper()))
+        return
+    if not a.why: sys.exit("--down needs --why quota|connection|other")
+    rec = {"down": True, "why": a.why, "until": a.until or "?", "note": a.note, "at": now()}
+    already_down = bool(models.get(model, {}).get("down"))
+    models[model] = rec
+    save(d, st, {"ev": "model-status-down", "model": model})
+    print(model_lab(st, "model_down", model=model.upper(), why=model_lab(st, "model_reason_" + a.why), until=rec["until"]))
+    if model == "gpt" and not already_down and not any(
+            not q.get("answered") and q.get("kind") == "model-down" for q in st.get("questions", [])):
+        minutes = int(st.get("prefs", {}).get("default_after_minutes", 30))
+        proxy = argparse.Namespace(text=model_lab(st, "gpt_default_q", minutes=minutes), frm="lead", need_thread=None,
+                                   default=None, undoable=True, proposal=None, external=False, override=None, answer=None)
+        proxy._question_kind = "model-down"
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_ask(proxy)
+
+
 def cmd_model_log(a):
     d = need(find_dir())
     st = load(d)
@@ -4366,10 +4779,14 @@ def cmd_model_log(a):
             output["model_deny"] = deny()
             for row in summary:
                 row["denied"] = _denied(st, row["type"], row["model"])
-        if a.json:
-            print(json.dumps(output, ensure_ascii=False, indent=1))
-        else:
-            print(json.dumps(output, ensure_ascii=False))
+        for row in summary:
+            if row["model"] == "gpt" and row["proposed"] and not row["denied"] and not any(
+                    not q.get("answered") and q.get("text", "") == model_lab(st, "gpt_deny_q", kind=row['type']) for q in st.get("questions", [])):
+                proxy = argparse.Namespace(text=model_lab(st, "gpt_deny_q", kind=row['type']), frm="lead", need_thread=None,
+                                           default=None, undoable=False, proposal=None, external=False, override=None, answer=None)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    cmd_ask(proxy)
+        print(json.dumps(output, ensure_ascii=False, indent=1 if a.json else None))
         return
     if a.allow and a.deny:
         sys.exit("--allow or --deny, not both")
@@ -4393,6 +4810,30 @@ def cmd_model_log(a):
     record = {"task": a.task, "type": a.type, "model": a.model, "result": a.result,
               "why": a.why, "at": now()}
     _model_log_append(path, record)
+    recent = []
+    log_rows = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try: row = json.loads(line)
+        except ValueError: continue
+        if row.get("type") == a.type and row.get("model") == a.model:
+            log_rows.append(row)
+    allowed = [i for i, row in enumerate(log_rows) if row.get("ev") == "allow"]
+    for row in log_rows[(allowed[-1] + 1) if allowed else 0:]:
+        if row.get("result") in ("ok", "redo"):
+            recent.append(row)
+    recent = recent[-3:]
+    if len(recent) == 3 and sum(x.get("result") == "redo" for x in recent) >= 2:
+        order = {"gpt": "fable", "fable": "opus", "opus": "opus"}
+        if a.model in ("fable", "opus") and not _denied(st, a.type, a.model):
+            _model_deny_change(st, a.type, a.model)
+            save(d, st, {"ev": "model-deny-add", "type": a.type, "model": a.model, "automatic": True})
+            print(model_lab(st, "model_escalated", model=a.model, kind=a.type, next=order[a.model]) if a.model != "opus" else
+                  model_lab(st, "model_no_higher", initial=a.model, kind=a.type), file=sys.stderr)
+        elif a.model == "gpt" and not any(not q.get("answered") and q.get("text", "") == model_lab(st, "gpt_deny_q", kind=a.type) for q in st.get("questions", [])):
+            proxy = argparse.Namespace(text=model_lab(st, "gpt_deny_q", kind=a.type), frm="lead", need_thread=None,
+                                       default=None, undoable=False, proposal=None, external=False, override=None, answer=None)
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_ask(proxy)
     print(json.dumps(record, ensure_ascii=False))
 
 
@@ -4443,16 +4884,52 @@ def opening_data(d, st):
 
 def cmd_opening(a):
     d = need(find_dir()); result = opening_data(d, load(d))
+    st = load(d)
+    result["gpt_private_question"] = model_lab(st, "gpt_private_question")
+    if st.get("lead", {}).get("permission_mode") == "auto": result["managed_note"] = model_lab(st, "auto_note")
+    if getattr(a, "takeover", False):
+        result = _takeover_data(st)
     if a.json:
         print(json.dumps(result, ensure_ascii=False))
     else:
+        if getattr(a, "takeover", False):
+            print("\n".join(result["lines"]))
+            return
         for row in result["questions"]:
             print(f"{row['key']}: {row['question']}")
             for n, step in enumerate(row["scale"], 1): print(f"  {n}. {step['step']} — {step['cost']}")
             print(f"  current: {row['current']}; last elsewhere: {row['last']}")
+        print(result["gpt_private_question"])
+        if result.get("managed_note"): print(result["managed_note"])
         print("unanswered_now: " + ", ".join(result["unanswered_now"]))
         for name, status in result["thread_screens"].items(): print(f"{name}: {status}")
         print(result["rule"])
+
+
+def _takeover_data(st):
+    threads = []
+    for name, thread in st.get("threads", {}).items():
+        if not thread.get("session_id") or thread.get("status") == "archived": continue
+        active = [(tid, task) for tid, task in st.get("tasks", {}).items()
+                  if task.get("owner") == name and task.get("status") not in ("done", "dropped", "recalled")]
+        current = "; ".join(f"{tid} {task.get('title') or tid}" for tid, task in active[:2])
+        threads.append({"seat": name, "status": thread.get("status", "?"), "task": current or thread.get("summary") or thread.get("focus") or "-",
+                        "last_report_at": thread.get("last_status_at") or thread.get("last_seen") or "?"})
+    promises = [x for x in st.get("promises", []) if x.get("status") != "done"]
+    asks = [x for x in st.get("questions", []) if not x.get("answered") and not x.get("answered_at")] \
+        + [x for x in st.get("notices", []) if not x.get("done") and x.get("kind") in ("needs-user", "parked")]
+    issues = [x for x in st.get("issues", []) if x.get("status") not in ("merged", "verified")]
+    rows = [model_lab(st, "tk_head", project=st.get('project'), goal=st.get('goal') or '-', n=len(threads))]
+    def section(label, items, render, count_label):
+        rows.append(label + (("；" if model_lab(st, "tk_none") == "无" else "; ").join(render(x) for x in items[:5]) or model_lab(st, "tk_none")))
+        if len(items) > 5: rows.append(model_lab(st, "tk_more", n=len(items) - 5, what=count_label))
+    section("", threads, lambda x: model_lab(st, "tk_thread", seat=x['seat'], status=x['status'], task=x['task'], at=x['last_report_at']), model_lab(st, "tk_threads"))
+    section(model_lab(st, "tk_promises_h"), promises, lambda x: x.get("text", x.get("id", "")), model_lab(st, "tk_promises"))
+    section(model_lab(st, "tk_asks_h"), asks, lambda x: x.get("text", ""), model_lab(st, "tk_asks"))
+    section(model_lab(st, "tk_issues_h"), issues, lambda x: x.get("text", ""), model_lab(st, "tk_issues"))
+    if st.get("lead", {}).get("permission_mode") == "auto": rows.append(model_lab(st, "auto_note"))
+    rows.append(model_lab(st, "takeover_final"))
+    return {"takeover": True, "threads": threads, "promises": promises, "asks": asks, "issues": issues, "lines": rows}
 
 
 def newer_release(info=None):
@@ -4832,9 +5309,13 @@ def cmd_req(a):
         if r in reqs:
             sys.exit(f"request {r} exists")
         tasks = csv(a.tasks)
+        kind = a.kind  # --remark alone stays a request that may be promoted later (T56); --kind says it is never one
         if a.remark and tasks: sys.exit("remark cannot have tasks")
+        if kind != "request" and tasks: sys.exit(lab(st, "req_not_request"))
         check_tasks(st, tasks)
-        q = {"text": " ".join(a.args), "status": "remark" if a.remark else "open", "tasks": [] if a.remark else tasks, "where": a.where or "",
+        check_never_raise(d, " ".join(a.args), getattr(a, "override", None))
+        q = {"text": " ".join(a.args), "status": "remark" if a.remark or kind != "request" else "open", "kind": kind,
+             "tasks": [] if (a.remark or a.kind != "request") else tasks, "where": a.where or "",
              "followup": a.followup or "", "created": now(), "updated": now(),
              **{k: getattr(a, k) for k in ("phase", "category") if getattr(a, k)}}
         reqs[r] = q
@@ -4844,7 +5325,7 @@ def cmd_req(a):
         save(d, st, {"ev": "req-add", "req": r, "text": q["text"], "tasks": tasks})
         print(json.dumps({r: q}, ensure_ascii=False))
         owners = ", ".join(dict.fromkeys(st["tasks"][t]["owner"] for t in tasks if st["tasks"][t].get("owner")))
-        print(lab(st, "rcpt_remark", r=r) if a.remark else lab(st, "rcpt_given", r=r, who=owners) if owners
+        print(lab(st, "rcpt_remark", r=r) if a.remark or kind != "request" else lab(st, "rcpt_given", r=r, who=owners) if owners
               else lab(st, "rcpt_open", r=r), file=sys.stderr)  # B3: the receipt the lead repeats; stdout stays JSON
         return
     if not a.args:
@@ -4875,6 +5356,10 @@ def cmd_req(a):
         if q["status"] in REQ_END:
             sys.exit(f"{r} has ended ({q['status']}); register a new request instead of editing it")
         was_held = q["status"] == "held"
+        if (a.status and q.get("kind", "request") != "request" and a.status not in ("remark", "dropped")) \
+                or (getattr(a, "tasks", None) and q.get("kind", "request") != "request"):
+            sys.exit(lab(st, "req_not_request"))
+        if a.text: check_never_raise(d, a.text, getattr(a, "override", None))
         if a.status:
             if a.status == "wont":
                 if not (a.reason or "").strip(): sys.exit("wont requires --reason")
@@ -5827,12 +6312,75 @@ def cmd_archive(a):
         sys.exit(candidates[sid].get("reason") or "lead handover follow-up is incomplete")
     if a.action in ("verify", "done") and sid not in candidates:
         sys.exit(f"{sid} is not an archive candidate")
+    if a.action == "verify" and candidates[sid].get("category") != "replaced":
+        seat = candidates[sid].get("seat")
+        pending_tasks = [(tid, k) for tid, k in st.get("tasks", {}).items()
+                         if k.get("owner") == seat and k.get("status") not in ("done", "dropped", "recalled")]
+        pending_asks = [q for q in st.get("questions", []) if q.get("from") == seat and not q.get("answered") and not q.get("answered_at")]
+        pending_issues = [i for i in st.get("issues", []) if i.get("owner") == seat and i.get("status") not in ("verified", "merged")]
+        unmerged = False
+        thread = st.get("threads", {}).get(seat) or {}
+        try:
+            repo = Path((st.get("repo") or {}).get("path") or d.parent)
+            base_branch = (st.get("repo") or {}).get("base") or "main"
+            branch = thread.get("branch")
+            if branch:
+                count = subprocess.run(["git", "-C", str(repo), "rev-list", "--count", f"{base_branch}..{branch}"], capture_output=True, text=True, timeout=5)
+                unmerged = count.returncode == 0 and int(count.stdout.strip() or "0") > 0
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        merged_recorded = any(e.get("ev") == "merge" and e.get("thread") == seat for e in _read_log(d))
+        blockers = [*(f"task {tid}" for tid, _ in pending_tasks),
+                    *(f"ask {q.get('id') or q.get('text')}" for q in pending_asks),
+                    *(f"issue {i.get('id')}" for i in pending_issues),
+                    *( [f"branch {thread.get('branch')} has unmerged commits"] if unmerged and not merged_recorded else [])]
+        if blockers and not (getattr(a, "handed_to", None) or getattr(a, "park", None)):
+            sys.exit(lab(st, "archive_handover_needed", items=", ".join(blockers)))
+        target = getattr(a, "handed_to", None)
+        if target:
+            if target == seat:
+                sys.exit(lab(st, "archive_handover_needed", items=f"{seat} cannot hand work to itself"))
+            if target != "lead" and target not in st.get("threads", {}): sys.exit(f"unknown handoff owner {target}")
+            for n in st.get("notices", []):
+                if n.get("kind") == "parked" and n.get("original_owner") == seat and not n.get("done"): n.update(done=True, handed_to=target)
+            for tid, k in pending_tasks:
+                k.setdefault("owner_history", []).append({"owner": seat, "at": now()})
+                k.setdefault("past_owners", []).append(seat)
+                k["owner"] = target
+            for q in pending_asks: q["owner"] = target
+            for i in pending_issues: i["owner"] = target
+            if blockers:
+                st.setdefault("archive_handoffs", []).append({"session": sid, "from": seat, "to": target,
+                                                               "items": blockers, "at": now()})
+        elif getattr(a, "park", None):
+            for item in blockers:
+                notices = st.setdefault("notices", [])
+                if not any(n.get("kind") == "parked" and n.get("text") == item and
+                           n.get("original_owner") == seat and n.get("reason") == a.park and not n.get("done")
+                           for n in notices):
+                    notices.append({"thread": "lead", "kind": "parked", "text": item,
+                        "original_owner": seat, "reason": a.park, "at": now(), "done": False})
     rec = st["archive"].setdefault(sid, {})
     if a.action == "verify":
         if not a.stopped.strip(): sys.exit("archive verify needs --stopped with evidence")
         rec.update({"verified_at": now(), "evidence": a.stopped.strip(), "seat": candidates[sid]["seat"],
                     "category": candidates[sid]["category"],
                     "report_count": st["threads"].get(candidates[sid]["seat"], {}).get("report_count", 0)})
+        seat_name = candidates[sid]["seat"]
+        current = st.get("threads", {}).get(seat_name, {})
+        if current.get("session_id") == sid:
+            archives = st.setdefault("archive_packs", {})
+            existing = next(((key, value) for key, value in archives.items() if value.get("session") == sid), None)
+            if existing:
+                archive_id, pack = existing
+                out_dir, gaps = Path(pack["dir"]), pack.get("gaps", [])
+            else:
+                archive_id = f"AR{len(archives) + 1}"
+                pack_rec = {"seat": seat_name, "kind": "archive", "old_session": sid, "freeze": {"at": now()}}
+                out_dir, gaps, written = _pack_session(d, st, archive_id, pack_rec, a)  # reuse successor extraction
+                archives[archive_id] = {"session": sid, "seat": seat_name, "dir": str(out_dir), "at": now(), "gaps": gaps, "files": written}
+            print(lab(st, "succ_pack_line", path=out_dir / "BRIEF.md", gap=lab(st, "succ_gap"), n=len(gaps)), file=sys.stderr)
+
     elif a.action == "done":
         if not rec.get("verified_at"):
             sys.exit(lab(st, "archive_verify_first"))
@@ -5851,6 +6399,13 @@ def cmd_archive(a):
         rec["archived_at"] = now()
         rec.pop("check", None); rec.pop("checked_at", None)
         rec["user_said"] = (a.user_said or "").strip()
+        handoff = next((x for x in reversed(st.get("archive_handoffs", [])) if x.get("session") == sid), None)
+        receiver = handoff.get("to") if handoff else "lead"
+        thread = st.get("threads", {}).get(rec.get("seat"), {})
+        delivery = thread.get("branch") or next((x.get("link") for x in st.get("docs", {}).values() if x.get("link")), None) or "-"
+        if t.get("session_id") == sid:  # the seat's own session goes: tell the team who owns the area now (a replaced one changes nothing)
+            rec["receiver"] = receiver
+            print(model_lab(st, "archive_broadcast", seat=rec.get('seat'), who=receiver, where=delivery), file=sys.stderr)
         if rec.get("category") != "replaced" and t.get("session_id") == sid:
             rec["thread_status_before"] = t.get("status")
             t["status"] = "archived"
@@ -6038,6 +6593,212 @@ def _succ_quiz_material(rec, st):
     return material
 
 
+def _pack_session(d, st, hid, rec, a):
+    """Extract a handover pack for rec["old_session"] from its record into .teamwork/private/handover/<hid>-<seat>/ (T58 J11).
+    Shared by `succ pack` and the archive handover (J2). Returns (pack dir, gaps, files written)."""
+    base=d.parent/".teamwork"/"private"/"handover"/f"{hid}-{rec['seat']}"; base.mkdir(parents=True,exist_ok=True)
+    gaps=[]; rows=[]; paths=[]
+    for path in a.transcript or []:
+        p=Path(path)
+        if p.exists(): paths.append(p)
+        else: gaps.append(lab(st,"succ_missing_transcript",path=path))
+    if not a.transcript:
+        cfg=a.config_dir or [str(Path.home()/".claude"), *map(str,Path.home().glob(".claude-*"))]
+        paths=_succ_find_transcripts(rec.get("old_session"),cfg)
+    skipped_answer_files=0
+    for p in paths:
+        try:
+            found=[json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+            child_record=bool(re.search(SUBAGENT_ID_RE, p.stem))
+            answer_reference=_succ_answer_path(st,p.as_posix()) or any(_succ_answer_path(st,json.dumps(row,ensure_ascii=False)) for row in found)
+            if child_record and answer_reference:
+                skipped_answer_files += 1
+                continue
+            found=[{**row,"_handover_source":str(p)} for row in found]
+            if child_record:
+                found=[{**row,"_handover_subagent":True} for row in found]
+            rows += found
+        except (OSError,ValueError): gaps.append(lab(st,"succ_unreadable_transcript",path=p))
+    if skipped_answer_files: gaps.append(lab(st,"succ_skipped_answers",n=skipped_answer_files))
+    if not rows: gaps.append(lab(st,"succ_no_transcript"))
+    seat_sessions=(st.get("threads",{}).get(rec["seat"]) or {}).get("sessions",[])
+    stint=next((x for x in seat_sessions if x.get("session_id")==rec.get("old_session")),None)
+    stint_from=_when(stint.get("from")) if stint else None
+    freeze_at=_when((rec.get("freeze") or {}).get("at"))
+    screen_windows=[]
+    for screen in st.get("screens",{}).values():
+        if screen.get("session_id") != rec.get("old_session"): continue
+        cutoff=screen.get("cleared_at") or screen.get("graded_at") or screen.get("created_at")
+        screen_windows.append((_when(screen.get("created_at")),_when(cutoff)))
+        if not screen.get("cleared_at"):
+            gaps.append(lab(st,"succ_screen_uncleared",id=next((k for k,v in st.get("screens",{}).items() if v is screen),"SC?"),at=cutoff or "-"))
+    compact_count=sum(bool(x.get("isCompactSummary") or x.get("type") in ("compact_boundary","summary")) for x in rows)
+    kept=[]
+    for row in rows:
+        stamp=_when(row.get("timestamp") or row.get("created_at") or row.get("createdAt") or row.get("time"))
+        if stamp and ((stint_from and stamp < stint_from) or (freeze_at and stamp > freeze_at)): continue
+        invalid=bool(stamp and any((begin is None or stamp>=begin) and (end is None or stamp<=end) for begin,end in screen_windows))
+        if invalid: row["_handover_window"]=lab(st,"succ_tests_void")
+        kept.append(row)
+    rows=kept
+    key_tool_ids=set(); answer_rows=set(); cwd_keys=False; last_source=None
+    for row_index,row in enumerate(rows):
+        source=row.get("_handover_source")
+        if source != last_source:
+            cwd_keys=False; last_source=source
+        msg=row.get("message") or {}; content=msg.get("content",[])
+        blocks=content if isinstance(content,list) else []
+        for block in blocks:
+            if not isinstance(block,dict): continue
+            if block.get("type")=="tool_use":
+                name=block.get("name"); inp=block.get("input") or {}
+                if name=="Bash":
+                    command=str(inp.get("command") or "")
+                    cd_matches=list(re.finditer(r"(?:^|[;&|]\s*)cd\s+(?:([\"'])(.*?)\1|([^;&|\s]+))",command))
+                    hit_command=_succ_answer_path(st,command)
+                    for match in cd_matches:
+                        destination=match.group(2) if match.group(1) else match.group(3)
+                        if _succ_answer_path(st,destination): cwd_keys=True
+                        else: cwd_keys=False
+                    if hit_command or cwd_keys:
+                        if block.get("id") is not None: key_tool_ids.add(block.get("id"))
+                        answer_rows.add(row_index)
+                elif _succ_answer_path(st,json.dumps(block,ensure_ascii=False)):
+                    if block.get("id") is not None: key_tool_ids.add(block.get("id"))
+                    answer_rows.add(row_index)
+            elif block.get("type")=="tool_result" and block.get("tool_use_id") in key_tool_ids:
+                answer_rows.add(row_index)
+        if any(isinstance(b,dict) and b.get("type")=="tool_result" and b.get("tool_use_id") in key_tool_ids
+               for b in blocks):
+            answer_rows.add(row_index)
+    sanitized=[]
+    for row_index,row in enumerate(rows):
+        if row_index in answer_rows or _succ_answer_path(st,json.dumps(row,ensure_ascii=False)):
+            sanitized.append({"type":row.get("type"),"timestamp":row.get("timestamp"),
+                              "message":{"content":"[redacted answer key path]"}})
+        else:
+            sanitized.append({k:v for k,v in row.items() if k != "_handover_source"})
+    rows=sanitized
+    tool_map={}; file_ops={}; commands=[]; failures=[]; urls=set()
+    for row in rows:
+        msg=row.get("message") or {}; blocks=msg.get("content",[])
+        if not isinstance(blocks,list): blocks=[]
+        for block in blocks:
+            if not isinstance(block,dict): continue
+            if block.get("type")=="tool_use":
+                name=block.get("name",""); inp=block.get("input") or {}; tid=block.get("id")
+                if name in ("Read","Edit","Write","NotebookEdit"):
+                    target=inp.get("file_path") or inp.get("path")
+                    if target: file_ops[str(target)]=name
+                if name=="Bash": tool_map[tid]={"command":inp.get("command","")}; commands.append(inp.get("command",""))
+            if block.get("type")=="tool_result":
+                raw=str(block.get("content","")); urls.update(re.findall(r"https?://[^\s)\]>]+",raw))
+                tid=block.get("tool_use_id")
+                exit_code=block.get("exit_code",block.get("code"))
+                if block.get("is_error") or (isinstance(exit_code,int) and exit_code!=0) or re.search(r"(?:exit(?:ed)?(?: with)? code|status)\s*[:=]?\s*[1-9][0-9]*",raw,re.I):
+                    failures.append({"tool_use_id":tid,"command":tool_map.get(tid,{}).get("command"),"result":_succ_redact(raw[:500])[0]})
+        rawtext=json.dumps(row,ensure_ascii=False)
+        if _succ_answer_path(st,rawtext):
+            row={"type":row.get("type"),"timestamp":row.get("timestamp"),"message":{"content":"[redacted answer key path]"}}
+            rawtext=json.dumps(row,ensure_ascii=False)
+        urls.update(re.findall(r"https?://[^\s\"'<>]+",rawtext))
+    file_facts=[]
+    for name,op in sorted(file_ops.items()):
+        p=Path(name); p=p if p.is_absolute() else Path(st.get("repo",{}).get("path") or d.parent)/p
+        file_facts.append({"path":name,"operation":op,"exists":p.exists()})
+    words=[]; peer_words=[]; compact=[]; users=0; peers=0
+    for row in rows:
+        msg=row.get("message",{}); content=msg.get("content","")
+        tool_result=any(isinstance(x,dict) and x.get("type")=="tool_result" for x in content) if isinstance(content,list) else False
+        if isinstance(content,list): content=" ".join(str(x.get("text","")) for x in content if isinstance(x,dict))
+        origin=(row.get("origin") or msg.get("origin") or {}).get("kind")
+        stamp=_when(row.get("timestamp") or row.get("created_at") or row.get("createdAt") or row.get("time"))
+        invalid=row.get("_handover_window")==lab(st,"succ_tests_void")
+        if row.get("isCompactSummary") or row.get("type") in ("compact_boundary","summary"):
+            compact=[_succ_redact(str(content))[0]]
+        elif compact and row.get("type")=="user" and not invalid: compact.append(_succ_redact(str(content))[0])
+        if row.get("type") != "user" or tool_result: continue
+        if invalid: continue
+        if not row.get("_handover_subagent") and (origin == "human" or (not origin and not str(content).lstrip().startswith("[tw:"))):
+            users+=1; redacted,count=_succ_redact(str(content)); rule=bool(re.search(r"不要|别|改成|永远|记住|必须|always|never|don't|do not",redacted,re.I))
+            words.append(f"{'★ ' if rule else ''}[#{users}] {redacted}" + (f" {lab(st,'succ_redacted')}" if count else ""))
+        elif origin != "human" and str(content).lstrip().startswith("[tw:"):
+            peers+=1; peer_words.append(f"[L#{peers}] {_succ_redact(str(content))[0]}")
+    t=st.get("threads",{}).get(rec["seat"],{}); branch=t.get("branch","-")
+    snap=_succ_git_snapshot(st,branch,t.get("worktree"))
+    open_tasks=[{"id":k,"title":v.get("title"),"done_when":v.get("accept"),"status":v.get("status"),"touches":v.get("touches",[]),"requests":[]} for k,v in st.get("tasks",{}).items() if v.get("owner")==rec["seat"] and v.get("status") not in ("done","dropped")]
+    if not snap["available"]: gaps.append(lab(st,"succ_git_missing"))
+    if any(not (x.get("timestamp") or x.get("created_at") or x.get("createdAt") or x.get("time")) for x in rows): gaps.append(lab(st,"succ_timestamp_missing"))
+    related={r:{"status":q.get("status"),"tasks":q.get("tasks",[])} for r,q in st.get("requests",{}).items() if set(q.get("tasks",[])) & {x["id"] for x in open_tasks}}
+    for task in open_tasks:
+        linked=set((st.get("tasks",{}).get(task["id"]) or {}).get("requests",[]))
+        req=(st.get("tasks",{}).get(task["id"]) or {}).get("req")
+        if req: linked.add(req)
+        linked.update(r for r,recq in related.items() if task["id"] in recq["tasks"])
+        for r in linked:
+            if r in st.get("requests",{}): related.setdefault(r,{"status":st["requests"][r].get("status"),"tasks":st["requests"][r].get("tasks",[])})
+        task["requests"]=[{"id":r,"status":st.get("requests",{}).get(r,{}).get("status","unknown")} for r in sorted(linked)]
+    facts={"files":file_facts,"commands":commands,"failed_commands":failures,"urls":sorted(urls),"branch":branch,"head":snap["head"],"unpushed_commits":snap["unpushed"],"dirty_files":snap["dirty_files"],"leases":sorted({x for task in open_tasks for x in task.get("touches",[])}),"tasks":open_tasks,"requests":related}
+    if not any(file_ops.values()): gaps.append(lab(st,"succ_no_file_ops"))
+    if not commands: gaps.append(lab(st,"succ_no_commands"))
+    if not urls: gaps.append(lab(st,"succ_no_urls"))
+    lead_extra = ""
+    if rec.get("kind") == "lead":
+        rec["cutoff_at"] = now()
+        rec["move_items"] = []
+        team = [{"seat":n,"session":t.get("session_id"),"status":t.get("status"),"summary":t.get("summary"),"unmerged_commits":t.get("unmerged_commits",[])} for n,t in st.get("threads",{}).items()]
+        lists=[]
+        for arg, label in ((getattr(a,"triggers",None),"triggers"),(getattr(a,"subscriptions",None),"subscriptions")):
+            display=lab(st,"succ_triggers" if label=="triggers" else "succ_subscriptions")
+            if arg:
+                try:
+                    data=json.loads(Path(arg).read_text(encoding='utf-8'))
+                    vals=data if isinstance(data,list) else data.get("items",[]) if isinstance(data,dict) else []
+                    for x in vals:
+                        if isinstance(x,dict) and label=="triggers": item=x.get("id")
+                        elif isinstance(x,dict): item=x.get("owner_repo") or (f"{x.get('owner')}/{x.get('repo')}#{x.get('number')}" if x.get("owner") and x.get("repo") and x.get("number") else x.get("name"))
+                        else: item=x
+                        if item is not None: rec["move_items"].append(f"{label[:-1]}:{item}")
+                    lists.append(f"{display}: {json.dumps(data,ensure_ascii=False)}")
+                except OSError: gaps.append(lab(st,"succ_list_unreadable",name=display))
+                except (ValueError,TypeError): gaps.append(lab(st,"succ_list_invalid",name=display))
+            else: gaps.append(lab(st,"succ_list_missing",name=display))
+        rec["move_none_required"] = not getattr(a,"triggers",None) or not getattr(a,"subscriptions",None)
+        lead_extra = f"\n## {lab(st,'succ_team')} ({rec['cutoff_at']})\n{lab(st,'succ_thread_list')}：{json.dumps(team,ensure_ascii=False)}\n{lab(st,'succ_open_requests')}：{json.dumps({k:v for k,v in st.get('requests',{}).items() if v.get('status') not in ('closed','reported','dropped')},ensure_ascii=False)}\n{lab(st,'succ_questions')}：{json.dumps([q for q in st.get('questions',[]) if not q.get('answered_at')],ensure_ascii=False)}\n{lab(st,'succ_promises')}：{json.dumps(st.get('promises',[]),ensure_ascii=False)}\n{lab(st,'succ_grants')}：{json.dumps(st.get('prefs',{}).get('standing_grants',[]),ensure_ascii=False)}\n{lab(st,'succ_prefs')}：{json.dumps(st.get('prefs',{}),ensure_ascii=False)}\n{lab(st,'succ_reminders')}：{' ; '.join(lists) or lab(st,'succ_gap')}\n"
+    changes, memory_added = _seat_change_summary(d, st, rec["seat"], rec.get("cutoff_at") or rec.get("started_at"))
+    env_heading = "## " + model_lab(st, "env_heading") + "\n"
+    change_rows = []
+    tracked = {"language", "model", "thread_permission_mode", "permission_mode", "branch", "base"}
+    for event in changes:
+        at = event.get("at") or "?"
+        for setting in event.get("set") or []:
+            key, sep, value = str(setting).partition("=")
+            if sep and key in tracked:
+                change_rows.append(f"- {at} | {key} | {model_lab(st, 'change_unknown')} → {value}")
+        for key in ("mode", "branch", "base"):
+            value = event.get(key)
+            if value is not None:
+                change_rows.append(f"- {at} | {key} | {model_lab(st, 'change_unknown')} → {value}")
+    if memory_added:
+        change_rows.extend(f"- {line}" for line in memory_added)
+    env_section = env_heading + ("\n".join(change_rows) if change_rows else "- " + model_lab(st, "change_empty")) + "\n"
+    brief=f"# {hid} · {rec['seat']}\n\n{lab(st,'succ_gap')}：{', '.join(gaps) if gaps else lab(st,'succ_none')}\n\n## {lab(st,'succ_current_facts')}\n{lab(st,'succ_old_session')}：{rec.get('old_session')}；{lab(st,'t_branch')}：{branch}；{lab(st,'succ_freeze_head')}：{(rec.get('freeze') or {}).get('head','-')}\n{lab(st,'succ_unpushed')}：{len(snap['unpushed'])}；{lab(st,'succ_dirty')}：{', '.join(snap['dirty_files']) or '-'}\n{lab(st,'succ_tasks')}：{json.dumps(open_tasks,ensure_ascii=False)}\n{lab(st,'succ_requests')}：{json.dumps(related,ensure_ascii=False)}；{lab(st,'succ_leases')}：{', '.join(facts['leases']) or '-'}\n{lab(st,'succ_files_hint')}\n{env_section}{lead_extra}"
+    written=[]
+    for name,data in (("BRIEF.md",brief),("words.md","\n".join(words+peer_words)+("\n" if words or peer_words else "")),("compact.md","\n".join(compact)+("\n" if compact else "")),("facts.json",json.dumps(facts,ensure_ascii=False,indent=2))):
+        path=base/name; ix=1
+        while path.exists(): path=base/f"{Path(name).stem}-{ix}{Path(name).suffix}"; ix+=1
+        path.write_text(data,encoding="utf-8"); written.append(str(path))
+    rawdir=base/"raw"; rawdir.mkdir(exist_ok=True); rawfile=rawdir/"old.jsonl"; ix=1
+    while rawfile.exists(): rawfile=rawdir/f"old-{ix}.jsonl"; ix+=1
+    rawfile.write_text("\n".join(json.dumps(_succ_scrub(row),ensure_ascii=False) for row in rows),encoding="utf-8")
+    file_hashes={str(p.relative_to(base)):hashlib.sha256(p.read_bytes()).hexdigest() for p in base.rglob("*") if p.is_file() and p.name!="MANIFEST.json"}
+    manifest={"id":hid,"seat":rec["seat"],"old_session":rec.get("old_session"),"candidates":rec.get("candidates"),"freeze":rec.get("freeze"),"cutoff_at":rec.get("cutoff_at"),"files":file_hashes,"gaps":gaps,"user_words":users,"rules":sum(x.startswith("★") for x in words),"compactions":compact_count,"redactions":sum(len(_SUCC_SECRET_RE.findall(json.dumps(x,ensure_ascii=False))) for x in rows)}
+    mf=base/"MANIFEST.json"; ix=1
+    while mf.exists(): mf=base/f"MANIFEST-{ix}.json"; ix+=1
+    mf.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding="utf-8")
+    return base, gaps, written
+
+
 def cmd_succ(a):
     d = need(find_dir()); st = load(d); hs = st.setdefault("handovers", {})
     if a.action == "start":
@@ -6156,189 +6917,7 @@ def cmd_succ(a):
         print(lab(st,"succ_freeze",id=hid,seat=rec["seat"])); return
     if a.action == "pack":
         if not rec.get("freeze"): sys.exit(lab(st, "succ_step_phase", id=hid, phase=rec.get("phase"), step="pack"))
-        base=d.parent/".teamwork"/"private"/"handover"/f"{hid}-{rec['seat']}"; base.mkdir(parents=True,exist_ok=True)
-        gaps=[]; rows=[]; paths=[]
-        for path in a.transcript or []:
-            p=Path(path)
-            if p.exists(): paths.append(p)
-            else: gaps.append(lab(st,"succ_missing_transcript",path=path))
-        if not a.transcript:
-            cfg=a.config_dir or [str(Path.home()/".claude"), *map(str,Path.home().glob(".claude-*"))]
-            paths=_succ_find_transcripts(rec.get("old_session"),cfg)
-        skipped_answer_files=0
-        for p in paths:
-            try:
-                found=[json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
-                child_record=bool(re.search(SUBAGENT_ID_RE, p.stem))
-                answer_reference=_succ_answer_path(st,p.as_posix()) or any(_succ_answer_path(st,json.dumps(row,ensure_ascii=False)) for row in found)
-                if child_record and answer_reference:
-                    skipped_answer_files += 1
-                    continue
-                found=[{**row,"_handover_source":str(p)} for row in found]
-                if child_record:
-                    found=[{**row,"_handover_subagent":True} for row in found]
-                rows += found
-            except (OSError,ValueError): gaps.append(lab(st,"succ_unreadable_transcript",path=p))
-        if skipped_answer_files: gaps.append(lab(st,"succ_skipped_answers",n=skipped_answer_files))
-        if not rows: gaps.append(lab(st,"succ_no_transcript"))
-        seat_sessions=(st.get("threads",{}).get(rec["seat"]) or {}).get("sessions",[])
-        stint=next((x for x in seat_sessions if x.get("session_id")==rec.get("old_session")),None)
-        stint_from=_when(stint.get("from")) if stint else None
-        freeze_at=_when((rec.get("freeze") or {}).get("at"))
-        screen_windows=[]
-        for screen in st.get("screens",{}).values():
-            if screen.get("session_id") != rec.get("old_session"): continue
-            cutoff=screen.get("cleared_at") or screen.get("graded_at") or screen.get("created_at")
-            screen_windows.append((_when(screen.get("created_at")),_when(cutoff)))
-            if not screen.get("cleared_at"):
-                gaps.append(lab(st,"succ_screen_uncleared",id=next((k for k,v in st.get("screens",{}).items() if v is screen),"SC?"),at=cutoff or "-"))
-        compact_count=sum(bool(x.get("isCompactSummary") or x.get("type") in ("compact_boundary","summary")) for x in rows)
-        kept=[]
-        for row in rows:
-            stamp=_when(row.get("timestamp") or row.get("created_at") or row.get("createdAt") or row.get("time"))
-            if stamp and ((stint_from and stamp < stint_from) or (freeze_at and stamp > freeze_at)): continue
-            invalid=bool(stamp and any((begin is None or stamp>=begin) and (end is None or stamp<=end) for begin,end in screen_windows))
-            if invalid: row["_handover_window"]=lab(st,"succ_tests_void")
-            kept.append(row)
-        rows=kept
-        key_tool_ids=set(); answer_rows=set(); cwd_keys=False; last_source=None
-        for row_index,row in enumerate(rows):
-            source=row.get("_handover_source")
-            if source != last_source:
-                cwd_keys=False; last_source=source
-            msg=row.get("message") or {}; content=msg.get("content",[])
-            blocks=content if isinstance(content,list) else []
-            for block in blocks:
-                if not isinstance(block,dict): continue
-                if block.get("type")=="tool_use":
-                    name=block.get("name"); inp=block.get("input") or {}
-                    if name=="Bash":
-                        command=str(inp.get("command") or "")
-                        cd_matches=list(re.finditer(r"(?:^|[;&|]\s*)cd\s+(?:([\"'])(.*?)\1|([^;&|\s]+))",command))
-                        hit_command=_succ_answer_path(st,command)
-                        for match in cd_matches:
-                            destination=match.group(2) if match.group(1) else match.group(3)
-                            if _succ_answer_path(st,destination): cwd_keys=True
-                            else: cwd_keys=False
-                        if hit_command or cwd_keys:
-                            if block.get("id") is not None: key_tool_ids.add(block.get("id"))
-                            answer_rows.add(row_index)
-                    elif _succ_answer_path(st,json.dumps(block,ensure_ascii=False)):
-                        if block.get("id") is not None: key_tool_ids.add(block.get("id"))
-                        answer_rows.add(row_index)
-                elif block.get("type")=="tool_result" and block.get("tool_use_id") in key_tool_ids:
-                    answer_rows.add(row_index)
-            if any(isinstance(b,dict) and b.get("type")=="tool_result" and b.get("tool_use_id") in key_tool_ids
-                   for b in blocks):
-                answer_rows.add(row_index)
-        sanitized=[]
-        for row_index,row in enumerate(rows):
-            if row_index in answer_rows or _succ_answer_path(st,json.dumps(row,ensure_ascii=False)):
-                sanitized.append({"type":row.get("type"),"timestamp":row.get("timestamp"),
-                                  "message":{"content":"[redacted answer key path]"}})
-            else:
-                sanitized.append({k:v for k,v in row.items() if k != "_handover_source"})
-        rows=sanitized
-        tool_map={}; file_ops={}; commands=[]; failures=[]; urls=set()
-        for row in rows:
-            msg=row.get("message") or {}; blocks=msg.get("content",[])
-            if not isinstance(blocks,list): blocks=[]
-            for block in blocks:
-                if not isinstance(block,dict): continue
-                if block.get("type")=="tool_use":
-                    name=block.get("name",""); inp=block.get("input") or {}; tid=block.get("id")
-                    if name in ("Read","Edit","Write","NotebookEdit"):
-                        target=inp.get("file_path") or inp.get("path")
-                        if target: file_ops[str(target)]=name
-                    if name=="Bash": tool_map[tid]={"command":inp.get("command","")}; commands.append(inp.get("command",""))
-                if block.get("type")=="tool_result":
-                    raw=str(block.get("content","")); urls.update(re.findall(r"https?://[^\s)\]>]+",raw))
-                    tid=block.get("tool_use_id")
-                    exit_code=block.get("exit_code",block.get("code"))
-                    if block.get("is_error") or (isinstance(exit_code,int) and exit_code!=0) or re.search(r"(?:exit(?:ed)?(?: with)? code|status)\s*[:=]?\s*[1-9][0-9]*",raw,re.I):
-                        failures.append({"tool_use_id":tid,"command":tool_map.get(tid,{}).get("command"),"result":_succ_redact(raw[:500])[0]})
-            rawtext=json.dumps(row,ensure_ascii=False)
-            if _succ_answer_path(st,rawtext):
-                row={"type":row.get("type"),"timestamp":row.get("timestamp"),"message":{"content":"[redacted answer key path]"}}
-                rawtext=json.dumps(row,ensure_ascii=False)
-            urls.update(re.findall(r"https?://[^\s\"'<>]+",rawtext))
-        file_facts=[]
-        for name,op in sorted(file_ops.items()):
-            p=Path(name); p=p if p.is_absolute() else Path(st.get("repo",{}).get("path") or d.parent)/p
-            file_facts.append({"path":name,"operation":op,"exists":p.exists()})
-        words=[]; peer_words=[]; compact=[]; users=0; peers=0
-        for row in rows:
-            msg=row.get("message",{}); content=msg.get("content","")
-            tool_result=any(isinstance(x,dict) and x.get("type")=="tool_result" for x in content) if isinstance(content,list) else False
-            if isinstance(content,list): content=" ".join(str(x.get("text","")) for x in content if isinstance(x,dict))
-            origin=(row.get("origin") or msg.get("origin") or {}).get("kind")
-            stamp=_when(row.get("timestamp") or row.get("created_at") or row.get("createdAt") or row.get("time"))
-            invalid=row.get("_handover_window")==lab(st,"succ_tests_void")
-            if row.get("isCompactSummary") or row.get("type") in ("compact_boundary","summary"):
-                compact=[_succ_redact(str(content))[0]]
-            elif compact and row.get("type")=="user" and not invalid: compact.append(_succ_redact(str(content))[0])
-            if row.get("type") != "user" or tool_result: continue
-            if invalid: continue
-            if not row.get("_handover_subagent") and (origin == "human" or (not origin and not str(content).lstrip().startswith("[tw:"))):
-                users+=1; redacted,count=_succ_redact(str(content)); rule=bool(re.search(r"不要|别|改成|永远|记住|必须|always|never|don't|do not",redacted,re.I))
-                words.append(f"{'★ ' if rule else ''}[#{users}] {redacted}" + (f" {lab(st,'succ_redacted')}" if count else ""))
-            elif origin != "human" and str(content).lstrip().startswith("[tw:"):
-                peers+=1; peer_words.append(f"[L#{peers}] {_succ_redact(str(content))[0]}")
-        t=st.get("threads",{}).get(rec["seat"],{}); branch=t.get("branch","-")
-        snap=_succ_git_snapshot(st,branch,t.get("worktree"))
-        open_tasks=[{"id":k,"title":v.get("title"),"done_when":v.get("accept"),"status":v.get("status"),"touches":v.get("touches",[]),"requests":[]} for k,v in st.get("tasks",{}).items() if v.get("owner")==rec["seat"] and v.get("status") not in ("done","dropped")]
-        if not snap["available"]: gaps.append(lab(st,"succ_git_missing"))
-        if any(not (x.get("timestamp") or x.get("created_at") or x.get("createdAt") or x.get("time")) for x in rows): gaps.append(lab(st,"succ_timestamp_missing"))
-        related={r:{"status":q.get("status"),"tasks":q.get("tasks",[])} for r,q in st.get("requests",{}).items() if set(q.get("tasks",[])) & {x["id"] for x in open_tasks}}
-        for task in open_tasks:
-            linked=set((st.get("tasks",{}).get(task["id"]) or {}).get("requests",[]))
-            req=(st.get("tasks",{}).get(task["id"]) or {}).get("req")
-            if req: linked.add(req)
-            linked.update(r for r,recq in related.items() if task["id"] in recq["tasks"])
-            for r in linked:
-                if r in st.get("requests",{}): related.setdefault(r,{"status":st["requests"][r].get("status"),"tasks":st["requests"][r].get("tasks",[])})
-            task["requests"]=[{"id":r,"status":st.get("requests",{}).get(r,{}).get("status","unknown")} for r in sorted(linked)]
-        facts={"files":file_facts,"commands":commands,"failed_commands":failures,"urls":sorted(urls),"branch":branch,"head":snap["head"],"unpushed_commits":snap["unpushed"],"dirty_files":snap["dirty_files"],"leases":sorted({x for task in open_tasks for x in task.get("touches",[])}),"tasks":open_tasks,"requests":related}
-        if not any(file_ops.values()): gaps.append(lab(st,"succ_no_file_ops"))
-        if not commands: gaps.append(lab(st,"succ_no_commands"))
-        if not urls: gaps.append(lab(st,"succ_no_urls"))
-        lead_extra = ""
-        if rec.get("kind") == "lead":
-            rec["cutoff_at"] = now()
-            rec["move_items"] = []
-            team = [{"seat":n,"session":t.get("session_id"),"status":t.get("status"),"summary":t.get("summary"),"unmerged_commits":t.get("unmerged_commits",[])} for n,t in st.get("threads",{}).items()]
-            lists=[]
-            for arg, label in ((getattr(a,"triggers",None),"triggers"),(getattr(a,"subscriptions",None),"subscriptions")):
-                display=lab(st,"succ_triggers" if label=="triggers" else "succ_subscriptions")
-                if arg:
-                    try:
-                        data=json.loads(Path(arg).read_text(encoding='utf-8'))
-                        vals=data if isinstance(data,list) else data.get("items",[]) if isinstance(data,dict) else []
-                        for x in vals:
-                            if isinstance(x,dict) and label=="triggers": item=x.get("id")
-                            elif isinstance(x,dict): item=x.get("owner_repo") or (f"{x.get('owner')}/{x.get('repo')}#{x.get('number')}" if x.get("owner") and x.get("repo") and x.get("number") else x.get("name"))
-                            else: item=x
-                            if item is not None: rec["move_items"].append(f"{label[:-1]}:{item}")
-                        lists.append(f"{display}: {json.dumps(data,ensure_ascii=False)}")
-                    except OSError: gaps.append(lab(st,"succ_list_unreadable",name=display))
-                    except (ValueError,TypeError): gaps.append(lab(st,"succ_list_invalid",name=display))
-                else: gaps.append(lab(st,"succ_list_missing",name=display))
-            rec["move_none_required"] = not getattr(a,"triggers",None) or not getattr(a,"subscriptions",None)
-            lead_extra = f"\n## {lab(st,'succ_team')} ({rec['cutoff_at']})\n{lab(st,'succ_thread_list')}：{json.dumps(team,ensure_ascii=False)}\n{lab(st,'succ_open_requests')}：{json.dumps({k:v for k,v in st.get('requests',{}).items() if v.get('status') not in ('closed','reported','dropped')},ensure_ascii=False)}\n{lab(st,'succ_questions')}：{json.dumps([q for q in st.get('questions',[]) if not q.get('answered_at')],ensure_ascii=False)}\n{lab(st,'succ_promises')}：{json.dumps(st.get('promises',[]),ensure_ascii=False)}\n{lab(st,'succ_grants')}：{json.dumps(st.get('prefs',{}).get('standing_grants',[]),ensure_ascii=False)}\n{lab(st,'succ_prefs')}：{json.dumps(st.get('prefs',{}),ensure_ascii=False)}\n{lab(st,'succ_reminders')}：{' ; '.join(lists) or lab(st,'succ_gap')}\n"
-        brief=f"# {hid} · {rec['seat']}\n\n{lab(st,'succ_gap')}：{', '.join(gaps) if gaps else lab(st,'succ_none')}\n\n## {lab(st,'succ_current_facts')}\n{lab(st,'succ_old_session')}：{rec.get('old_session')}；{lab(st,'t_branch')}：{branch}；{lab(st,'succ_freeze_head')}：{(rec.get('freeze') or {}).get('head','-')}\n{lab(st,'succ_unpushed')}：{len(snap['unpushed'])}；{lab(st,'succ_dirty')}：{', '.join(snap['dirty_files']) or '-'}\n{lab(st,'succ_tasks')}：{json.dumps(open_tasks,ensure_ascii=False)}\n{lab(st,'succ_requests')}：{json.dumps(related,ensure_ascii=False)}；{lab(st,'succ_leases')}：{', '.join(facts['leases']) or '-'}\n{lab(st,'succ_files_hint')}\n{lead_extra}"
-        written=[]
-        for name,data in (("BRIEF.md",brief),("words.md","\n".join(words+peer_words)+("\n" if words or peer_words else "")),("compact.md","\n".join(compact)+("\n" if compact else "")),("facts.json",json.dumps(facts,ensure_ascii=False,indent=2))):
-            path=base/name; ix=1
-            while path.exists(): path=base/f"{Path(name).stem}-{ix}{Path(name).suffix}"; ix+=1
-            path.write_text(data,encoding="utf-8"); written.append(str(path))
-        rawdir=base/"raw"; rawdir.mkdir(exist_ok=True); rawfile=rawdir/"old.jsonl"; ix=1
-        while rawfile.exists(): rawfile=rawdir/f"old-{ix}.jsonl"; ix+=1
-        rawfile.write_text("\n".join(json.dumps(_succ_scrub(row),ensure_ascii=False) for row in rows),encoding="utf-8")
-        file_hashes={str(p.relative_to(base)):hashlib.sha256(p.read_bytes()).hexdigest() for p in base.rglob("*") if p.is_file() and p.name!="MANIFEST.json"}
-        manifest={"id":hid,"seat":rec["seat"],"old_session":rec.get("old_session"),"candidates":rec.get("candidates"),"freeze":rec.get("freeze"),"cutoff_at":rec.get("cutoff_at"),"files":file_hashes,"gaps":gaps,"user_words":users,"rules":sum(x.startswith("★") for x in words),"compactions":compact_count,"redactions":sum(len(_SUCC_SECRET_RE.findall(json.dumps(x,ensure_ascii=False))) for x in rows)}
-        mf=base/"MANIFEST.json"; ix=1
-        while mf.exists(): mf=base/f"MANIFEST-{ix}.json"; ix+=1
-        mf.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding="utf-8")
+        base, gaps, written = _pack_session(d, st, hid, rec, a)
         rec.setdefault("pack_files", []).extend(written)
         rec.update(phase="packed",pack_dir=str(base)); _succ_save(d,st,rec,"pack"); print(lab(st,"succ_pack_line",path=base/'BRIEF.md',gap=lab(st,'succ_gap'),n=len(gaps))); return
     if a.action == "verify":
@@ -6433,6 +7012,7 @@ def cmd_succ(a):
             rec["ack_needed"] = sorted(n for n,t in st.get("threads",{}).items() if t.get("session_id") and t.get("status") != "archived")
             rec.update(successor=sid,phase="seated"); _succ_save(d,st,rec,"seat")
             card=lab(st,"succ_seat_card",sid=sid,screen=_verdict_word(st,screen.get('verdict')),score=rec['quiz'].get('score'),total=rec['quiz'].get('question_count'),threads=len(rec['ack_needed']),requests=sum(1 for x in st.get('requests',{}).values() if x.get('status') in ('open','dispatched','held')),questions=sum(1 for x in st.get('questions',[]) if not x.get('answered_at')))
+            card += "\n" + model_lab(st, "takeover_hint")
             if a.json: print(json.dumps({"handover":rec,"thread":None,"lead":st["lead"]},ensure_ascii=False))
             else: print(card)
             return
@@ -6647,6 +7227,7 @@ def _replay(st, e, project, notes, d):
             if e["snap_write_lock"] is None: st.pop("write_lock", None)
             else: st["write_lock"] = e["snap_write_lock"]
         if isinstance(e.get("snap_signals"), dict): st["signals"] = e["snap_signals"]
+        if isinstance(e.get("snap_models"), dict): st["models"] = e["snap_models"]
         if ev == "lead":
             if e.get("session"):
                 st["lead"]["session_id"] = e["session"]
@@ -6699,6 +7280,10 @@ def _replay(st, e, project, notes, d):
             st["model_deny"] = e["snap_model_deny"]
         if e.get("snap_archive") is not None:
             st["archive"] = e["snap_archive"]
+        if e.get("snap_archive_handoffs") is not None:
+            st["archive_handoffs"] = e["snap_archive_handoffs"]
+        if e.get("snap_archive_packs") is not None:
+            st["archive_packs"] = e["snap_archive_packs"]
         if e.get("snap_spawn_refusals") is not None:
             st["spawn_refusals"] = e["snap_spawn_refusals"]
         r = e.get("req")
@@ -8133,8 +8718,8 @@ def main():
     x.add_argument("--json", action="store_true"); x.add_argument("--all", action="store_true"); x.set_defaults(f=cmd_threads)
     x = s.add_parser("notice", help="record and handle turn notices")
     x.add_argument("action", choices=["add", "list", "done"]); x.add_argument("--thread"); x.add_argument("--session")
-    x.add_argument("--ref"); x.add_argument("--kind", choices=["turn-end", "done", "blocked", "failed"])
-    x.add_argument("--text"); x.add_argument("--json", action="store_true"); x.add_argument("--all", action="store_true")
+    x.add_argument("--ref"); x.add_argument("--kind", choices=["turn-end", "done", "blocked", "failed", "needs-user"])
+    x.add_argument("--text", "--note", dest="text"); x.add_argument("--json", action="store_true"); x.add_argument("--all", action="store_true")
     x.set_defaults(f=cmd_notice)
     x = s.add_parser("nudge", help="record one rate-limited thread nudge")
     x.add_argument("thread"); x.add_argument("--text"); x.set_defaults(f=cmd_nudge)
@@ -8144,6 +8729,7 @@ def main():
                    help="followups <id> [--apply]: one task per finding left at a capped review; reviews -: the table")
     x.add_argument("id", nargs="?", default="-")
     x.add_argument("--title")
+    x.add_argument("--brief")
     x.add_argument("--urgent", action="store_true")
     x.add_argument("--urgent-minutes", type=int)
     x.add_argument("--owner")
@@ -8170,13 +8756,16 @@ def main():
     x.add_argument("--remaining", metavar="FINDINGS", help="with --review pass or capped: important findings left, ';'-separated")
     x.add_argument("--apply", action="store_true", help="followups: add the tasks (default: dry run)")
     x.add_argument("--reviewer", help="who reviewed (not the owner): lead-subagent, review thread name, user")
+    x.add_argument("--outside", action="store_true", help="require reviewer outside all task participants")
     x.add_argument("--review-note")
     x.add_argument("--checks", choices=["pass", "fail", "none"], help="tests / checks result on the branch")
     x.add_argument("--skip-review", metavar="REASON", help="mark done without review (recorded; needs --user-said)")
     x.add_argument("--user-said", metavar="WORDS", help="the user's words: needed for --skip-review and dropping")
+    x.add_argument("--req"); x.add_argument("--beyond"); x.add_argument("--override")
+    x.add_argument("--work-kind", choices=MODEL_TYPES, help="the kind of work (as in model-log): an unsuitable model is skipped, one tier up")
     x.set_defaults(f=cmd_task)
     x = s.add_parser("task-msg", help="format a task dispatch message")
-    x.add_argument("id"); x.add_argument("--dispatch", action="store_true"); x.set_defaults(f=cmd_task_msg)
+    x.add_argument("id"); x.add_argument("--dispatch", action="store_true"); x.add_argument("--override"); x.set_defaults(f=cmd_task_msg)
     x = s.add_parser("promise", help="record and track commitments")
     x.add_argument("action", choices=["add", "done", "list"]); x.add_argument("text", nargs="?", default=""); x.add_argument("--req"); x.add_argument("--evidence"); x.add_argument("id", nargs="?"); x.set_defaults(f=cmd_promise)
 
@@ -8199,6 +8788,10 @@ def main():
                    "recorded once per (thread, name); a repeat is refused so it is not handled twice")
     x.add_argument("--default", type=int, metavar="N", help="apply a reversible default to question N")
     x.add_argument("--undoable", action="store_true")
+    x.add_argument("--proposal", help="record a proposal waiting for the user's answer")
+    x.add_argument("--external", action="store_true")
+    x.add_argument("--internal", help="reason an external-looking description is actually internal")
+    x.add_argument("--override")
     x.add_argument("--answer", type=int, metavar="N", help="mark question N (as numbered on the board, from 1) "
                    "answered; the answer text is optional")
     x.set_defaults(f=cmd_ask)
@@ -8212,6 +8805,9 @@ def main():
     x.add_argument("--standing", action="store_true", help="a long-term requirement of the user's: every TASK "
                    "from task-msg carries it")
     x.add_argument("--standing-list", action="store_true", help="list the standing requirements")
+    x.add_argument("--scope")
+    x.add_argument("--pref", action="store_true")
+    x.add_argument("--boundary")
     x.set_defaults(f=cmd_memory)
     x = s.add_parser("log", help="append a note to log.jsonl")
     x.add_argument("text")
@@ -8219,6 +8815,7 @@ def main():
     x = s.add_parser("board", help="render and print BOARD.md; --share: the user's phone view (SHARE.md)")
     x.add_argument("--share", action="store_true", help="deliverables, requests, waiting items, issues and every "
                    "requirement by phase/category, for a doc the user opens (IL-13, IL-38)")
+    x.add_argument("--all", action="store_true", help="show folded, resolved, archived and empty seats")
     x.set_defaults(f=cmd_board)
     x = s.add_parser("card", help="a report card for the user: first line, done / doing / waiting, ledger line")
     x.add_argument("--kind", required=True, choices=list(CARD_KINDS),
@@ -8235,6 +8832,7 @@ def main():
     x.add_argument("which", nargs="?", choices=list(DOC_KINDS))
     x.add_argument("--link", metavar="URL")
     x.add_argument("--note", help="one line saying what the document is")
+    x.add_argument("--all", action="store_true")
     x.set_defaults(f=cmd_docs)
     s.add_parser("intro", help="what to tell the user once the project is set up").set_defaults(f=cmd_intro)
     x = s.add_parser("issue", help="known issues: add / set / list (IL-20)")
@@ -8244,6 +8842,7 @@ def main():
     x.add_argument("--status", help=f"set: one of {', '.join(ISSUE_STATUSES)}")
     x.add_argument("--ref", help="branch@commit of the fix")
     x.add_argument("--all", action="store_true", help="list: include verified")
+    x.add_argument("--new", action="store_true"); x.add_argument("--also"); x.add_argument("--note")
     x.set_defaults(f=cmd_issue)
     x = s.add_parser("info", help="format a lead INFO broadcast for the live threads")
     x.add_argument("text", nargs="?", default="")
@@ -8282,7 +8881,11 @@ def main():
     x.add_argument("session_id", nargs="?", default="-")
     x.add_argument("--json", action="store_true")
     x.add_argument("--stopped", default="", help="verify: evidence that this session stopped")
+    x.add_argument("--handed-to", help="transfer open work to a thread or lead")
+    x.add_argument("--park", help="record open work as parked with a reason")
     x.add_argument("--user-said", help="the user's explicit decision for disconnected/idle-old sessions")
+    x.add_argument("--transcript", action="append", default=[])
+    x.add_argument("--config-dir", action="append", default=[])
     checks = x.add_mutually_exclusive_group()
     checks.add_argument("--still-archived", action="store_true")
     checks.add_argument("--not-archived", action="store_true")
@@ -8311,6 +8914,7 @@ def main():
     x.add_argument("seat"); x.add_argument("--transcript"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_signals)
     x = s.add_parser("quota", help="read local usage windows and quota tier (lead)")
     x.add_argument("--due", action="store_true", help="report whether a quota check is due")
+    x.add_argument("--weekly", action="store_true")
     x.add_argument("--config-dir", action="append", metavar="DIR")
     x.add_argument("--codex-dir", metavar="DIR")
     x.add_argument("--json", action="store_true")
@@ -8328,7 +8932,12 @@ def main():
     x.add_argument("--user-said")
     x.set_defaults(f=cmd_model_log)
     x = s.add_parser("opening", help="show the opening policy questions")
-    x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_opening)
+    x.add_argument("--json", action="store_true"); x.add_argument("--takeover", action="store_true"); x.set_defaults(f=cmd_opening)
+    x = s.add_parser("model-status", help="record model availability")
+    x.add_argument("model", choices=MODELS); group = x.add_mutually_exclusive_group(required=True)
+    group.add_argument("--down", action="store_true"); group.add_argument("--up", action="store_true")
+    x.add_argument("--why", choices=["quota", "connection", "other"]); x.add_argument("--until"); x.add_argument("--note")
+    x.set_defaults(f=cmd_model_status)
     x = s.add_parser("selfcheck", help="check this lead session and project setup")
     x.add_argument("--mode"); x.add_argument("--model"); x.add_argument("--served-model"); x.add_argument("--served"); x.add_argument("--desktop", action="store_true"); x.add_argument("--effort"); x.add_argument("--want-effort")
     x.add_argument("--seats-used", type=int); x.add_argument("--seats-max", type=int, default=32)
@@ -8351,6 +8960,8 @@ def main():
     x.add_argument("--status", help="set: request status")
     x.add_argument("--reason"); x.add_argument("--evidence")
     x.add_argument("--remark", action="store_true")
+    x.add_argument("--kind", choices=["request", "example", "remark", "hypothetical"], default="request")
+    x.add_argument("--override", metavar="WORDS", help="add: the user's words that allow a never-raise topic")
     x.add_argument("--where"); x.add_argument("--followup"); x.add_argument("--text")
     x.add_argument("--phase", help="add/set: the phase it belongs to, for the full requirement list (IL-38)")
     x.add_argument("--category", help="add/set: e.g. goal, constraint, feature (IL-38)")

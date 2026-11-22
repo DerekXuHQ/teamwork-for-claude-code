@@ -41,6 +41,9 @@ Every message you send with `send_message` starts with one header line, then the
 
 The task-id slot holds exactly one task id from the board (`T3`), or `-` when the message is about no board task (a peer's HANDOFF, a ROSTER). Never a list, never a sub-step or probe id; if two tasks are involved, use the main one and name the other in the body.
 
+Messages between sessions are plain receipts. Never start them with a big-picture marker (`[Big picture`, `【大局观`); that header belongs only on a reply to a new request from the user (B11). Before you report that something is missing or not supported, say how you tested it: what you ran, where, and what came back. `check-msg` warns when either rule is broken (J6).
+If the platform's safety check stops one of your steps, do not look for another way to do it. Report it to the lead in one line, and the user clicks it themselves (D6).
+
 | TYPE | When |
 |---|---|
 | `ACK` | You received a TASK, FOLLOWUP or HANDOFF and are starting. One line that doubles as a health check: the task id, your worktree (rc) or branch (cloud), and any tool or file you cannot reach (`-` if none). Work on what you can; if the gap stops the task, send `BLOCKED`. Cloud threads: your ACK is the STATUS block that ends your first turn on it, with the task id in `task:` and the gap in `couldnt_reach:`. |

@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # scripts/: quota.py n
 import quota  # noqa: E402
 
 TW = Path(__file__).resolve().parent / "tw.py"
+# bash-guard logs its own errors: the tests never write (or count) the real ~/.cache/teamwork/guard-errors.jsonl
+_GUARD_LOG_DIR = tempfile.TemporaryDirectory(prefix="tw-guard-log-")
+os.environ["TW_GUARD_LOG"] = str(Path(_GUARD_LOG_DIR.name) / "guard-errors.jsonl")
 WALK = ["planned", "approved", "dispatched", "working", "review", "done"]
 
 
@@ -4783,5 +4786,516 @@ class ModelLog(TwCase):
         self.assertEqual(self.state()["model_deny"][0]["model"], "opus")
 
 
+
+class LedgerStates(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.tw("prefs", "--set", "language=zh")
+
+    def test_request_transitions_evidence_reason_and_close_landed(self):
+        self.tw("req", "add", "decision")
+        self.tw("req", "set", "R1", "--status", "waiting_user")
+        self.tw("req", "set", "R1", "--status", "open")
+        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "landed", ok=False).returncode, 0)
+        self.tw("req", "set", "R1", "--status", "wont", "--reason", "scope")
+        self.tw("req", "set", "R1", "--status", "open")
+        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "wont", ok=False).returncode, 0)
+        self.tw("req", "set", "R1", "--status", "reported")
+        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "landed", ok=False).returncode, 0)
+        self.tw("req", "set", "R1", "--status", "landed", "--evidence", "abc")
+        self.tw("req", "close", "R1", "--user-said", "accepted")
+        self.tw("rebuild")
+        self.assertEqual(self.state()["requests"]["R1"]["status"], "closed")
+
+    def test_remark_receipt_board_and_promotion(self):
+        out = self.tw("req", "add", "note", "--remark").stderr
+        self.assertIn("备注 R1", out)
+        self.assertIn("备注（不派）", (self.dir / ".teamwork" / "BOARD.md").read_text())
+        self.assertNotIn("R1", self.tw("req", "list").stdout)
+        self.tw("req", "set", "R1", "--status", "open")
+        self.assertIn("R1", self.tw("req", "list").stdout)
+
+    def test_migrate_preview_apply_and_repeat(self):
+        self.tw("req", "add", "已合并 feature", "--where", "commit")
+        self.tw("req", "set", "R1", "--status", "reported")
+        preview = json.loads(self.tw("req", "migrate").stdout.split("migrate:")[0])
+        self.assertEqual(preview["R1"]["suggested"], "landed")
+        self.tw("req", "migrate", "--apply", "--user-said", "old ledger")
+        self.assertEqual(self.state()["requests"]["R1"]["status"], "landed")
+        self.assertEqual(json.loads(self.tw("req", "migrate").stdout.split("migrate:")[0]), {})
+
+    def test_default_requires_undoable_and_board(self):
+        self.tw("ask", "choose")
+        self.assertNotEqual(self.tw("ask", "--default", "1", "choose A", ok=False).returncode, 0)
+        self.tw("ask", "--default", "1", "choose A", "--undoable")
+        board = (self.dir / ".teamwork" / "BOARD.md").read_text()
+        self.assertIn("按默认做：choose A（可改）", board)
+        self.assertFalse(self.state()["questions"][0]["answered"])
+        self.tw("ask", "--answer", "1", "yes")
+        self.assertTrue(self.state()["decisions"][0]["answered"])
+        self.tw("rebuild")
+        self.assertTrue(self.state()["decisions"][0]["answered"])
+
+    def test_promise_evidence_and_rebuild(self):
+        self.tw("promise", "add", "deliver", "--req", "R1") if "R1" in self.state()["requests"] else self.tw("promise", "add", "deliver")
+        self.assertNotEqual(self.tw("promise", "done", "P1", ok=False).returncode, 0)
+        self.tw("promise", "done", "P1", "--evidence", "commit")
+        self.tw("rebuild")
+        self.assertEqual(self.state()["promises"][0]["status"], "done")
+
+    def test_dispatch_version_and_task_message_and_deliverable_dedupe(self):
+        self.tw("thread", "add", "worker")
+        self.tw("plan", "approve", "--user-said", "yes")
+        self.tw("task", "add", "T1", "--title", "goal", "--owner", "worker", "--accept", "done")
+        first = self.tw("task-msg", "T1", "--dispatch")
+        self.assertIn("Dispatch: v1", first.stdout)
+        self.assertEqual(self.state()["tasks"]["T1"]["dispatch_v"], 1)
+        self.tw("deliverable", "add", "d", "--task", "T1", "--link", "one")
+        out = self.tw("deliverable", "add", "d2", "--task", "T1", "--link", "two")
+        self.assertIn("updated D1 (T1 v1)", out.stderr)
+        self.assertEqual(len(self.state()["deliverables"]), 1)
+        self.assertEqual(self.state()["deliverables"][0]["link"], "two")
+
+
+class FeatureLedger(TwCase):
+    def test_feature_add_set_list_and_rebuild(self):
+        self.tw("req", "add", "need feature")
+        self.assertNotEqual(self.tw("feature", "add", ok=False).returncode, 0)
+        self.tw("feature", "add", "Feature one", "--phase", "P1", "--req", "R1")
+        self.assertNotEqual(self.tw("feature", "set", "F1", "--status", "landed", ok=False).returncode, 0)
+        self.tw("feature", "set", "F1", "--status", "landed", "--evidence", "commit abc")
+        self.tw("rebuild")
+        self.assertEqual(self.state()["features"]["F1"]["status"], "landed")
+        self.tw("prefs", "--set", "language=zh")
+        self.assertIn("功能清单", self.tw("board").stdout)
+        self.assertIn("功能清单", self.tw("board", "--share").stdout)
+        self.assertIn("F1", self.tw("feature", "list").stdout)
+
+    def test_reconcile_wrapup_sprint(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("req", "add", "未分派")
+        self.assertNotEqual(self.tw("reconcile", "--strict", ok=False).returncode, 0)
+        self.assertEqual(self.tw("reconcile").returncode, 0)
+        before = self.state()["reconcile"]
+        self.tw("rebuild")
+        self.assertEqual(self.state()["reconcile"], before)
+        self.assertIn("收工自查", self.tw("wrapup").stdout)
+        self.assertIn("|", self.tw("sprint").stdout)
+        self.assertNotEqual(self.tw("prefs", "--set", "reconcile_every=invalid", ok=False).returncode, 0)
+
+
+class ReportCards(TwCase):
+    """T56 block 3: report cards, document links, intro, the progress chain, check-msg --user, standing
+    requirements, the bash-guard error log and the merged mark."""
+
+    T0, T1, T2 = "2026-03-01T09:00:00", "2026-03-02T09:00:00", "2026-03-03T09:00:00"
+
+    def at(self, when):
+        self.env["TW_NOW"] = when
+
+    def fill(self):
+        """Before T1: R1 reported, F1 landed. After T1: R2 waiting, R3 dropped, F2 building, T1 dispatched,
+        one open question on its default, one GPT entry in the model log."""
+        self.at(self.T0)
+        self.tw("thread", "add", "worker")
+        self.tw("plan", "approve", "--user-said", "yes")
+        self.tw("req", "add", "first thing")
+        self.tw("req", "set", "R1", "--status", "reported")
+        self.tw("feature", "add", "Old feature", "--req", "R1")
+        self.tw("feature", "set", "F1", "--status", "landed", "--evidence", "x")
+        self.at(self.T2)
+        self.tw("req", "add", "second thing")
+        self.tw("req", "set", "R2", "--status", "waiting_user")
+        self.tw("req", "add", "third thing")
+        self.tw("req", "drop", "R3", "--user-said", "never mind")
+        self.tw("feature", "add", "New feature", "--req", "R2")
+        self.tw("feature", "set", "F2", "--status", "building")
+        self.tw("task", "add", "T1", "--title", "build it", "--owner", "worker", "--accept", "works")
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        self.tw("ask", "which colour")
+        self.tw("ask", "--default", "1", "blue", "--undoable")
+        self.tw("model-log", "--task", "T1", "--type", "code", "--model", "gpt", "--result", "ok", "--why", "fixture")
+
+    def test_card_english_sections_ledger_line_and_since(self):
+        self.fill()
+        out = self.tw("card", "--kind", "done", "--head", "Shipped the thing", "--since", self.T1,
+                      "--link", "https://example.test/pr").stdout
+        self.assertEqual(out.splitlines()[0], "[Delivery] Shipped the thing")
+        for head in ("## Done", "## In progress", "## Waiting on you"):
+            self.assertIn(head, out)
+        done = out.split("## Done")[1].split("## In progress")[0]
+        self.assertNotIn("Old feature", done)  # landed before --since
+        self.assertNotIn("first thing", done)
+        doing = out.split("## In progress")[1].split("## Waiting on you")[0]
+        self.assertIn("F2 New feature", doing)
+        self.assertIn("T1 build it", doing)
+        waiting = out.split("## Waiting on you")[1]
+        self.assertIn("R2 second thing", waiting)
+        self.assertIn("which colour (going ahead with the default: blue)", waiting)
+        self.assertEqual(out.splitlines()[-1],
+                         "Ledger +2/−1 · waiting on you: 2 · GPT did 1 · https://example.test/pr")
+        everything = json.loads(self.tw("card", "--kind", "status", "--head", "x", "--json").stdout)
+        self.assertEqual(sorted(everything), ["doing", "done", "head", "kind", "waiting"])  # English keys, no ledger
+        self.assertIn("F1 Old feature", everything["done"])
+        self.assertIn("R1 first thing", everything["done"])
+
+    def test_ledger_line_only_when_asked_for(self):
+        self.tw("req", "add", "one")
+        line = "Ledger +"
+        self.assertNotIn(line, self.tw("card", "--kind", "status", "--head", "h").stdout)  # default: wrapup
+        self.assertIn(line, self.tw("card", "--kind", "status", "--head", "h", "--ledger-line").stdout)
+        self.assertIn(line, self.tw("card", "--kind", "done", "--head", "h").stdout)
+        self.tw("prefs", "--set", "ledger_line_every=report")
+        for kind in ("compare", "plan", "read", "status"):
+            self.assertIn(line, self.tw("card", "--kind", kind, "--head", "h").stdout, kind)
+        self.assertNotEqual(self.tw("prefs", "--set", "ledger_line_every=always", ok=False).returncode, 0)
+        self.assertEqual(self.state()["prefs"]["ledger_line_every"], "report")
+
+    def test_card_chinese_kinds_and_labels(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("req", "add", "要做功能")
+        self.tw("docs", "set", "ledger", "--link", "https://example.test/ledger")
+        for kind, name in (("compare", "对照分析"), ("plan", "新方案"), ("read", "素材已读"), ("done", "交付"),
+                           ("status", "进展")):
+            self.assertEqual(self.tw("card", "--kind", kind, "--head", "结论").stdout.splitlines()[0], f"[{name}] 结论")
+        out = self.tw("card", "--kind", "done", "--head", "已完成").stdout
+        for word in ("## 做完了", "## 在做", "## 等你", "（无）"):
+            self.assertIn(word, out)
+        self.assertEqual(out.splitlines()[-1], "台账 +1/−0 · 等你 0 件 · GPT 做了 0 · https://example.test/ledger")
+
+    def test_last_report_at_and_since_last_report(self):
+        self.at(self.T0)
+        self.tw("req", "add", "early")
+        self.assertNotIn("last_report_at", self.state())
+        self.at(self.T1)
+        self.tw("card", "--kind", "status", "--head", "first card")
+        self.assertTrue(self.state()["last_report_at"].startswith("2026-03-02T09:00:00"))
+        self.at(self.T2)
+        self.tw("req", "add", "late")
+        out = self.tw("card", "--kind", "done", "--head", "second", "--since", "last-report").stdout
+        self.assertIn("Ledger +1/−0", out)  # only the request added after the first card
+        self.assertTrue(self.state()["last_report_at"].startswith("2026-03-03T09:00:00"))
+        self.assertIn("--since", self.tw("card", "--kind", "done", "--head", "x", "--since", "yesterday", ok=False).stderr)
+
+    def test_required_args(self):
+        self.assertNotEqual(self.tw("card", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("card", "--kind", "done", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("card", "--kind", "other", "--head", "x", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("docs", "set", "board", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("docs", "set", "--link", "https://example.test/x", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("docs", "set", "notes", "--link", "https://example.test/x", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("memory", "--standing", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("memory", ok=False).returncode, 0)
+
+    def test_docs_set_list_and_board_top(self):
+        self.assertEqual(self.tw("docs", "list").stdout.strip(), "(none)")
+        self.assertNotIn("example.test", self.tw("board").stdout)
+        self.tw("docs", "set", "board", "--link", "https://example.test/board", "--note", "where things stand")
+        self.tw("docs", "set", "features", "--link", "https://example.test/features")
+        self.tw("docs", "set", "board", "--link", "https://example.test/board2", "--note", "where things stand")
+        listed = self.tw("docs", "list").stdout
+        self.assertIn("Board (board): https://example.test/board2 — where things stand", listed)
+        self.assertIn("Features (features): https://example.test/features", listed)
+        self.assertNotIn("ledger", listed.lower())
+        board = self.tw("board").stdout
+        self.assertIn("- [Board](https://example.test/board2) — where things stand", board)
+        self.assertLess(board.index("example.test/board2"), board.index("## "))  # at the top
+        self.tw("prefs", "--set", "language=zh")
+        self.assertIn("- [看板](https://example.test/board2)", self.tw("board").stdout)
+        self.assertIn("功能清单 (features)", self.tw("docs", "list").stdout)
+
+    def test_intro(self):
+        self.tw("req", "add", "one")
+        self.tw("req", "add", "two")
+        self.tw("feature", "add", "Feature one", "--req", "R1")
+        out = self.tw("intro").stdout
+        self.assertIn("Recorded 2 requests and 1 features", out)
+        self.assertIn("Your requests (not closed)", out)
+        self.assertIn("See: BOARD.md", out)
+        self.tw("docs", "set", "board", "--link", "https://example.test/board")
+        self.tw("prefs", "--set", "language=zh")
+        out = self.tw("intro").stdout
+        self.assertIn("已记下 2 件事、1 个功能", out)
+        self.assertIn("看板栏目：", out)
+        self.assertIn("看板 https://example.test/board", out)
+        self.assertNotIn("BOARD.md", out)
+
+    def chain(self, rid="R1"):
+        lines = self.tw("board").stdout.splitlines()
+        i = next(n for n, x in enumerate(lines) if x.startswith(f"- **{rid}**"))
+        return lines[i + 1].strip()
+
+    def test_progress_chain_and_merged_mark(self):
+        self.tw("thread", "add", "worker")
+        self.tw("plan", "approve", "--user-said", "yes")
+        self.tw("task", "add", "T1", "--title", "build", "--owner", "worker", "--accept", "works")
+        self.tw("req", "add", "make it", "--tasks", "T1")
+        self.assertEqual(self.chain(), "- recorded✓ → dispatched· → accepted· → review· → merged· → reported·")
+        self.tw("task", "set", "T1", "--status", "dispatched", walk=False)
+        self.assertEqual(self.chain(), "- recorded✓ → dispatched✓ → accepted· → review· → merged· → reported·")
+        self.tw("task", "set", "T1", "--status", "working", walk=False)
+        self.assertEqual(self.chain(), "- recorded✓ → dispatched✓ → accepted✓ → review· → merged· → reported·")
+        self.tw("task", "set", "T1", "--status", "review", walk=False)
+        self.assertEqual(self.chain(), "- recorded✓ → dispatched✓ → accepted✓ → review✓ → merged· → reported·")
+        self.assertNotEqual(self.tw("task", "set", "T1", "--merged", "not-a-sha", ok=False).returncode, 0)
+        self.assertNotIn("merged_at", self.state()["tasks"]["T1"])
+        self.tw("task", "set", "T1", "--merged", "ABC1234")
+        k = self.state()["tasks"]["T1"]
+        self.assertEqual(k["merged_sha"], "abc1234")
+        self.assertTrue(k["merged_at"])
+        self.assertEqual(self.chain(), "- recorded✓ → dispatched✓ → accepted✓ → review✓ → merged✓ → reported·")
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "worker/subagent")
+        self.tw("task", "set", "T1", "--status", "done", walk=False)
+        self.tw("req", "set", "R1", "--status", "reported")
+        self.assertEqual(self.chain(), "- recorded✓ → dispatched✓ → accepted✓ → review✓ → merged✓ → reported✓")
+        self.tw("prefs", "--set", "language=zh")
+        self.assertEqual(self.chain(), "- 记台账✓ → 派✓ → 接单✓ → 评审✓ → 合并✓ → 回报✓")
+        self.tw("req", "close", "R1", "--user-said", "fine")
+        self.assertNotIn("记台账", self.tw("board").stdout)  # closed requests leave the board, chain included
+
+    def user_msg(self, text, *extra, ok=True):
+        f = self.dir / "user-msg.md"
+        f.write_text(text, encoding="utf-8")
+        return self.tw("check-msg", "--user", str(f), *extra, ok=ok)
+
+    def test_check_msg_user(self):
+        clean = self.user_msg("The login page is done. 2026 plans and 1234567 users are unchanged; see the board.")
+        self.assertEqual((clean.stdout.strip(), clean.stderr), ("ok (user)", ""))
+        for text, kind in (("Fixed in a1b2c3d, ready to try.", "commit-id"),
+                           ("I ran:\n$ python3 run.py\nand it passed", "command-output"),
+                           ("It failed with Traceback (most recent call last): ...", "command-output"),
+                           ("Here:\n```bash\nls\n```", "command-output"),
+                           ("The file is at /home/someone/project/a.txt", "local-path"),
+                           ("Logs are in /home/someone/logs", "local-path"),
+                           ("Saved to C:\\Users\\someone\\a.txt", "local-path")):
+            r = self.user_msg(text)  # a warning: exit 0
+            self.assertIn(f"warning {kind}", r.stderr, text)
+            self.assertEqual(self.user_msg(text, "--strict", ok=False).returncode, 1, text)
+        self.assertEqual(self.user_msg("All good.", "--strict").returncode, 0)
+        data = json.loads(self.user_msg("Fixed in a1b2c3d at /home/someone/x", "--json").stdout)
+        self.assertEqual((data["ok"], data["mode"]), (False, "user"))
+        self.assertEqual({x["kind"] for x in data["findings"]}, {"commit-id", "local-path"})
+        self.assertNotEqual(self.user_msg("x", "--prompt", ok=False).returncode, 0)
+
+    def test_standing_in_task_msg_and_check_msg(self):
+        self.tw("thread", "add", "worker")
+        self.tw("plan", "approve", "--user-said", "yes")
+        self.tw("task", "add", "T1", "--title", "goal", "--owner", "worker", "--accept", "works")
+        self.assertNotIn("Standing:", self.tw("task-msg", "T1").stdout)
+        self.assertEqual(self.tw("memory", "--standing-list").stdout.strip(), "(none)")
+        msg = self.dir / "task.md"
+        msg.write_text(self.tw("task-msg", "T1").stdout, encoding="utf-8")
+        self.assertEqual(self.tw("check-msg", str(msg)).stdout.strip(), "ok (message)")  # nothing standing yet
+        self.assertEqual(self.tw("memory", "--standing", "Reports in  plain\nwords").stdout.strip(),
+                         "Standing: Reports in plain words")
+        self.tw("memory", "--standing", "No new dependencies")
+        self.tw("memory", "--standing", "No new dependencies")  # said twice: kept once
+        self.assertEqual(self.state()["standing"], ["Reports in plain words", "No new dependencies"])
+        self.assertEqual(self.tw("memory", "--standing-list").stdout.splitlines(),
+                         ["- Reports in plain words", "- No new dependencies"])
+        self.assertNotEqual(self.tw("memory", "x", "--standing", "--never-raise", ok=False).returncode, 0)
+        r = self.tw("check-msg", str(msg))  # the old message carries none: a warning, not a failure
+        self.assertIn("warning standing:", r.stdout)
+        out = self.tw("task-msg", "T1").stdout
+        self.assertEqual(out.splitlines()[-2:], ["Standing: Reports in plain words", "Standing: No new dependencies"])
+        msg.write_text(out, encoding="utf-8")
+        self.assertEqual(self.tw("check-msg", str(msg)).stdout.strip(), "ok (message)")
+        self.tw("prefs", "--set", "language=zh")
+        out = self.tw("task-msg", "T1").stdout
+        self.assertIn("长期要求：Reports in plain words", out)
+        msg.write_text(out, encoding="utf-8")
+        self.assertNotIn("standing", self.tw("check-msg", str(msg)).stdout)
+
+    def guard(self, raw, **env):
+        return subprocess.run([sys.executable, str(TW), "bash-guard"], input=raw, capture_output=True, text=True,
+                              cwd=self.dir, env={**self.env, **env})
+
+    def test_bash_guard_error_log_and_selfcheck_count(self):
+        log = self.dir / "guard-logs" / "nested" / "guard-errors.jsonl"  # the folder does not exist yet
+        self.env["TW_GUARD_LOG"] = str(log)
+        call = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}})
+        self.assertEqual((self.guard(call).returncode, self.guard(call).stdout), (0, ""))
+        self.assertFalse(log.exists())  # ordinary work writes nothing
+        self.assertNotIn("guard_errors", self.tw("selfcheck").stdout)
+        self.at("2026-03-10T09:00:00")
+        r = self.guard(call, TW_TEST_GUARD_FAULT="boom " + "x" * 400)  # a bug inside the guard: still allowed
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        r = self.guard("not json")
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        rows = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([x["type"] for x in rows], ["RuntimeError", "JSONDecodeError"])
+        self.assertTrue(rows[0]["at"].startswith("2026-03-10T09:00:00"))
+        self.assertTrue(rows[0]["message"].startswith("boom"))
+        self.assertLessEqual(len(rows[0]["message"]), 200)
+        with log.open("a", encoding="utf-8") as f:  # an old entry and a broken line are not counted
+            f.write(json.dumps({"at": "2026-02-01T09:00:00+00:00", "type": "X", "message": "old"}) + "\nnot json\n")
+        self.at("2026-03-12T09:00:00")
+        out = self.tw("selfcheck").stdout
+        self.assertIn("guard_errors: bash-guard had 2 errors in the last 7 days and allowed the command", out)
+        item = next(x for x in json.loads(self.tw("selfcheck", "--json").stdout)["items"] if x["item"] == "guard_errors")
+        self.assertIs(item["ok"], False)
+        self.tw("prefs", "--set", "language=zh")
+        self.assertIn("bash-guard 近 7 天出错 2 次，已照常放行", self.tw("selfcheck", "--brief").stdout)
+        self.at("2026-03-20T09:00:00")  # more than 7 days later: nothing to report
+        self.assertNotIn("guard_errors", self.tw("selfcheck").stdout)
+        blocked = self.dir / "a-file"
+        blocked.write_text("x")
+        r = self.guard(call, TW_TEST_GUARD_FAULT="boom", TW_GUARD_LOG=str(blocked / "sub" / "log.jsonl"))
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))  # the log cannot be written: still silent
+
+    def test_rebuild_keeps_block3_state(self):
+        self.fill()
+        self.tw("req", "link", "R2", "T1")
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("task", "set", "T1", "--merged", "abc1234def")
+        self.tw("docs", "set", "board", "--link", "https://example.test/board", "--note", "the board")
+        self.tw("docs", "set", "ledger", "--link", "https://example.test/ledger")
+        self.tw("memory", "--standing", "Reports in plain words")
+        self.tw("card", "--kind", "done", "--head", "shipped")
+        before, board = self.state(), self.tw("board").stdout
+        self.tw("rebuild")
+        after = self.state()
+        for key in ("docs", "standing", "last_report_at"):
+            self.assertEqual(after[key], before[key], key)
+        self.assertEqual(after["tasks"]["T1"]["merged_sha"], "abc1234def")
+        self.assertEqual(after["tasks"]["T1"]["merged_at"], before["tasks"]["T1"]["merged_at"])
+        self.assertEqual(after["prefs"]["ledger_line_every"], "wrapup")
+        self.assertEqual(self.tw("board").stdout, board)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewRound1(TwCase):
+    """T56 review round 1: crashes and side doors around the user's yes."""
+    def setUp(self):
+        super().setUp()
+        self.tw("prefs", "--set", "language=zh")
+
+    def test_feature_set_links_and_naive_times(self):
+        self.tw("req", "add", "a"); self.tw("req", "add", "b")
+        self.tw("feature", "add", "x", "--req", "R1")
+        self.tw("feature", "set", "F1", "--req", "R2")
+        self.assertEqual(self.state()["features"]["F1"]["reqs"], ["R2"])
+        self.tw("feature", "set", "F1", "--status", "landed", "--evidence", "abc")
+        self.assertIn("F1", self.tw("sprint").stdout)
+        self.assertIn("F1", self.tw("sprint", "--since", "2020-01-01").stdout)
+        self.assertIn("F1", self.tw("feature", "list", "--done-since", "2020-01-01").stdout)
+        self.assertNotEqual(self.tw("sprint", "--since", "garbage", ok=False).returncode, 0)
+        self.assertNotEqual(self.tw("feature", "set", "F1", "--status", "dropped", "--reason", " ", ok=False).returncode, 0)
+
+    def test_no_side_door_to_dispatch(self):
+        self.tw("task", "add", "T1", "--title", "work")
+        self.tw("req", "add", "p")
+        self.tw("req", "set", "R1", "--status", "proposed")
+        self.tw("req", "set", "R1", "--status", "waiting_user")
+        self.tw("req", "link", "R1", "T1", ok=False)
+        self.assertNotEqual(self.state()["requests"]["R1"]["status"], "dispatched")
+        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "dispatched", ok=False).returncode, 0)
+        self.tw("req", "set", "R1", "--status", "dispatched", "--user-said", "go")
+
+    def test_default_answer_is_not_approval(self):
+        self.tw("ask", "db?", "--from", "core")
+        self.tw("ask", "--default", "1", "sqlite", "--undoable")
+        self.tw("ask", "--answer", "1", "use pg")
+        dec = self.state()["decisions"][0]
+        self.assertTrue(dec["answered"]); self.assertEqual(dec["answer"], "use pg"); self.assertNotIn("confirmed", dec)
+
+    def test_migrate_json_only_records_words(self):
+        self.tw("req", "add", "x", "--followup", "等你定")
+        self.tw("req", "set", "R1", "--status", "reported")
+        self.tw("req", "add", "y", "--followup", "不做了")
+        self.tw("req", "set", "R2", "--status", "reported")
+        json.loads(self.tw("req", "migrate").stdout)
+        self.tw("req", "migrate", "--apply", "--only", "R1", "--user-said", "按建议")
+        st = self.state()["requests"]
+        self.assertEqual(st["R1"]["status"], "waiting_user"); self.assertEqual(st["R2"]["status"], "reported")
+        self.assertEqual(st["R1"]["migrated"]["user_said"], "按建议")
+
+    def test_promise_and_merged_guards(self):
+        self.assertNotEqual(self.tw("promise", "add", "", ok=False).returncode, 0)
+        self.tw("promise", "add", "report back")
+        self.tw("promise", "done", "P1", "--evidence", "sent")
+        self.assertNotEqual(self.tw("promise", "done", "P1", "--evidence", "again", ok=False).returncode, 0)
+        self.tw("task", "add", "T1", "--title", "work")
+        self.assertNotEqual(self.tw("task", "set", "T1", "--merged", "abc1234", ok=False).returncode, 0)
+
+
+class ReviewRound2(TwCase):
+    """T56 review round 2: the user's yes survives detours through waiting_user, wont and open."""
+    def test_detours_keep_the_gate(self):
+        self.tw("task", "add", "T1", "--title", "work")
+        for i, path in enumerate((["proposed", "waiting_user", "open"], ["proposed", "wont", "open"]), 1):
+            self.tw("req", "add", f"p{i}")
+            for st in path:
+                self.tw("req", "set", f"R{i}", "--status", st, *(["--reason", "r"] if st == "wont" else []))
+            self.tw("req", "link", f"R{i}", "T1", ok=False)
+            self.assertEqual(self.state()["requests"][f"R{i}"]["status"], "open")
+            self.tw("req", "link", f"R{i}", "T1", "--user-said", "go")
+            self.assertEqual(self.state()["requests"][f"R{i}"]["status"], "dispatched")
+        self.tw("req", "add", "q")
+        self.tw("req", "set", "R3", "--status", "reported")
+        self.tw("req", "set", "R3", "--status", "landed", "--evidence", "e")
+        self.tw("req", "set", "R3", "--status", "wont", "--reason", "r")
+        self.tw("req", "set", "R3", "--status", "open")
+        self.tw("req", "link", "R3", "T1", ok=False)
+        self.assertEqual(self.state()["requests"]["R3"]["status"], "open")
+
+    def test_landed_survives_rework_and_imports_carry_markers(self):
+        self.tw("thread", "add", "core")
+        self.tw("task", "add", "T1", "--title", "w", "--owner", "core", "--accept", "ok")
+        self.tw("plan", "approve", "--user-said", "ok")
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("req", "add", "p", "--tasks", "T1")
+        self.tw("req", "set", "R1", "--status", "reported")
+        self.tw("req", "set", "R1", "--status", "landed", "--evidence", "sha abc")
+        self.tw("task", "set", "T1", "--merged", "abc1234")
+        self.tw("task", "set", "T1", "--status", "working")
+        st = self.state()
+        self.assertEqual(st["requests"]["R1"]["status"], "landed")
+        self.assertNotIn("merged_sha", st["tasks"]["T1"])
+        led = self.dir / "led.md"
+        led.write_text("| # | request | where | status |\n|---|---|---|---|\n| R5 | a | - | 已落地 |\n| R6 | b | - | 不做 |\n")
+        self.tw("req", "import", str(led))
+        st = self.state()["requests"]
+        self.assertTrue(st["R5"]["evidence"].startswith("imported")); self.assertTrue(st["R6"]["reason"].startswith("imported"))
+        self.assertNotEqual(self.tw("feature", "add", "f", "--status", "landed", "--evidence", " ", ok=False).returncode, 0)
+
+
+class ReviewRound3(TwCase):
+    """T56 review round 3: rework never re-dispatches a gated request; migrate and import set the gate."""
+    def setUp(self):
+        super().setUp()
+        self.tw("thread", "add", "core")
+        self.tw("task", "add", "T1", "--title", "w", "--owner", "core", "--accept", "ok")
+        self.tw("task", "add", "T2", "--title", "v", "--owner", "core", "--accept", "ok")
+        self.tw("plan", "approve", "--user-said", "ok")
+        self.tw("task", "set", "T1", "--status", "working")
+
+    def test_detour_to_reported_is_refused_and_rework_keeps_gate(self):
+        self.tw("req", "add", "maybe"); self.tw("req", "set", "R1", "--status", "proposed")
+        self.tw("req", "link", "R1", "T1")
+        self.tw("req", "set", "R1", "--status", "waiting_user"); self.tw("req", "set", "R1", "--status", "open")
+        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "reported", ok=False).returncode, 0)
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("req", "set", "R1", "--status", "reported")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.assertEqual(self.state()["requests"]["R1"]["status"], "reported")
+
+    def test_migrate_and_import_set_gate(self):
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("req", "add", "等你确认", "--tasks", "T1"); self.tw("req", "set", "R1", "--status", "reported")
+        self.tw("req", "migrate", "--apply", "--user-said", "迁吧")
+        self.assertEqual(self.state()["requests"]["R1"]["gate"], "reported")
+        self.tw("req", "set", "R1", "--status", "open")
+        self.tw("req", "link", "R1", "T2", ok=False)
+        self.assertEqual(self.state()["requests"]["R1"]["status"], "open")
+        led = self.dir / "led.md"
+        led.write_text("| # | request | where | status |\n|---|---|---|---|\n| R5 | a | - | 等你定 |\n")
+        self.tw("req", "import", str(led))
+        self.assertEqual(self.state()["requests"]["R5"]["gate"], "imported")
+
+    def test_defaulted_answer_needs_words(self):
+        self.tw("ask", "db?", "--from", "core"); self.tw("ask", "--default", "1", "sqlite", "--undoable")
+        self.assertNotEqual(self.tw("ask", "--answer", "1", ok=False).returncode, 0)

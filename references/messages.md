@@ -45,6 +45,8 @@ Done when: <what the DONE must contain to count: screenshots at two widths, test
 Review depth: full | one round | none (the user's standing decision for this phase)
 Model / method: <model, when not the thread's default; "by hand, no scripts" for judgment and precision writing> (IL-31)
 Route: gpt | fable | opus (who executes, when it differs from references/routing.md; T55)
+Dispatch: v<N> (printed by `TW task-msg T<n> --dispatch`; the DONE repeats it)
+Standing: <one line per standing rule of the user, added by `TW task-msg`; in Chinese 长期要求：; F4>
 Report: ACK now, DONE or BLOCKED when finished, as in the short form.
 ```
 

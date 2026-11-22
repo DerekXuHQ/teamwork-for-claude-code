@@ -15,7 +15,9 @@ Stdlib only. `tw.py <command> -h` for details.
 
 import argparse
 import datetime as dt
+import contextlib
 import functools
+import io
 import json
 import os
 import re
@@ -82,7 +84,7 @@ LABELS = {
         "requests": "Your requests (not closed)", "unreported": "Delivered, not yet reported to the user",
         "req_open": "open", "req_held": "held: waiting for your material", "req_dispatched": "dispatched", "req_delivered": "delivered (report it!)",
         "req_reported": "reported", "req_closed": "closed", "req_proposed": "proposed (waiting for a yes)",
-        "req_dropped": "dropped", "followup": "follow-up",
+        "req_dropped": "dropped", "req_waiting_user": "waiting for your decision", "req_wont": "won't do (reason)", "req_landed": "landed (evidence)", "req_remark": "remark", "remark_heading": "Remarks (not dispatched)", "default_heading": "Defaulted decisions", "promise_heading": "Open promises", "default_prefix": "Defaulted: ", "can_change": " (can change)", "rcpt_remark": "recorded as a remark {r}, not dispatched", "rcpt_given": "recorded as {r}, given to {who}", "rcpt_open": "recorded as {r}, not dispatched yet", "default_undoable": "only something that can be undone may be done by default; an irreversible step waits for the user (add --undoable when it can be undone)", "followup": "follow-up",
         "no_threads": "(no threads yet)",
         "t_created": "created", "t_updated": "updated", "t_reported": "reported", "t_closed": "closed",
         "t_where": "where", "t_thread": "thread", "t_session": "session", "t_branch": "branch", "t_log": "log",
@@ -94,7 +96,24 @@ LABELS = {
         "merge_waiting": "Waiting to merge: {n} branch(es), oldest {m} min ({tasks})", "owner": "owner",
         "d_draft": "draft", "d_final": "final", "i_open": "open", "i_fixed-on-branch": "fixed on a branch",
         "i_merged": "merged", "i_verified": "verified", "qa_pending": "Merged, regression not run yet",
-        "quota_deny": "Unsuitable model combinations",
+        "quota_deny": "Unsuitable model combinations", "features": "Feature ledger", "reconcile": "Reconcile",
+        "reconcile_badge": "🔴 Reconcile: {n} mismatches → TW reconcile", "wrapup": "Wrap-up self-check",
+        "selfcheck_reminder": "Lead: check that every request the user made this round was recorded with req add.",
+        "heard_unrecorded": "Heard but not recorded", "recorded_not_dispatched": "Recorded but not dispatched",
+        "dispatched_no_reply": "Dispatched without reply", "replied_not_reported": "Replied but not reported",
+        "promises_open": "Unfulfilled promises", "no_items": "(none)", "in_round": "In this version", "rc_unassigned": "{req}: open, but no task or feature carries it", "rc_pair": "{req}: check the record against the user's words — said: {original} / recorded: {record}", "rc_no_req": "{feature}: no request it comes from", "rc_landed_open": "{feature} landed, but {req} is still open", "rc_done_unreported": "{task} is done, but {req} is not reported yet",
+        "still_working": "Still in progress", "missed": "Not started", "feature_status": "{status}",
+        "original_pair": "Original ↔ record", "feature_no_req": "Feature {feature} has no source request",
+        "feature_planned": "planned", "feature_building": "building", "feature_landed": "landed", "feature_dropped": "dropped",
+        "card_done": "Done", "card_doing": "In progress", "card_waiting": "Waiting on you", "ledger": "Ledger",
+        "docs": "Documents", "intro": "Recorded {requests} requests and {features} features. Board sections: {sections}. See: {where}.",
+        "standing": "Standing: {text}", "guard_errors": "bash-guard had {n} errors in the last 7 days and allowed the command",
+        "card_compare": "Comparison", "card_plan": "New plan", "card_read": "Material read", "card_delivered": "Delivery",
+        "card_status": "Progress", "card_defaulted": "going ahead with the default: {what}", "card_question": "Question {n}",
+        "card_ledger": "Ledger +{added}/−{ended} · waiting on you: {waiting} · GPT did {gpt} · {links}",
+        "chain_recorded": "recorded", "chain_dispatched": "dispatched", "chain_accepted": "accepted",
+        "chain_review": "review", "chain_merged": "merged", "chain_reported": "reported",
+        "doc_board": "Board", "doc_ledger": "Ledger", "doc_features": "Features",
     },
     "zh": {
         "planned": "建议中（还没有会话）", "starting": "已创建，第一轮还没结束",
@@ -106,7 +125,7 @@ LABELS = {
         "requests": "你提的事（未关闭）", "unreported": "已交付、还没回报给用户",
         "req_open": "待办", "req_held": "等你的材料", "req_dispatched": "已派", "req_delivered": "已交付（待回报！）",
         "req_reported": "已回报", "req_closed": "已关闭", "req_proposed": "已提议（等你同意）",
-        "req_dropped": "已放弃", "followup": "回访",
+        "req_dropped": "已放弃", "req_waiting_user": "等你定", "req_wont": "不做（附理由）", "req_landed": "已落地（附证据）", "req_remark": "备注", "remark_heading": "备注（不派）", "default_heading": "按默认做的决定", "promise_heading": "未完成的承诺", "default_prefix": "按默认做：", "can_change": "（可改）", "rcpt_remark": "记为备注 {r}，不派", "rcpt_given": "记为 {r}，交给 {who} 线程", "rcpt_open": "记为 {r}，待派", "default_undoable": "只有能撤回的事才能按默认做；不可撤回的要等用户（能撤回时加 --undoable）", "followup": "回访",
         "no_threads": "（还没有线程）",
         "t_created": "创建", "t_updated": "更新", "t_reported": "回报", "t_closed": "关闭",
         "t_where": "落到哪里", "t_thread": "线程", "t_session": "会话", "t_branch": "分支", "t_log": "日志",
@@ -117,7 +136,24 @@ LABELS = {
         "merge_waiting": "等待合并：{n} 个分支，最早的已等 {m} 分钟（{tasks}）", "owner": "负责",
         "d_draft": "草稿", "d_final": "定稿", "i_open": "未修", "i_fixed-on-branch": "已在分支上修好",
         "i_merged": "已合并", "i_verified": "已验证", "qa_pending": "已合并、还没跑回归",
-        "quota_deny": "不适合名单",
+        "quota_deny": "不适合名单", "features": "功能清单", "reconcile": "三方对账",
+        "reconcile_badge": "🔴 对账：{n} 处对不上 → TW reconcile", "wrapup": "收工自查",
+        "selfcheck_reminder": "负责人自查：本轮用户说过的事是否都已用 req add 记入台账。",
+        "heard_unrecorded": "听到没记", "recorded_not_dispatched": "记了没派",
+        "dispatched_no_reply": "派了没回", "replied_not_reported": "回了没报",
+        "promises_open": "没兑现的承诺", "no_items": "（无）", "in_round": "进了这一版", "rc_unassigned": "{req}：还没派，也没有功能或任务接它", "rc_pair": "{req}：请核对原话和记录——原话：{original} / 记录：{record}", "rc_no_req": "{feature}：找不到它来自哪条请求", "rc_landed_open": "{feature} 已落地，但 {req} 还开着", "rc_done_unreported": "{task} 做完了，但 {req} 还没回报",
+        "still_working": "还在做", "missed": "没赶上", "feature_status": "{status}",
+        "original_pair": "原话 ↔ 记录", "feature_no_req": "功能 {feature} 没有关联来源请求",
+        "feature_planned": "计划中", "feature_building": "开发中", "feature_landed": "已落地", "feature_dropped": "已放弃",
+        "card_done": "做完了", "card_doing": "在做", "card_waiting": "等你", "ledger": "台账",
+        "docs": "文档", "intro": "已记下 {requests} 件事、{features} 个功能。看板栏目：{sections}。查看：{where}。",
+        "standing": "长期要求：{text}", "guard_errors": "bash-guard 近 7 天出错 {n} 次，已照常放行",
+        "card_compare": "对照分析", "card_plan": "新方案", "card_read": "素材已读", "card_delivered": "交付",
+        "card_status": "进展", "card_defaulted": "已按默认做：{what}", "card_question": "问题 {n}",
+        "card_ledger": "台账 +{added}/−{ended} · 等你 {waiting} 件 · GPT 做了 {gpt} · {links}",
+        "chain_recorded": "记台账", "chain_dispatched": "派", "chain_accepted": "接单",
+        "chain_review": "评审", "chain_merged": "合并", "chain_reported": "回报",
+        "doc_board": "看板", "doc_ledger": "台账", "doc_features": "功能清单",
     },
 }
 
@@ -127,20 +163,22 @@ def lab(st, key, **kw):
     return LABELS.get(code, LABELS["en"]).get(key, LABELS["en"].get(key, key)).format(**kw)  # unknown: the key
 
 
-REQ_STATUSES = ["open", "held", "proposed", "dispatched", "delivered", "reported", "closed", "dropped"]
+REQ_STATUSES = ["open", "held", "proposed", "dispatched", "delivered", "reported", "waiting_user", "landed", "wont", "remark", "closed", "dropped"]
 REQ_END = ("closed", "dropped")
 # Request moves the lead may make with `req set` (framework A9). closed/dropped only via close/drop (user action).
-REQ_MOVES = {"open": {"held", "proposed", "dispatched", "reported"}, "held": set(),  # held: back where it paused
-             "proposed": {"held", "dispatched"},
-             "dispatched": {"held", "delivered"}, "delivered": {"reported"}, "reported": {"dispatched"}}
-REQ_NEEDS_USER = {("proposed", "dispatched"), ("reported", "dispatched")}  # user said yes / asked for changes
+REQ_MOVES = {"open": {"held", "proposed", "dispatched", "reported", "waiting_user"}, "held": set(),  # held: back where it paused
+             "proposed": {"held", "dispatched", "waiting_user"},
+             "dispatched": {"held", "delivered", "waiting_user"}, "delivered": {"reported"}, "reported": {"dispatched", "waiting_user", "landed"},
+             "waiting_user": {"open", "proposed", "dispatched"}, "landed": {"dispatched"}, "wont": {"open"}, "remark": {"open"}}
+REQ_NEEDS_USER = {("proposed", "dispatched"), ("reported", "dispatched"),  # user said yes / asked for changes
+                  ("waiting_user", "dispatched"), ("landed", "dispatched")}  # no side door around the user's yes
 # Task moves (framework A9). done needs review first and passes the review gate.
 TASK_MOVES = {"planned": {"approved", "dropped"}, "approved": {"dispatched", "dropped"},
               "dispatched": {"working", "recalled"}, "working": {"blocked", "review", "recalled"},
               "blocked": {"working", "recalled"}, "review": {"working", "done"},
               "recalled": {"dispatched", "dropped"}, "done": set(), "dropped": set()}
 # Accepted when importing a markdown ledger (status column in either language).
-REQ_STATUS_ALIASES = {"待办": "open", "等材料": "held", "等你的材料": "held", "已派": "dispatched", "已交付": "delivered", "已回报": "reported",
+REQ_STATUS_ALIASES = {"待办": "open", "等材料": "held", "等你的材料": "held", "等你定": "waiting_user", "不做": "wont", "已落地": "landed", "已派": "dispatched", "已交付": "delivered", "已回报": "reported",
                       "已关闭": "closed", "已提议": "proposed", "已放弃": "dropped", **{x: x for x in REQ_STATUSES}}
 
 
@@ -148,11 +186,11 @@ def unreported(st):
     return {r: q for r, q in st.get("requests", {}).items() if q["status"] == "delivered"}
 
 
-def render_requests(st):
-    reqs = [(r, q) for r, q in st.get("requests", {}).items() if q["status"] not in REQ_END]
+def render_requests(st, chain=False):
+    reqs = [(r, q) for r, q in st.get("requests", {}).items() if q["status"] not in REQ_END and q["status"] != "remark"]
     if not reqs:
         return None
-    order = {"delivered": 0, "held": 1, "proposed": 2, "open": 3, "dispatched": 4, "reported": 5}
+    order = {"delivered": 0, "held": 1, "proposed": 2, "open": 3, "waiting_user": 4, "dispatched": 5, "reported": 6, "landed": 7, "wont": 8}
     reqs.sort(key=lambda x: (order.get(x[1]["status"], 9), int(x[0][1:]) if x[0][1:].isdigit() else 0))
     out = []
     for r, q in reqs:
@@ -164,7 +202,68 @@ def render_requests(st):
         if q.get("followup"):
             line += f" — {lab(st, 'followup')}: {_md(q['followup'])}"
         out.append(line)
+        if chain:  # B4: the board shows how far each request has come
+            out.append(f"  - {progress_chain(st, q)}")
     return "\n".join(out)
+
+
+def render_features(st):
+    rows = st.get("features", {})
+    if not rows:
+        return None
+    groups = {}
+    for fid, f in rows.items():
+        groups.setdefault(f.get("phase") or "", []).append((fid, f))
+    out = []
+    for phase, items in sorted(groups.items(), key=lambda x: (x[0] or "~")):
+        out.append("### " + _md(phase or "-"))
+        for fid, f in sorted(items, key=lambda x: int(x[0][1:])):
+            out.append(f"- **{fid}** {_md(f['name'])} [{lab(st, 'feature_' + f['status'])}] — {', '.join(f.get('reqs') or []) or '-'}")
+    return "\n".join(out)
+
+
+def _feature_ids(rows):
+    return [f"F{i}" for i in range(1, max([int(x[1:]) for x in rows if re.fullmatch(r"F\d+", x)] or [0]) + 1)]
+
+
+def _reconcile_rows(st):
+    rows = []
+    reqs, tasks, features = st.get("requests", {}), st.get("tasks", {}), st.get("features", {})
+    for rid, q in reqs.items():
+        if q.get("status") in ("open", "dispatched", "held") and not q.get("tasks") and not q.get("features"):
+            rows.append({"kind": "unassigned_request", "req": rid})
+        for said in q.get("user_said", []) if isinstance(q.get("user_said"), list) else ([{"text": q["user_said"]}] if q.get("user_said") else []):
+            rows.append({"kind": "original_pair", "req": rid, "original": said.get("text", ""), "record": q.get("text", "")})
+    for fid, f in features.items():
+        linked = f.get("reqs") or []
+        if not linked:
+            rows.append({"kind": "feature_without_request", "feature": fid})
+        if f.get("status") == "landed":
+            for rid in linked:
+                if rid in reqs and reqs[rid].get("status") in ("open", "dispatched"):
+                    rows.append({"kind": "landed_request_open", "feature": fid, "req": rid})
+    for tid, task in tasks.items():
+        if task.get("status") == "done":
+            for rid, q in reqs.items():
+                if tid in (q.get("tasks") or []) and q.get("status") not in REQ_SETTLED:
+                    rows.append({"kind": "done_task_request_unreported", "task": tid, "req": rid})
+    return rows
+
+
+REQ_SETTLED = ("reported", "landed", "closed", "dropped", "wont", "remark")
+RC_KEYS = {"unassigned_request": "rc_unassigned", "original_pair": "rc_pair", "feature_without_request": "rc_no_req",
+           "landed_request_open": "rc_landed_open", "done_task_request_unreported": "rc_done_unreported"}
+
+
+def _rc_line(st, x):
+    """One reconcile finding in the user's language."""
+    return lab(st, RC_KEYS[x["kind"]], **{k: v for k, v in x.items() if k != "kind"})
+
+
+def _run_reconcile(st):
+    rows = _reconcile_rows(st)
+    st["reconcile"] = {"at": now(), "count": sum(1 for x in rows if x["kind"] != "original_pair"), "items": rows}
+    return rows
 
 
 STUCK_DEFAULT = 30  # minutes without a report before a working thread counts as possibly stuck
@@ -275,11 +374,11 @@ def snapshots(st, ev):
         snap["snap_thread"] = st["threads"][ev["thread"]]
     if ev.get("req") in st.get("requests", {}):
         snap["snap_req"] = st["requests"][ev["req"]]
-    if ev.get("ev") == "req-import":
+    if ev.get("ev") in ("req-import", "req-migrate"):
         snap["snap_reqs"] = {r: st["requests"][r] for r in ev.get("ids", []) if r in st.get("requests", {})}
     if ev.get("ev") in ("init", "lead", "prefs"):
         snap["snap_meta"] = {k: st.get(k) for k in ("project", "goal", "created", "repo", "envs", "lead", "prefs")}
-    if ev.get("ev") in ("question", "answered"):
+    if ev.get("ev") in ("question", "answered", "default"):
         snap["snap_questions"] = st.get("questions", [])
     if ev.get("ev", "").startswith("plan-"):
         snap["snap_plan_approved"] = st.get("plan_approved")
@@ -288,6 +387,21 @@ def snapshots(st, ev):
         snap["snap_issues"] = st.get("issues", [])
     if ev.get("ev", "").startswith("deliverable-"):
         snap["snap_deliverables"] = st.get("deliverables", [])
+    if ev.get("ev") in ("default", "answered"):
+        snap["snap_decisions"] = st.get("decisions", [])
+    if ev.get("ev", "").startswith("feature-"):
+        snap["snap_features"] = st.get("features", {})
+        snap["snap_reqs"] = {**snap.get("snap_reqs", {}), **st.get("requests", {})}
+    if ev.get("ev") == "reconcile":
+        snap["snap_reconcile"] = st.get("reconcile")
+    if ev.get("ev") == "docs-set":
+        snap["snap_docs"] = st.get("docs", {})
+    if ev.get("ev") == "standing":
+        snap["snap_standing"] = st.get("standing", [])
+    if ev.get("ev") == "report-card":
+        snap["snap_last_report_at"] = st.get("last_report_at")
+    if ev.get("ev", "").startswith("promise-"):
+        snap["snap_promises"] = st.get("promises", [])
     if ev.get("ev") in ("merge", "qa-done"):
         snap["snap_qa_pending"] = st.get("qa_pending", [])
     if ev.get("ev", "").startswith("model-deny-"):
@@ -295,6 +409,20 @@ def snapshots(st, ev):
     if "roster_version" in st:
         snap["snap_roster_version"] = st["roster_version"]
     return snap
+
+
+DOC_KINDS = ("board", "ledger", "features")
+CHAIN_STEPS = ("recorded", "dispatched", "accepted", "review", "merged", "reported")
+
+
+def progress_chain(st, q):
+    """B4: how far one request has come: recorded -> dispatched -> accepted -> review -> merged -> reported."""
+    tasks = [st.get("tasks", {}).get(t, {}) for t in q.get("tasks") or []]
+    steps = (True, any(int(t.get("dispatch_v") or 0) >= 1 for t in tasks),
+             any(t.get("status") in ("working", "blocked", "review", "done") for t in tasks),
+             any(t.get("status") in ("review", "done") for t in tasks),
+             any(t.get("merged_at") for t in tasks), q.get("status") in ("reported", "landed", "closed"))
+    return " → ".join(lab(st, "chain_" + name) + ("✓" if yes else "·") for name, yes in zip(CHAIN_STEPS, steps))
 
 
 def read_file(d, name):
@@ -556,9 +684,25 @@ def render_board(st):
         f"# teamwork: {st['project']}" + (f" ({tag(st)})" if tag(st) != st["project"] else ""),
         "",
     ]
-    reqs = render_requests(st)
+    recent = st.get("reconcile") or {}
+    docs = [f"- [{lab(st, 'doc_' + key)}]({doc['link']})" + (f" — {_md(doc['note'])}" if doc.get("note") else "")
+            for key in DOC_KINDS for doc in [st.get("docs", {}).get(key)] if doc and doc.get("link")]
+    if docs:
+        out += docs + [""]
+    if recent.get("count"):
+        out += [lab(st, "reconcile_badge", n=recent["count"]), ""]
+    reqs = render_requests(st, chain=True)
     if reqs:
         out += [f"## {lab(st, 'requests')}", "", reqs, ""]
+    features = render_features(st)
+    if features:
+        out += [f"## {lab(st, 'features')}", "", features, ""]
+    remarks = [(r, q) for r, q in st.get("requests", {}).items() if q.get("status") == "remark"][-10:]
+    if remarks: out += ["## " + lab(st, "remark_heading"), ""] + [f"- {r}: {_md(q['text'])}" for r, q in remarks] + [""]
+    defaults = [x for x in st.get("decisions", []) if not x.get("answered") and not x.get("confirmed")]
+    if defaults: out += ["## " + lab(st, "default_heading"), ""] + [f"- [{x['question']}] {_md(x['what'])}" for x in defaults] + [""]
+    promises = [x for x in st.get("promises", []) if x.get("status") == "open"]
+    if promises: out += ["## " + lab(st, "promise_heading"), ""] + [f"- {x['id']}: {_md(x['text'])}" for x in promises] + [""]
     pending = st.get("qa_pending", [])
     if pending:
         out += [f"## {lab(st, 'qa_pending')}", ""]
@@ -579,7 +723,9 @@ def render_board(st):
     ]
     if open_q:
         out += ["", f"## {lab(st, 'questions')}", ""] + [
-            f"- [{i + 1}] ({q['from']}) {_md(q['text'])}" for i, q in open_q
+            f"- [{i + 1}] ({q['from']}) {_md(q['text'])}" + (" — " + lab(st, "default_prefix") + _md(q["defaulted"]["what"])
+                                                            + lab(st, "can_change") if q.get("defaulted") else "")
+            for i, q in open_q
         ]
     w = merge_waiting(st)
     if w:
@@ -635,12 +781,21 @@ def render_share(st):
                                              + (f" ({L('followup')}: {_md(q['followup'])})" if q.get("followup")
                                                 else "")
                                              for r, q in live] or [L("s_none_open")]) + [""]
+    features = render_features(st)
+    if features:
+        out += [f"## {L('features')}", "", features, ""]
     qs = [q for q in st.get("questions", []) if not q.get("answered")]
     if qs:
         out += [f"## {L('s_waiting')}", ""] + [f"- {_md(q['text'])} ({q['from']})" for q in qs] + [""]
     iss = [i for i in st.get("issues", []) if i.get("status") != "verified"]
     if iss:
         out += [f"## {L('s_issues')}", ""] + [render_issue(i, st) for i in iss] + [""]
+    remarks = [(r, q) for r, q in st.get("requests", {}).items() if q.get("status") == "remark"][-10:]
+    if remarks: out += ["## " + lab(st, "remark_heading"), ""] + [f"- {r}: {_md(q['text'])}" for r, q in remarks] + [""]
+    defaults = [x for x in st.get("decisions", []) if not x.get("answered") and not x.get("confirmed")]
+    if defaults: out += ["## " + lab(st, "default_heading"), ""] + [f"- [{x['question']}] {_md(x['what'])}" for x in defaults] + [""]
+    promises = [x for x in st.get("promises", []) if x.get("status") == "open"]
+    if promises: out += ["## " + lab(st, "promise_heading"), ""] + [f"- {x['id']}: {_md(x['text'])}" for x in promises] + [""]
     pending = st.get("qa_pending", [])
     if pending:
         out += [f"## {L('qa_pending')}", ""]
@@ -699,6 +854,9 @@ def cmd_init(a):
         "tasks": {},
         "plan_approved": False,
         "questions": [],
+        "decisions": [],
+        "promises": [],
+        "features": {},
         "requests": {},
         "prefs": {
             "max_parallel": 0,  # 0 = no limit; set only when the user asks for one
@@ -719,6 +877,8 @@ def cmd_init(a):
             "skill_edge": "",  # H8: a clone this project tests before release; empty = the installed release
             "check_timeout_minutes": 60,  # merge stops checks that run longer (the whole process group); 0 = no limit
             "default_after_minutes": 30,  # IL-1: an unanswered non-gated question takes its stated default after this
+            "ledger_line_every": "wrapup",
+            "reconcile_every": "wrapup", "selfcheck_every": "wrapup",
         },
     }
     if not (d / "INSTRUCTIONS.md").exists():
@@ -1199,6 +1359,12 @@ def cmd_task(a):
             k["topics"] = norm_topics(a.topics)
         if a.notes is not None:
             k["notes"] = a.notes
+        if getattr(a, "merged", None) is not None:  # B4: the board's progress chain reads this mark
+            if (a.status or cur) not in ("review", "done"):
+                sys.exit("--merged: only a task in review or done has merged work")
+            if not re.fullmatch(r"[0-9a-fA-F]{7,40}", a.merged.strip()):
+                sys.exit("--merged: the merge commit (7 to 40 hex characters)")
+            k["merged_at"], k["merged_sha"] = now(), a.merged.strip().lower()
         if a.checks:
             if cur == "done" and a.checks != k.get("checks"):  # T23-a: a done task's verdict and checks are final
                 sys.exit(f"{a.id} is done: its checks and verdict are final. A regression is new work: add a new task for it"
@@ -1323,7 +1489,13 @@ def cmd_task(a):
                 void("rework after review")  # the old verdict no longer counts
                 if k.get("checks") == "pass" and a.checks is None:
                     k["checks"] = "none"  # green checks were for the old code
+            if a.status == "working" and cur in ("review", "done"):  # rework: the earlier merge mark is stale
+                k.pop("merged_at", None); k.pop("merged_sha", None)
             k["status"] = a.status
+            k["updated"] = now()
+            if a.status == "dispatched":
+                k["dispatch_v"] = int(k.get("dispatch_v") or 0) + 1
+                k["dispatched_at"] = now()
             if a.status in ("review", "done", "dropped"):  # dropping the last open task can deliver the rest
                 for r in deliver_ready(st):
                     print(f"request {r} delivered (all its tasks are in review or done): report it to the user, then "
@@ -2089,10 +2261,29 @@ def cmd_ask(a):
         if q.get("answered"):
             sys.exit(f"question {n} is already answered" + (f": {q['answer']}" if q.get("answer") else "")
                      + "; ask a new question if the user changed their mind")
+        if q.get("defaulted") and not (a.text or "").strip():
+            sys.exit(f"question {n} was done by default: record the user's answer (`ask --answer {n} \"<their words>\"`)")
         q["answered"] = True
+        for dec in st.get("decisions", []):
+            if dec.get("question") == n and not dec.get("answered"):
+                # the user's answer settles it, and may overrule the default: never stored as approval of it
+                dec.update(answered=True, answer=a.text or "", answered_at=now())
         if a.text:
             q["answer"] = a.text
         save(d, st, {"ev": "answered", "n": n})
+    elif a.default is not None:
+        n = a.default
+        if not a.undoable:
+            sys.exit(lab(st, "default_undoable"))
+        if not 1 <= n <= len(st["questions"]) or st["questions"][n - 1].get("answered"):
+            sys.exit(f"no unanswered question {n}")
+        if st["questions"][n - 1].get("defaulted"):
+            sys.exit(f"question {n} was already done by default: {st['questions'][n - 1]['defaulted']['what']}")
+        q = st["questions"][n - 1]; what = (a.text or "").strip()
+        if not what: sys.exit("default needs a description")
+        q["defaulted"] = {"what": what, "at": now()}
+        st.setdefault("decisions", []).append({"kind": "default", "question": n, "what": what, "at": now()})
+        save(d, st, {"ev": "default", "n": n})
     else:
         a.text = (a.text or "").strip()
         if not a.text:  # a blank question would sit on the board as "waiting on the user" with nothing to answer
@@ -2126,10 +2317,23 @@ def _memory_section(text, key):
 
 def cmd_memory(a):
     d = need(find_dir())
-    if a.never_raise and a.user_owned:
-        sys.exit("--never-raise or --user-owned, not both")
-    a.text = " ".join(a.text.split())  # one line: a newline could start a heading of its own
-    which = "never_raise" if a.never_raise else "user_owned" if a.user_owned else None
+    if sum(bool(x) for x in (a.never_raise, a.user_owned, a.standing)) > 1:
+        sys.exit("--never-raise, --user-owned, or --standing: choose one")
+    a.text = " ".join((a.text or "").split())  # one line: a newline could start a heading of its own
+    which = "never_raise" if a.never_raise else "user_owned" if a.user_owned else "standing" if a.standing else None
+    if a.standing_list:
+        st = load(d)
+        print("\n".join("- " + x for x in st.get("standing", [])) or lab(st, "no_items"))
+        return
+    if not a.text:
+        sys.exit('usage: memory "<text>" [--never-raise | --user-owned | --standing] (or --standing-list)')
+    if which == "standing":  # F4: a long-term requirement of the user's; every TASK carries it (task-msg)
+        st = load(d)
+        if a.text not in st.setdefault("standing", []):
+            st["standing"].append(a.text)
+            save(d, st, {"ev": "standing"})
+        print(lab(st, "standing", text=a.text))
+        return
     mark = " _(temporary: confirm with the user before enforcing it later)_" if a.temporary else ""
     line = f"- {a.text}{mark}  _(added {now()[:10]})_\n"
     path = d / "MEMORY.md"
@@ -2165,6 +2369,131 @@ def cmd_log(a):
     print("logged")
 
 
+def _json_or_text(a, data, lines):
+    if getattr(a, "json", False):
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+    else:
+        print("\n".join(lines))
+
+
+def cmd_feature(a):
+    d = need(find_dir()); st = load(d); rows = st.setdefault("features", {})
+    if a.action == "add":
+        if not a.name.strip(): sys.exit("feature add requires a name")
+        reqs = [x for group in (a.req or []) for item in group for x in csv(item)]
+        tasks = [x for group in (a.task or []) for item in group for x in csv(item)]
+        if (a.status or "planned") not in ("planned", "building", "landed", "dropped"): sys.exit("invalid feature status")
+        a.evidence, a.reason = (a.evidence or "").strip() or None, (a.reason or "").strip() or None
+        if a.status == "landed" and not a.evidence: sys.exit("landed requires --evidence")
+        if a.status == "dropped" and not a.reason: sys.exit("dropped requires --reason")
+        for rid in reqs:
+            if rid not in st.get("requests", {}): sys.exit(f"unknown request {rid}")
+        for tid in tasks:
+            if tid not in st.get("tasks", {}): sys.exit(f"unknown task {tid}")
+        fid = f"F{max([int(x[1:]) for x in rows if re.fullmatch(r'F\d+', x)] or [0])+1}"
+        rows[fid] = {"name": a.name.strip(), "phase": a.phase or "", "reqs": reqs, "tasks": tasks,
+                     "status": a.status or "planned", "evidence": a.evidence or "", "reason": a.reason or "", "created": now()}
+        if a.status == "landed": rows[fid]["landed_at"] = now()
+        for rid in reqs: st["requests"][rid].setdefault("features", []).append(fid)
+        save(d, st, {"ev": "feature-add", "feature": fid}); print(fid); return
+    if a.action == "set":
+        f = rows.get(a.name)
+        if not f: sys.exit(f"unknown feature {a.name}")
+        status = a.status or f["status"]
+        if status not in ("planned", "building", "landed", "dropped"): sys.exit("invalid feature status")
+        a.evidence, a.reason = (a.evidence or "").strip() or None, (a.reason or "").strip() or None
+        if status == "landed" and not (a.evidence or f.get("evidence")): sys.exit("landed requires --evidence")
+        if status == "dropped" and not (a.reason or f.get("reason")): sys.exit("dropped requires --reason")
+        if a.phase is not None: f["phase"] = a.phase
+        for attr, key in (("req", "reqs"), ("task", "tasks")):
+            value = getattr(a, attr)
+            if value is not None:
+                flat = value if isinstance(value, list) else [value]  # append + nargs="+": a list of lists
+                vals = [x for item in flat for sub in (item if isinstance(item, list) else [item]) for x in csv(sub)]
+                valid = st.get("requests", {}) if key == "reqs" else st.get("tasks", {})
+                if any(x not in valid for x in vals): sys.exit(f"unknown {attr} id")
+                f[key] = vals
+                if key == "reqs":
+                    for rid, q in st.get("requests", {}).items():
+                        q["features"] = [x for x in q.get("features", []) if x != a.name]
+                    for rid in vals: st["requests"][rid].setdefault("features", []).append(a.name)
+        if a.evidence: f["evidence"] = a.evidence
+        if a.reason: f["reason"] = a.reason
+        if status == "landed" and f.get("status") != "landed": f["landed_at"] = now()
+        f["status"] = status; save(d, st, {"ev": "feature-set", "feature": a.name}); print(a.name); return
+    if a.action == "list":
+        selected = [(fid, f) for fid, f in rows.items() if not a.phase or f.get("phase") == a.phase]
+        if a.done_since:
+            cutoff = last_report_time(st) if a.done_since == "last-report" else _when(a.done_since)
+            if cutoff is None: sys.exit("--done-since: an ISO time (2026-11-20 or 2026-11-20T09:00) or last-report")
+            selected = [(i, f) for i, f in selected if f.get("status") == "landed" and _later(f.get("landed_at"), cutoff)]
+        data = [{"id": i, **f} for i, f in selected]
+        _json_or_text(a, data, [f"{i} [{lab(st, 'feature_' + f['status'])}] {f['name']} — {', '.join(f.get('reqs') or []) or '-'}" for i, f in selected])
+        return
+
+
+EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)  # "since the start": comparable with every stored time
+
+
+def _when(text):
+    """A stored or typed ISO time as an aware datetime (a time without a zone is local); None when unreadable."""
+    try:
+        t = dt.datetime.fromisoformat(str(text))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.astimezone()
+
+
+def _later(text, since):
+    t = _when(text) if text else None
+    return bool(t and t > since)
+
+
+def last_report_time(st):
+    if st.get("last_report_at") and _when(st["last_report_at"]):
+        return _when(st["last_report_at"])
+    times = [_when(q["updated"]) for q in st.get("requests", {}).values() if q.get("status") == "reported" and q.get("updated")]
+    return max((x for x in times if x), default=EPOCH)
+
+
+def cmd_reconcile(a):
+    d = need(find_dir()); st = load(d); rows = _run_reconcile(st)
+    save(d, st, {"ev": "reconcile"})
+    _json_or_text(a, {"count": st["reconcile"]["count"], "items": rows},
+                  [_rc_line(st, x) for x in rows] or [lab(st, "no_items")])
+    if a.strict and st["reconcile"]["count"]: sys.exit(1)
+
+
+def cmd_wrapup(a):
+    d = need(find_dir()); st = load(d); rows = _run_reconcile(st); save(d, st, {"ev": "reconcile"})
+    p = st.get("prefs", {}); limit = p.get("stuck_minutes", STUCK_DEFAULT); cur = dt.datetime.fromisoformat(now())
+    sections = {lab(st, "heard_unrecorded"): [lab(st, "selfcheck_reminder")],
+        lab(st, "recorded_not_dispatched"): [f"{r}: {q['text']}" for r,q in st.get("requests",{}).items() if q.get("status")=="open"],
+        lab(st, "dispatched_no_reply"): [f"{t}: {x.get('title','')}" for t,x in st.get("tasks",{}).items() if x.get("status")=="dispatched" and x.get("dispatched_at") and (cur-dt.datetime.fromisoformat(x['dispatched_at'])).total_seconds()>limit*60],
+        lab(st, "replied_not_reported"): [r for r,q in st.get("requests",{}).items() if q.get("status")=="delivered"] + [t for t,x in st.get("tasks",{}).items() if x.get("status")=="done" and any(t in q.get("tasks",[]) and q.get("status") not in REQ_SETTLED + ("delivered",) for q in st.get("requests",{}).values())],
+        lab(st, "promises_open"): [f"{x['id']}: {x['text']}" for x in st.get("promises",[]) if x.get("status")=="open"]}
+    data = {"sections": sections, "reconcile": st["reconcile"]}
+    lines = [f"## {lab(st,'wrapup')}"] + [f"### {k}\n" + ("\n".join("- "+x for x in v) if v else lab(st,"no_items")) for k,v in sections.items()]
+    lines.append(f"### {lab(st,'reconcile')}\n" + ("\n".join("- " + _rc_line(st, x) for x in rows) or lab(st, "no_items")))
+    _json_or_text(a, data, lines)
+
+
+def cmd_sprint(a):
+    d=need(find_dir()); st=load(d); since=_when(a.since) if a.since else EPOCH
+    if since is None: sys.exit("--since: an ISO time (2026-11-20 or 2026-11-20T09:00)")
+    ph=st.get("prefs",{}).get("current_phase")
+    if not ph:
+        phases=sorted(f.get("phase") for f in st.get("features",{}).values() if f.get("status")!="landed" and f.get("phase"))
+        ph=phases[0] if phases else ""
+    landed=[f"{i} {f['name']}" for i,f in st.get("features",{}).items() if f.get("status")=="landed" and _later(f.get("landed_at"), since)]
+    landed += [f"{i} {x.get('title','')}" for i,x in st.get("tasks",{}).items() if x.get("status")=="done" and _later(x.get("updated"), since)]
+    doing=[f"{i} {f['name']}" for i,f in st.get("features",{}).items() if f.get("status")=="building"]+[f"{i} {x.get('title','')}" for i,x in st.get("tasks",{}).items() if x.get("status") in ("dispatched","working","blocked","review")]
+    missed=[f"{i} {f['name']}" for i,f in st.get("features",{}).items() if f.get("status")=="planned" and f.get("phase")==ph]
+    data={"in_round":landed,"still_working":doing,"missed":missed}
+    lines=["| "+" | ".join(lab(st,k) for k in data)+" |","| --- | --- | --- |","| "+" | ".join("<br>".join(v) or "-" for v in data.values())+" |"]
+    _json_or_text(a,data,lines)
+
+
 def cmd_board(a):
     d = need(find_dir())
     st = load(d)
@@ -2177,6 +2506,83 @@ def cmd_board(a):
               "each report (IL-13, IL-14); sharing it further is the user's decision", file=sys.stderr)
         return
     print(render_board(st))
+
+
+CARD_KINDS = ("compare", "plan", "read", "done", "status")
+
+
+def cmd_card(a):
+    """B5/B6/B9: one report card for the user: a first line (receipt or conclusion), then done / doing / waiting,
+    and (prefs ledger_line_every) the ledger line."""
+    d = need(find_dir()); st = load(d)
+    if a.since == "last-report":
+        since = last_report_time(st)
+    elif a.since:
+        since = _when(a.since)
+        if not since:
+            sys.exit("--since: an ISO time (2026-01-31T09:00) or last-report")
+    else:
+        since = EPOCH
+    reqs, feats, tasks = st.get("requests", {}), st.get("features", {}), st.get("tasks", {})
+    done = [f"{i} {f.get('name', '')}" for i, f in feats.items() if f.get("status") == "landed" and _later(f.get("landed_at"), since)]
+    done += [f"{i} {q.get('text', '')}" for i, q in reqs.items() if q.get("status") in ("reported", "landed") and _later(q.get("updated"), since)]
+    doing = [f"{i} {f.get('name', '')}" for i, f in feats.items() if f.get("status") == "building"]
+    doing += [f"{i} {t.get('title', '')}" for i, t in tasks.items() if t.get("status") in ("dispatched", "working")]
+    waiting = [f"{i} {q.get('text', '')}" for i, q in reqs.items() if q.get("status") == "waiting_user"]
+    for n, q in enumerate(st.get("questions", []), 1):
+        if not q.get("answered"):  # a question that took its default still waits for the user's word
+            mark = f" ({lab(st, 'card_defaulted', what=q['defaulted'].get('what', ''))})" if q.get("defaulted") else ""
+            waiting.append(f"{lab(st, 'card_question', n=n)} {q.get('text', '')}{mark}")
+    added = sum(1 for q in reqs.values() if _later(q.get("created"), since))
+    ended = sum(1 for q in reqs.values() if q.get("status") in REQ_END + ("wont", "landed") and _later(q.get("updated"), since))
+    gpt = 0
+    try:
+        for line in (d / "model-log.jsonl").read_text(encoding="utf-8", errors="replace").split("\n"):
+            try:
+                x = json.loads(line) if line.strip() else {}
+            except ValueError:
+                continue
+            gpt += isinstance(x, dict) and str(x.get("model") or "").lower() == "gpt" and _later(x.get("at"), since)
+    except OSError:
+        pass
+    links = list(dict.fromkeys(list(a.link or []) + [x["link"] for k in DOC_KINDS for x in [st.get("docs", {}).get(k)] if x and x.get("link")]))
+    head = f"[{lab(st, 'card_delivered' if a.kind == 'done' else 'card_' + a.kind)}] {' '.join(a.head.split())}"
+    payload = {"kind": a.kind, "head": head, "done": done, "doing": doing, "waiting": waiting}
+    if st.get("prefs", {}).get("ledger_line_every", "wrapup") == "report" or a.kind == "done" or a.ledger_line:
+        payload["ledger"] = lab(st, "card_ledger", added=added, ended=ended, waiting=len(waiting), gpt=gpt,
+                                links=" ".join(links) or "-")
+    st["last_report_at"] = now()
+    save(d, st, {"ev": "report-card", "kind": a.kind})
+    lines = [head]
+    for key in ("done", "doing", "waiting"):
+        lines += ["", f"## {lab(st, 'card_' + key)}", "\n".join("- " + x for x in payload[key]) or lab(st, "no_items")]
+    if "ledger" in payload:
+        lines += ["", payload["ledger"]]
+    _json_or_text(a, payload, lines)
+
+
+def cmd_intro(a):
+    """B2: what the user is told once the project is set up, straight from the ledger."""
+    d = need(find_dir()); st = load(d)
+    sections = ", ".join(re.findall(r"(?m)^## (.+)$", render_board(st))) or lab(st, "no_items")
+    where = " ".join(f"{lab(st, 'doc_' + k)} {x['link']}" for k in DOC_KINDS for x in [st.get("docs", {}).get(k)]
+                     if x and x.get("link")) or "BOARD.md"
+    print(lab(st, "intro", requests=len(st.get("requests", {})), features=len(st.get("features", {})),
+              sections=sections, where=where))
+
+
+def cmd_docs(a):
+    """B1: links to the documents the user opens (board, ledger, features); the board lists them at the top."""
+    d = need(find_dir()); st = load(d); rows = st.setdefault("docs", {})
+    if a.action == "set":
+        if not a.which or not (a.link or "").strip():
+            sys.exit(f"usage: docs set {'|'.join(DOC_KINDS)} --link <url> [--note \"<one line>\"]")
+        rows[a.which] = {"link": a.link.strip(), "note": " ".join((a.note or "").split())}
+        save(d, st, {"ev": "docs-set", "which": a.which})
+        print(a.which)
+        return
+    print("\n".join(f"{lab(st, 'doc_' + k)} ({k}): {rows[k]['link']}" + (f" — {rows[k]['note']}" if rows[k].get("note") else "")
+                    for k in DOC_KINDS if k in rows) or lab(st, "no_items"))
 
 
 def cmd_issue(a):
@@ -2330,10 +2736,32 @@ def _wlen(text):
     return len(text) + 2 * len(re.findall(r"[\u3400-\u9fff]", text))
 
 
+USER_MSG_TRACES = (  # I2: what a message to the user should not carry
+    ("commit-id", r"(?i)(?<![0-9a-z])(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-z])"),
+    ("command-output", r"(?m)^\$ \S.*|Traceback \(most recent call last\)|^```(?:shell|bash)\b"),
+    ("local-path", r"/(?:Users|home)/\S*|\b[A-Za-z]:\\\S*"),
+)
+
+
 def cmd_check_msg(a):
     """IL-11, IL-16, IL-19: read a hand-written message (or, with --prompt, a session prompt) before sending it.
     Problems fail (exit 1); warnings are for the lead to judge and do not."""
     raw = (sys.stdin.read() if a.file == "-" else Path(a.file).read_text(encoding="utf-8")).lstrip("\ufeff")
+    if a.user:  # I2: a message for the user reads like a report, not like a terminal
+        if a.prompt:
+            sys.exit("--user or --prompt, not both")
+        found = [(kind, m.group(0).strip()[:40]) for kind, pat in USER_MSG_TRACES for m in [re.search(pat, raw)] if m]
+        for kind, sample in found:
+            print(f"warning {kind}: {sample}", file=sys.stderr)
+        if a.json:
+            print(json.dumps({"ok": not found, "mode": "user", "findings": [
+                {"kind": k, "detail": v, "level": "warning"} for k, v in found]}, ensure_ascii=False))
+        else:
+            print("ok (user)" if not found else f"{len(found)} warning(s): say it in plain words; keep commit ids, "
+                  "command output and local paths out of a message to the user")
+        if found and a.strict:
+            raise SystemExit(1)
+        return
     findings = []
 
     def add(kind, detail, level="problem"):
@@ -2391,6 +2819,9 @@ def cmd_check_msg(a):
             if missing:
                 add("fields", "a TASK needs " + " and ".join(missing) + (
                     " (it only points to a file: write the task in the message)" if re.search(PATH_RE, prose) else ""))
+            if st and st.get("standing") and not re.search(r"(?im)^\s*Standing:|长期要求", raw):
+                add("standing", f"the ledger has {len(st['standing'])} standing requirement(s) and this TASK carries "
+                                "none: add a `Standing: ...` line for each (`task-msg` writes them)", "warning")
         if st:
             known = {(st.get("lead") or {}).get("session_id")}
             for t in st.get("threads", {}).values():
@@ -2430,11 +2861,17 @@ def cmd_deliverable(a):
     st = load(d)
     dl = st.setdefault("deliverables", [])
     if a.action == "add":
-        if not a.name.strip():
-            sys.exit('usage: deliverable add "<name>" --link <url> [--status draft|final] [--missing "<what>"]')
-        x = {"id": f"D{len(dl) + 1}", "name": a.name.strip(), "status": a.status or "draft", "link": a.link or "",
-             "missing": a.missing or "", "req": a.req or "", "at": now()}
-        dl.append(x)
+        if a.task and a.task not in st.get("tasks", {}): sys.exit(f"unknown task {a.task}")
+        version = a.dispatch_v if a.dispatch_v is not None else (st["tasks"][a.task].get("dispatch_v", 0) if a.task else None)
+        existing = next((y for y in dl if a.task and y.get("task") == a.task and y.get("dispatch_v") == version), None)
+        if existing:
+            x = existing; x["link"] = a.link or x.get("link", ""); x["status"] = a.status or x.get("status", "draft"); x["at"] = now()
+        else:
+            if not a.name.strip():
+                sys.exit('usage: deliverable add "<name>" --link <url> [--status draft|final] [--missing "<what>"]')
+            x = {"id": f"D{len(dl) + 1}", "name": a.name.strip(), "status": a.status or "draft", "link": a.link or "",
+                 "missing": a.missing or "", "req": a.req or "", "at": now(), **({"task": a.task, "dispatch_v": version} if a.task else {})}
+            dl.append(x)
     else:
         x = next((y for y in dl if y["id"] == a.name), None)
         if not x:
@@ -2448,7 +2885,48 @@ def cmd_deliverable(a):
     if x.get("req") and x["req"] not in st.get("requests", {}):
         sys.exit(f"unknown request {x['req']}")
     save(d, st, {"ev": f"deliverable-{a.action}", "deliverable": x["id"]})
+    if a.action == "add" and x.get("task") and existing:
+        print(f"updated {x['id']} ({a.task} v{x.get('dispatch_v')}): same task and dispatch, not added twice", file=sys.stderr)
     print(json.dumps(x, ensure_ascii=False))
+
+
+def cmd_task_msg(a):
+    d = need(find_dir()); st = load(d)
+    if a.id not in st["tasks"]: sys.exit(f"unknown task {a.id}")
+    k = st["tasks"][a.id]
+    if a.dispatch:
+        if k.get("status") != "dispatched":
+            # Reuse task command's transition checks by invoking the normal CLI path.
+            proxy = argparse.Namespace(**vars(a)); proxy.action = "set"; proxy.status = "dispatched"
+            for key in ("owner", "accept", "deps", "title", "touches", "model", "route", "no_scripts", "scripts_ok", "topics", "notes", "checks", "rounds", "review", "remaining", "no_blocking", "reviewer", "review_note", "skip_review", "user_said", "apply"):
+                if not hasattr(proxy, key): setattr(proxy, key, None)
+            with contextlib.redirect_stdout(io.StringIO()): cmd_task(proxy)
+            st = load(d); k = st["tasks"][a.id]
+    if not a.dispatch and k.get("status") != "dispatched":
+        print(f"preview only: {a.id} is {k.get('status')}, not dispatched; send with --dispatch (records it first)", file=sys.stderr)
+    owner = k.get("owner") or "?"; v = int(k.get("dispatch_v") or 0)
+    lines = [f"[tw:{tag(st)}] TASK lead -> {owner} {a.id}", f"Goal: {k.get('title') or a.id}", f"Done when: {k.get('accept') or '-'}"]
+    route = k.get("route") or k.get("model")
+    if route: lines.append(f"Route/Model: {route}")
+    lines.append(f"Dispatch: v{v}")
+    lines.extend(lab(st, "standing", text=x) for x in st.get("standing", []))
+    print("\n".join(lines))
+
+
+def cmd_promise(a):
+    d = need(find_dir()); st = load(d); rows = st.setdefault("promises", [])
+    if a.action == "list": print(json.dumps(rows, ensure_ascii=False, indent=2)); return
+    if a.action == "add":
+        if a.req and a.req not in st.get("requests", {}): sys.exit(f"unknown request {a.req}")
+        if not (a.text or "").strip(): sys.exit('usage: promise add "<what you told the user you would do>"')
+        x = {"id": f"P{max([int(y['id'][1:]) for y in rows if y.get('id','')[1:].isdigit()] or [0])+1}", "text": a.text, "req": a.req, "status": "open", "evidence": "", "created": now()}; rows.append(x)
+        save(d, st, {"ev": "promise-add"}); print(json.dumps(x, ensure_ascii=False)); return
+    pid = a.id or a.text
+    x = next((y for y in rows if y["id"] == pid), None)
+    if not x: sys.exit(f"unknown promise {pid}" if pid else "usage: promise done P<n> --evidence \"<where>\"")
+    if x.get("status") == "done": sys.exit(f"{pid} is already done: {x.get('evidence')}")
+    if not (a.evidence or "").strip(): sys.exit("promise done requires --evidence")
+    x.update(status="done", evidence=a.evidence.strip()); save(d, st, {"ev": "promise-done"}); print(json.dumps(x, ensure_ascii=False))
 
 
 def cmd_roster(a):
@@ -2487,6 +2965,10 @@ def cmd_prefs(a):
     old_cap = review_max(st)
     for kv in a.set or []:
         k, _, v = kv.partition("=")
+        if k == "ledger_line_every" and v not in ("wrapup", "report"):
+            sys.exit("ledger_line_every: one of wrapup, report")
+        if k in ("reconcile_every", "selfcheck_every") and v not in ("wrapup", "round"):
+            sys.exit(f"{k}: one of wrapup, round")
         if k == "require_review":
             if v.lower() not in ("1", "0", "true", "false", "yes", "no", "on", "off"):
                 sys.exit("require_review must be true or false")
@@ -2887,6 +3369,9 @@ def cmd_selfcheck(a):
                         found[ev] |= "tw.py" in c and word in c
     hookok = all(found.values())
     items.append(item("hooks", hookok, "SessionStart context and PreToolUse bash-guard" if hookok else "required hooks not found", "run install.py --link --project <folder> --served <served folder> (dry run, then --apply)"))
+    errs = guard_errors_recent()
+    if errs:  # reported only when there is something to report
+        items.append(item("guard_errors", False, lab(st, "guard_errors", n=errs), f"read {guard_log_path()} and report the error"))
     prefs = st.get("prefs", {}); missing = [k for k in ("perm_policy", "gpt_policy") if not prefs.get(k)]
     items.append(item("opening", not missing, "unanswered: " + ", ".join(missing) if missing else "answered", "TW opening" if missing else ""))
     modeitem, proj = items[0], st.get("project")
@@ -3064,7 +3549,7 @@ def undeliver(st):
     moved = []
     for r, q in st.get("requests", {}).items():
         ts = live_tasks(st, q)  # every task dropped: the result already told stays told (not re-dispatched)
-        if q["status"] in ("delivered", "reported") and not all(
+        if q["status"] in ("delivered", "reported") and not q.get("gate") and not all(  # landed stays; gated waits for the user
                 st["tasks"].get(t, {}).get("status") in ("review", "done") for t in ts):
             q["status"] = "dispatched"
             q["updated"] = now()
@@ -3110,13 +3595,28 @@ def set_req_status(st, r, q, new, by_import=False, user_said=None):
         sys.exit(f"only the user ends a request: `req close {r} --user-said \"<their words>\"` (accepted) or "
                  f"`req drop {r} --user-said \"<their words>\"` (not to do it)")
     frm = q.get("held_from") or "open" if cur == "held" else cur  # IL-33: held pauses a request where it was
-    moves = ({frm} | REQ_MOVES.get(frm, set())) - {"held"} if cur == "held" else REQ_MOVES.get(cur, set())
+    moves = ({frm} | REQ_MOVES.get(frm, set())) - {"held"} if cur == "held" else set(REQ_MOVES.get(cur, set()))
+    if cur not in REQ_END:
+        moves.add("wont")  # any live request can be set aside with a reason (F7)
     if new not in moves:
         allowed = ", ".join(sorted(moves)) or "nothing (it has ended)"
         sys.exit(f"{r} is {cur}" + (f" (paused while {frm})" if cur == "held" else "") + f": it can move to {allowed}")
     user_said = (user_said or "").strip() or None
     if (frm, new) in REQ_NEEDS_USER and not user_said:
         sys.exit(f"{r} {cur} -> {new} is the user's decision: add --user-said \"<their words>\"")
+    if new == "landed" and cur != "reported":
+        sys.exit(f"{r}: landed is only allowed from reported")
+    if new == "reported" and cur == "open":
+        busy = [t for t in live_tasks(st, q) if st["tasks"].get(t, {}).get("status") not in ("review", "done")]
+        if busy:
+            sys.exit(f"{r} has work still in progress ({', '.join(busy)}): it is reported once that work is delivered")
+    # A request the user had to say yes to keeps that gate through waiting_user / wont / open (no side door)
+    if new in ("waiting_user", "wont") and frm in ("proposed", "reported", "landed"):
+        q["gate"] = frm
+    if new == "dispatched" and q.get("gate") and not user_said:
+        sys.exit(f"{r} came from {q['gate']}: dispatching it is the user's decision: add --user-said \"<their words>\"")
+    if new == "dispatched" and user_said:
+        q.pop("gate", None)
     if new == "delivered":
         ts = live_tasks(st, q)
         not_ready = [t for t in ts if st["tasks"].get(t, {}).get("status") not in ("review", "done")]
@@ -3141,11 +3641,40 @@ def cmd_req(a):
     st = load(d)
     reqs = st.setdefault("requests", {})
     if a.action == "list":
-        rows = {r: q for r, q in reqs.items() if a.all or q["status"] not in REQ_END}
+        rows = {r: q for r, q in reqs.items() if a.all or (q["status"] not in REQ_END and q["status"] != "remark")}
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return
     if a.action == "import":
-        cmd_req_import(a, d, st)
+        cmd_req_import(a, d, st); return
+    if a.action == "migrate":
+        suggestions = {}
+        for rid, q in reqs.items():
+            if q.get("status") != "reported" or q.get("migrated"): continue
+            text = " ".join(str(q.get(k) or "") for k in ("followup", "where", "text")); low = text.lower()
+            rule = None; target = None
+            if any(w in low for w in ("等你", "待你", "确认", "回访", "你定", "wait for you")): target="waiting_user"; rule=next(w for w in ("等你", "待你", "确认", "回访", "你定", "wait for you") if w in low)
+            elif q.get("where") and any(w in low for w in ("已合并", "合入", "merged", "已做")): target="landed"; rule=next(w for w in ("已合并", "合入", "merged", "已做") if w in low)
+            elif any(w in low for w in ("不做", "放弃", "won't")): target="wont"; rule=next(w for w in ("不做", "放弃", "won't") if w in low)
+            suggestions[rid] = {"suggested": target or "unclear", "rule": rule}
+        only = set(csv(a.only)) if a.only else None
+        if only and only - set(suggestions): sys.exit(f"--only: not in the preview: {', '.join(sorted(only - set(suggestions)))}")
+        if a.apply:
+            said = (a.user_said or "").strip()
+            if not said: sys.exit("req migrate --apply requires --user-said")
+            moved = []
+            for rid, rec in suggestions.items():
+                if rec["suggested"] == "unclear" or (only is not None and rid not in only): continue
+                q=reqs[rid]; q["status"]=rec["suggested"]; q["updated"]=now()
+                q["migrated"]={"from":"reported","at":now(),"rule":rec["rule"],"user_said":said}
+                q.setdefault("user_said", []).append({"t": now(), "to": rec["suggested"], "text": said})
+                if rec["suggested"] in ("waiting_user", "wont"):
+                    q["gate"] = "reported"  # agreeing to the migration is not agreeing to more work
+                if rec["suggested"] == "wont": q["reason"]=f"migrated (matched: {rec['rule']})"
+                if rec["suggested"] == "landed": q["evidence"]=q.get("where")
+                moved.append(rid)
+            if moved: save(d, st, {"ev":"req-migrate", "ids":moved, "user_said":said})
+        print(json.dumps(suggestions, ensure_ascii=False, indent=2))
+        print(f"migrate: {sum(x['suggested'] != 'unclear' for x in suggestions.values())} suggested, {sum(x['suggested'] == 'unclear' for x in suggestions.values())} unclear", file=sys.stderr)
         return
     if a.action == "add":
         if not a.args:
@@ -3154,16 +3683,20 @@ def cmd_req(a):
         if r in reqs:
             sys.exit(f"request {r} exists")
         tasks = csv(a.tasks)
+        if a.remark and tasks: sys.exit("remark cannot have tasks")
         check_tasks(st, tasks)
-        q = {"text": " ".join(a.args), "status": "open", "tasks": tasks, "where": a.where or "",
+        q = {"text": " ".join(a.args), "status": "remark" if a.remark else "open", "tasks": [] if a.remark else tasks, "where": a.where or "",
              "followup": a.followup or "", "created": now(), "updated": now(),
              **{k: getattr(a, k) for k in ("phase", "category") if getattr(a, k)}}
         reqs[r] = q
-        if tasks:
+        if tasks and not a.remark:
             q["status"] = "dispatched"
             deliver_ready(st)  # linked to work that is already in review or done
         save(d, st, {"ev": "req-add", "req": r, "text": q["text"], "tasks": tasks})
         print(json.dumps({r: q}, ensure_ascii=False))
+        owners = ", ".join(dict.fromkeys(st["tasks"][t]["owner"] for t in tasks if st["tasks"][t].get("owner")))
+        print(lab(st, "rcpt_remark", r=r) if a.remark else lab(st, "rcpt_given", r=r, who=owners) if owners
+              else lab(st, "rcpt_open", r=r), file=sys.stderr)  # B3: the receipt the lead repeats; stdout stays JSON
         return
     if not a.args:
         sys.exit(f"usage: req {a.action} R<n> ...")
@@ -3172,6 +3705,7 @@ def cmd_req(a):
         sys.exit(f"unknown request {r}; known: {', '.join(reqs) or '-'}")
     q = reqs[r]
     if a.action == "link":
+        if q.get("status") == "remark": sys.exit("remark cannot have tasks")
         tasks = csv(",".join(a.args[1:])) + csv(a.tasks)
         if not tasks:
             sys.exit("usage: req link R<n> T1 [T2 ...]")
@@ -3179,8 +3713,10 @@ def cmd_req(a):
         q["tasks"] = list(dict.fromkeys(q.get("tasks", []) + tasks))
         if q["status"] in REQ_END:
             sys.exit(f"{r} has ended ({q['status']}); register a new request instead")
-        if q["status"] == "reported":
+        if q["status"] in ("reported", "landed"):
             # more work on something already reported: the user reopens it (reported -> dispatched)
+            set_req_status(st, r, q, "dispatched", user_said=a.user_said)
+        if q["status"] == "open" and q.get("gate"):  # was proposed / reported / landed: the user's yes first
             set_req_status(st, r, q, "dispatched", user_said=a.user_said)
         if q["status"] == "open":
             q["status"] = "dispatched"  # proposed stays proposed until the user says yes
@@ -3191,6 +3727,12 @@ def cmd_req(a):
             sys.exit(f"{r} has ended ({q['status']}); register a new request instead of editing it")
         was_held = q["status"] == "held"
         if a.status:
+            if a.status == "wont":
+                if not (a.reason or "").strip(): sys.exit("wont requires --reason")
+                q["reason"] = a.reason.strip()
+            if a.status == "landed":
+                if not (a.evidence or "").strip(): sys.exit("landed requires --evidence")
+                q["evidence"] = a.evidence.strip()
             set_req_status(st, r, q, a.status, user_said=a.user_said)
         if a.status == "dispatched" and not q.get("tasks"):
             sys.exit(f"{r} has no tasks: link the work first (`req link {r} T<n>`), which dispatches it")
@@ -3208,7 +3750,9 @@ def cmd_req(a):
                      f"({'not to do it' if drop else 'accepting the result'})")
         if q["status"] in REQ_END:
             sys.exit(f"{r} has already ended ({q['status']})")
-        if not drop and q["status"] != "reported":
+        if not drop and q["status"] == "wont":
+            sys.exit(f"{r} is set aside (wont): if the user agrees not to do it, `req drop {r} --user-said \"<their words>\"`")
+        if not drop and q["status"] not in ("reported", "landed"):
             sys.exit(f"{r} is {q['status']}: report it to the user first (`req set {r} --status reported`), "
                      "then close it when they accept")
         if not drop:
@@ -3276,6 +3820,12 @@ def cmd_req_import(a, d, st):
         set_req_status(st, r, q, status, by_import=True)
         if status in REQ_END:
             q["closed_reason"] = "imported (ended in the old ledger; no user words recorded here)"
+        if status == "landed" and not q.get("evidence"):
+            q["evidence"] = "imported: " + (where or "no evidence in the old ledger")
+        if status == "wont" and not q.get("reason"):
+            q["reason"] = "imported (no reason in the old ledger)"
+        if status in ("waiting_user", "wont", "landed"):
+            q["gate"] = "imported"  # history unknown: dispatching it again takes the user's words
         if q["status"] == "delivered" and tasks and not tasks_ready(st, q):
             q["status"] = "dispatched"  # linked work is not finished (an old row without tasks keeps its status)
         out[r] = q
@@ -4139,7 +4689,8 @@ def cmd_handover(a):
 def _blank_state(project, folder):
     return {"project": project, "goal": "", "created": None, "lead": {"session_id": None},
             "envs": {"rc": None, "cloud": None}, "repo": {"url": None, "path": str(folder), "base": "main"},
-            "threads": {}, "tasks": {}, "plan_approved": False, "questions": [], "requests": {},
+            "threads": {}, "tasks": {}, "plan_approved": False, "questions": [], "requests": {}, "features": {},
+            "promises": [],
             "prefs": {"max_parallel": 0, "propose_before_start": True, "update_detail": "brief", "checkin_minutes": 10,
                       "require_review": True}}
 
@@ -4293,9 +4844,11 @@ def _replay(st, e, project, notes, d):
                 st["questions"][i]["answered"] = True
         if e.get("snap_plan_approved") is not None:
             st["plan_approved"] = e["snap_plan_approved"]
-        for k in ("issues", "deliverables", "qa_pending"):
+        for k in ("issues", "deliverables", "qa_pending", "decisions", "promises", "features", "docs", "standing", "last_report_at"):
             if e.get(f"snap_{k}") is not None:
                 st[k] = e[f"snap_{k}"]
+        if e.get("snap_reconcile") is not None:
+            st["reconcile"] = e["snap_reconcile"]
         return st
 
 
@@ -4521,7 +5074,9 @@ def cmd_rebuild(a):
                                            "changed": {i: f for i, f in sorted(changed.items()) if f}}
         summary["vs_current"]["other"] = sorted(k for k in ("lead", "prefs", "questions", "plan_approved", "envs",
                                                              "repo", "goal", "issues", "deliverables",
-                                                             "qa_pending") if old.get(k) != st.get(k))
+                                                             "qa_pending", "features", "promises", "decisions",
+                                                             "docs", "standing", "reconcile", "last_report_at")
+                                                             if (old.get(k) or None) != (st.get(k) or None))  # [] = missing
         lost = sum(len(old.get(k, {})) for k in ("threads", "tasks", "requests"))
         kept = sum(len(st[k]) for k in ("threads", "tasks", "requests"))
         if a.apply and lost and kept < lost / 2 and not a.force:
@@ -5397,6 +5952,26 @@ def _judge(argv, depth=0):
     return worst
 
 
+def guard_log_path():
+    return Path(os.environ.get("TW_GUARD_LOG") or "~/.cache/teamwork/guard-errors.jsonl").expanduser()
+
+
+def guard_errors_recent(days=7):
+    """How many times bash-guard hit an internal error (and let the command through) in the last `days` days."""
+    try:
+        lines = guard_log_path().read_text(encoding="utf-8", errors="replace").split("\n")
+    except OSError:
+        return 0
+    cutoff, n = _when(now()) - dt.timedelta(days=days), 0
+    for line in lines:
+        try:
+            x = json.loads(line) if line.strip() else None
+        except ValueError:
+            continue
+        n += isinstance(x, dict) and _later(x.get("at"), cutoff)
+    return n
+
+
 def cmd_bash_guard(a):
     """PreToolUse hook: read the tool call on stdin, print a decision only for big decisions. Never fails: odd input
     or an internal error prints nothing, so ordinary work is never blocked by the guard itself."""
@@ -5411,8 +5986,18 @@ def cmd_bash_guard(a):
             cmd = ti.get("command") if isinstance(ti, dict) else None
         if not isinstance(cmd, str):
             return
+        if os.environ.get("TW_TEST_GUARD_FAULT"):  # tests: stands in for a bug inside the guard
+            raise RuntimeError(os.environ["TW_TEST_GUARD_FAULT"])
         hit = big_decision(cmd)
-    except Exception:  # noqa: BLE001 - a guard bug must not stop the user's work
+    except Exception as exc:  # noqa: BLE001 - a guard bug must not stop the user's work
+        try:  # ... but it leaves a line, so `selfcheck` can say the guard is failing
+            path = guard_log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"at": now(), "type": type(exc).__name__, "message": str(exc)[:200]},
+                                   ensure_ascii=False) + "\n")
+        except Exception:  # noqa: BLE001 - a log that cannot be written changes nothing either
+            pass
         return
     if hit:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": hit[0],
@@ -5428,6 +6013,18 @@ def main():
     p.add_argument("-C", metavar="PROJECT_FOLDER",
                    help="project folder to act on (always pass it: several projects can share one Remote Control folder)")
     s = p.add_subparsers(dest="cmd", required=True)
+
+    x = s.add_parser("feature", help="feature ledger")
+    x.add_argument("action", choices=["add", "set", "list"]); x.add_argument("name", nargs="?", default="")
+    x.add_argument("--phase"); x.add_argument("--req", action="append", nargs="+"); x.add_argument("--task", action="append", nargs="+")
+    x.add_argument("--status", choices=["planned", "building", "landed", "dropped"]); x.add_argument("--evidence"); x.add_argument("--reason")
+    x.add_argument("--json", action="store_true"); x.add_argument("--done-since"); x.set_defaults(f=cmd_feature)
+    x = s.add_parser("reconcile", help="compare requests, features and tasks")
+    x.add_argument("--strict", action="store_true"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_reconcile)
+    x = s.add_parser("wrapup", help="end-of-round ledger self-check")
+    x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_wrapup)
+    x = s.add_parser("sprint", help="summarize sprint progress")
+    x.add_argument("--since"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_sprint)
 
     x = s.add_parser("init", help="create .teamwork/ in a project folder")
     x.add_argument("project")
@@ -5487,6 +6084,8 @@ def main():
     x.add_argument("--scripts-ok", action="store_true", help="set: clear --no-scripts")
     x.add_argument("--status")
     x.add_argument("--notes")
+    x.add_argument("--merged", metavar="SHA", help="set: the commit this task's work was merged as (the board's "
+                   "progress chain shows it as merged)")
     x.add_argument("--review", choices=["pass", "fail", "capped"],
                    help="independent review result against 'done when'; capped = last allowed round "
                         "(prefs review_max_rounds), no blocking finding, checks pass, --remaining for follow-ups")
@@ -5501,6 +6100,10 @@ def main():
     x.add_argument("--skip-review", metavar="REASON", help="mark done without review (recorded; needs --user-said)")
     x.add_argument("--user-said", metavar="WORDS", help="the user's words: needed for --skip-review and dropping")
     x.set_defaults(f=cmd_task)
+    x = s.add_parser("task-msg", help="format a task dispatch message")
+    x.add_argument("id"); x.add_argument("--dispatch", action="store_true"); x.set_defaults(f=cmd_task_msg)
+    x = s.add_parser("promise", help="record and track commitments")
+    x.add_argument("action", choices=["add", "done", "list"]); x.add_argument("text", nargs="?", default=""); x.add_argument("--req"); x.add_argument("--evidence"); x.add_argument("id", nargs="?"); x.set_defaults(f=cmd_promise)
 
     x = s.add_parser("plan", help="show, approve or reopen the plan")
     x.add_argument("action", choices=["show", "approve", "reopen"])
@@ -5519,14 +6122,19 @@ def main():
     x.add_argument("--from", dest="frm", default="lead")
     x.add_argument("--need-thread", metavar="NAME", help="a thread's NEED-THREAD (message or STATUS need_thread line): "
                    "recorded once per (thread, name); a repeat is refused so it is not handled twice")
+    x.add_argument("--default", type=int, metavar="N", help="apply a reversible default to question N")
+    x.add_argument("--undoable", action="store_true")
     x.add_argument("--answer", type=int, metavar="N", help="mark question N (as numbered on the board, from 1) "
                    "answered; the answer text is optional")
     x.set_defaults(f=cmd_ask)
     x = s.add_parser("memory", help="append a project memory line")
-    x.add_argument("text")
+    x.add_argument("text", nargs="?", default="")
     x.add_argument("--never-raise", action="store_true", help="a topic the user ruled out (IL-16)")
     x.add_argument("--user-owned", action="store_true", help="something the user provides or decides (IL-16)")
     x.add_argument("--temporary", action="store_true", help="a rule for now: confirm before enforcing it later (IL-36)")
+    x.add_argument("--standing", action="store_true", help="a long-term requirement of the user's: every TASK "
+                   "from task-msg carries it")
+    x.add_argument("--standing-list", action="store_true", help="list the standing requirements")
     x.set_defaults(f=cmd_memory)
     x = s.add_parser("log", help="append a note to log.jsonl")
     x.add_argument("text")
@@ -5535,6 +6143,23 @@ def main():
     x.add_argument("--share", action="store_true", help="deliverables, requests, waiting items, issues and every "
                    "requirement by phase/category, for a doc the user opens (IL-13, IL-38)")
     x.set_defaults(f=cmd_board)
+    x = s.add_parser("card", help="a report card for the user: first line, done / doing / waiting, ledger line")
+    x.add_argument("--kind", required=True, choices=list(CARD_KINDS),
+                   help="compare (analysis), plan (new plan), read (material read), done (delivery), status (progress)")
+    x.add_argument("--head", required=True, help="the first line: the receipt or the conclusion")
+    x.add_argument("--since", metavar="ISO|last-report", help="count what changed after this time (default: everything)")
+    x.add_argument("--link", action="append", metavar="URL", help="a link for the ledger line (repeatable)")
+    x.add_argument("--ledger-line", action="store_true", help="print the ledger line on this card whatever "
+                   "prefs ledger_line_every says")
+    x.add_argument("--json", action="store_true")
+    x.set_defaults(f=cmd_card)
+    x = s.add_parser("docs", help="links to the documents the user opens: set board|ledger|features --link URL, list")
+    x.add_argument("action", choices=["set", "list"])
+    x.add_argument("which", nargs="?", choices=list(DOC_KINDS))
+    x.add_argument("--link", metavar="URL")
+    x.add_argument("--note", help="one line saying what the document is")
+    x.set_defaults(f=cmd_docs)
+    s.add_parser("intro", help="what to tell the user once the project is set up").set_defaults(f=cmd_intro)
     x = s.add_parser("issue", help="known issues: add / set / list (IL-20)")
     x.add_argument("action", choices=["add", "set", "list"])
     x.add_argument("text", nargs="?", default="", help='add: "<what is wrong>"; set: I<n>')
@@ -5552,6 +6177,9 @@ def main():
     x.add_argument("file", help="message file or - for stdin")
     x.add_argument("--prompt", action="store_true", help="the text is a session prompt (append_system_prompt): "
                    "check only that it is not a file pointer")
+    x.add_argument("--user", action="store_true", help="the text is a message for the user: warn about commit ids, "
+                   "command output and local paths (exit 0)")
+    x.add_argument("--strict", action="store_true", help="with --user: a warning fails (exit 1)")
     x.add_argument("--json", action="store_true")
     x.set_defaults(f=cmd_check_msg)
     x = s.add_parser("qa", help="merges waiting for a regression round: list, or done <branch|sha> ... (IL-22)")
@@ -5567,6 +6195,7 @@ def main():
     x.add_argument("--status", help="draft or final")
     x.add_argument("--missing", help="what is still missing")
     x.add_argument("--req", help="the request it answers")
+    x.add_argument("--task"); x.add_argument("--dispatch-v", type=int)
     x.set_defaults(f=cmd_deliverable)
     x = s.add_parser("roster", help="print the roster block")
     x.add_argument("--thread")
@@ -5615,11 +6244,13 @@ def main():
     x.add_argument("thread")
     x.set_defaults(f=cmd_worker_prompt)
     x = s.add_parser("req", help="user requests ledger: add / link / set / close / list / import")
-    x.add_argument("action", choices=["add", "link", "set", "close", "drop", "list", "import"])
+    x.add_argument("action", choices=["add", "link", "set", "close", "drop", "list", "import", "migrate"])
     x.add_argument("args", nargs="*", help='add: "<text>"; link: R<n> T1 [T2]; set/close: R<n>; import: <file.md>')
     x.add_argument("--id", help="add: explicit id (default next R<n>)")
     x.add_argument("--tasks", help="comma list of task ids to link")
-    x.add_argument("--status", help="set: proposed | dispatched | delivered | reported (ending only via close/drop)")
+    x.add_argument("--status", help="set: request status")
+    x.add_argument("--reason"); x.add_argument("--evidence")
+    x.add_argument("--remark", action="store_true")
     x.add_argument("--where"); x.add_argument("--followup"); x.add_argument("--text")
     x.add_argument("--phase", help="add/set: the phase it belongs to, for the full requirement list (IL-38)")
     x.add_argument("--category", help="add/set: e.g. goal, constraint, feature (IL-38)")
@@ -5630,6 +6261,8 @@ def main():
     x.add_argument("--note")
     x.add_argument("--all", action="store_true", help="list: include closed")
     x.add_argument("--dry-run", action="store_true", help="import: show what would be imported")
+    x.add_argument("--only", help="migrate --apply: only these ids (comma list), after reading the preview")
+    x.add_argument("--apply", action="store_true")
     x.set_defaults(f=cmd_req)
     x = s.add_parser("rebuild", help="rebuild state.json from log.jsonl, sessions JSON and tw/<project>/* branches")
     x.add_argument("--sessions", help="JSON file with the list_sessions result (sessions tagged teamwork:<project>)")

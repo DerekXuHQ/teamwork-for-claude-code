@@ -42,6 +42,13 @@ Checked against `main` at `3640ebe`; the status of each finding was updated in T
 | `tw.py context` | setup.md §3 | B7 |
 | `install.py` | SKILL §1.5, setup.md | B8 |
 | Request ledger commands | core T14 (not merged) | A5, A9, A10, A11 (re-check when T14 lands) |
+| `TW req set --status waiting_user / wont --reason / landed --evidence`, `req add --remark`, `req migrate [--apply --user-said]` (T56: F7, B3, C12) | SKILL §4 | - |
+| `TW ask --default N "<what>" --undoable` (T56: F5) | SKILL §4 | - |
+| `TW promise add/done/list` (T56: F6) | SKILL Ledger | - |
+| `TW task-msg T<n> --dispatch`, `deliverable add --task --dispatch-v` (T56: record before send, dedupe) | SKILL §3.2b | - |
+| `TW feature add/set/list`, `reconcile`, `wrapup`, `sprint` (T56: C1–C5, C9) | SKILL Ledger, §5.13 | - |
+| `TW card`, `docs set/list`, `intro`, `task set --merged`, `check-msg --user`, `memory --standing` (T56: B1–B6, B9, I2, F4) | SKILL §1.4a, Keep the user in one chat, Rules | - |
+| bash-guard error log, `selfcheck` count (T56) | setup.md §5b | - |
 
 ### Overnight-run lessons (IL-1 to IL-39)
 

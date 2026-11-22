@@ -118,6 +118,8 @@ They need a cloud environment and, to edit code, a GitHub repo the account can r
 - A running session's model cannot be changed by a tool. `create_session(model=...)` sets it for a new seat only; the user can switch any session by hand in claude.ai. `get_session` shows `configured_model`, `session_context.model` and `external_metadata.last_served_model` (the self-check compares them).
 - GPT runs through the codex plugin (`codex:codex-rescue`, or its companion script). `TW selfcheck` says whether `codex` is on the PATH; routing is in references/routing.md.
 
+- When `tw.py bash-guard` itself fails (bad input, a bug), it still lets the command through, and writes one line to `~/.cache/teamwork/guard-errors.jsonl` (`TW_GUARD_LOG` overrides the path). `TW selfcheck` reports how many in the last 7 days, so a broken guard is seen instead of silently passing everything.
+
 ## §6 If something is refused
 
 - A trust card appears in claude.ai the first time the lead messages or creates sessions: approve it for the lead only.

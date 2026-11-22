@@ -22,6 +22,8 @@ python3 <path>/teamwork/scripts/install.py --apply --link --project <project fol
 
 Use `--link` (recommended): the skill becomes a symlink to the clone, so every new session runs the clone's current checkout; upgrade with `git pull`, and whatever lands on the checked-out branch is live at once. Without `--link` the installer copies a frozen snapshot (without `.git`, `.teamwork`, `.claude` and other local state); to upgrade a copy, delete `<config dir>/skills/teamwork` and re-run, since the installer never overwrites an existing one.
 
+**Staged rollout (H8).** A linked clone is live at once on every merge, in every config dir that links it. To let a change reach everyone only when it is ready, point the links at release snapshots instead: `python3 <clone>/scripts/release.py publish --ref main --apply` snapshots `main` (`git archive`, committed files only) into `<config dir>/teamwork-releases/r<date>-<sha>/` and switches the `skills/teamwork` link of every `~/.claude*` config dir that has one (or each `--config-dir`) to it, all or none. `release.py rollback --apply` goes back to the previous release, `release.py status` shows where each points and how far behind `main` it is, `release.py edge --apply` links the clone again. The hooks run `<config dir>/skills/teamwork/scripts/tw.py`, so they follow the link. Old snapshots are never deleted. A project that tests unreleased changes sets `prefs skill_edge=<clone>` (SKILL.md §7a).
+
 Then start a **new** RC session (skills load at session start) and check `/teamwork` is listed.
 
 ## §2 Let RC threads report without stalling

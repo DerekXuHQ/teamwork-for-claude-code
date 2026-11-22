@@ -19,6 +19,7 @@ import functools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -683,6 +684,10 @@ def cmd_init(a):
             "thread_permission_mode": THREAD_MODE_DEFAULT,  # create_session permission_mode for every thread
             "standing_grants": [],  # archive, schedule, merge: the user allowed these once (IL-30), each by --user-said
             "check_cmd": "",  # the project's checks, run by `merge` on the rehearsed merge
+            "spawn_policy": "",
+            "perm_policy": "",
+            "gpt_policy": "",
+            "skill_edge": "",  # H8: a clone this project tests before release; empty = the installed release
             "check_timeout_minutes": 60,  # merge stops checks that run longer (the whole process group); 0 = no limit
             "default_after_minutes": 30,  # IL-1: an unanswered non-gated question takes its stated default after this
         },
@@ -750,7 +755,7 @@ def cmd_lead(a):
     save(d, st, {"ev": "lead", "session": a.session, "envs": st["envs"],
                  **({"mode": a.mode} if a.mode else {})})
     out = {"lead": st["lead"], "envs": st["envs"], "repo": st["repo"], "thread_permission_mode": thread_mode(st),
-           "title": f"[{tag(st)}] lead", "tags": [f"teamwork:{tag(st)}", "teamwork-thread:lead"],
+           "title": f"[{tag(st)}] lead" + (f" · {st['goal'][:40]}{'…' if len(st['goal']) > 40 else ''}" if st.get("goal") else ""), "tags": [f"teamwork:{tag(st)}", "teamwork-thread:lead"],
            "set_up": "set_session_title and set_session_tags on your own session with these (IL-34)"}
     w = permission_warning(st)
     if w:
@@ -2255,7 +2260,7 @@ def cmd_prefs(a):
         if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes") and not re.fullmatch(r"[0-9]+", v):
             sys.exit(f"{k}: a whole number of minutes")
         cur = st["prefs"].get(k)
-        if k in ("check_cmd", "language", "short_name", "thread_permission_mode"):
+        if k in ("check_cmd", "language", "short_name", "thread_permission_mode", "skill_edge", "spawn_policy", "perm_policy", "gpt_policy"):
             st["prefs"][k] = v  # text, never coerced (check_cmd=true is a command)
         elif isinstance(cur, bool) or v.lower() in ("true", "false", "yes", "no", "on", "off"):
             st["prefs"][k] = v.lower() in ("1", "true", "yes", "on")
@@ -2266,6 +2271,14 @@ def cmd_prefs(a):
         if k == "thread_permission_mode" and v and v not in PERMISSION_MODES:
             sys.exit(f"thread_permission_mode: one of {', '.join(PERMISSION_MODES)}, or empty for the default "
                      f"({THREAD_MODE_DEFAULT})")
+        if k == "spawn_policy" and v not in ("", "free", "ask"):
+            sys.exit("spawn_policy: one of free, ask, or empty")
+        if k == "perm_policy" and v not in ("", "managed", "ask"):
+            sys.exit("perm_policy: one of managed, ask, or empty")
+        if k in ("spawn_policy", "perm_policy", "gpt_policy") and v:
+            if not (a.user_said or "").strip():
+                sys.exit(f"{k} is the user's decision: add --user-said \"<their words>\"")
+            st["prefs"].setdefault("policy_said", {})[k] = {"text": a.user_said.strip(), "at": now()}
         if k == "thread_permission_mode" and v in ("auto", "bypassPermissions"):
             print(f"note: threads get {v} only if the lead runs at least as loose a mode (`tw.py lead --mode`); "
                   "create_session refuses a thread more permissive than its creator, and bypassPermissions lets a "
@@ -2309,6 +2322,137 @@ def cmd_prefs(a):
                           "note": "update each session with set_session_title / set_session_tags"},
                          ensure_ascii=False), file=sys.stderr)
     print(json.dumps(st["prefs"], ensure_ascii=False))
+
+
+OPENING = {
+    "spawn_policy": ("May the lead open sessions (threads) freely?",
+                     ["ask me before each (spawn_policy=ask)", "ask only for a new topic (say it in words)",
+                      "open by topic without asking (spawn_policy=free)"],
+                     ["one line to read and answer per thread", "a question per new topic",
+                      "no questions; you see each one on the board"], ("ask", "free")),
+    "perm_policy": ("Hand permissions to the lead (it runs in auto and handles prompts)?",
+                    ["ask me for each (perm_policy=ask, no auto)", "managed, but show me the sensitive ones (in words)",
+                     "managed (perm_policy=managed)"],
+                    ["every message between threads asks for a click: about a hundred a night",
+                     "a click only for what you name", "switch this session to auto once if the server has not "
+                     "accepted it; then only irreversible steps ask"], ("ask", "managed")),
+    "gpt_policy": ("Use GPT wherever it can do the work?",
+                   ["no GPT (gpt_policy=no)", "only for what I name (say it in words)", "wherever it can (gpt_policy=yes)"],
+                   ["all work on Claude quota", "GPT only inside the bounds you set", "Claude plans and reviews, GPT "
+                    "writes; saves Claude quota"], ("no", "yes")),
+}
+
+
+def opening_data(d, st):
+    answers = []
+    for folder in find_projects(d.parent.parent):  # the other projects under the same served folder
+        if folder.resolve() == d.parent.resolve():
+            continue
+        try:
+            other = json.loads((folder / ".teamwork" / "state.json").read_text(encoding="utf-8"))
+            for key, record in (other.get("prefs", {}).get("policy_said") or {}).items():
+                if key in OPENING and record.get("text"):
+                    answers.append((record.get("at", ""), key, other["prefs"].get(key), record["text"]))
+        except (OSError, ValueError, TypeError):
+            continue
+    rows = []
+    for key, (question, scale, costs, _) in OPENING.items():
+        prior = max((x for x in answers if x[1] == key), default=None)
+        rows.append({"key": key, "question": question, "scale": [{"step": s, "cost": c} for s, c in zip(scale, costs)],
+                     "current": st.get("prefs", {}).get(key) or None,
+                     "last": ({"value": prior[2], "text": prior[3], "at": prior[0]} if prior else None),
+                     "never_default": key in ("perm_policy", "gpt_policy")})
+    return {"questions": rows, "unanswered_now": [k for k in OPENING if not st.get("prefs", {}).get(k)],
+            "rule": "until answered: perm and gpt stay at ask / riskless work only; spawn takes the last answer as a default and only reversible steps are taken"}
+
+
+def cmd_opening(a):
+    d = need(find_dir()); result = opening_data(d, load(d))
+    if a.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        for row in result["questions"]:
+            print(f"{row['key']}: {row['question']}")
+            for n, step in enumerate(row["scale"], 1): print(f"  {n}. {step['step']} — {step['cost']}")
+            print(f"  current: {row['current']}; last elsewhere: {row['last']}")
+        print("unanswered_now: " + ", ".join(result["unanswered_now"]))
+        print(result["rule"])
+
+
+def newer_release(info=None):
+    label, info = running_version() if info is None else (None, info)
+    skill = Path(__file__).resolve().parents[1]
+    if info.get("type") != "release": return None
+    try:
+        releases = json.loads((skill.parent / "index.json").read_text(encoding="utf-8"))["releases"]
+        return releases[-1]["name"] if releases and releases[-1]["name"] != info["name"] else None
+    except (OSError, ValueError, KeyError): return None
+
+
+def cmd_selfcheck(a):
+    d = find_dir(); st = load(d) if d else {}; lead = st.get("lead", {})
+    def item(name, ok, detail="", fix=""): return {"item": name, "ok": ok, "detail": detail, "fix": fix}
+    mode = a.mode or lead.get("permission_mode")
+    items = [item("mode", mode == "auto" if mode else None, mode or "mode unavailable", "switch this session's mode away from Auto and back in the mode menu under the message box, then tell the lead"),
+             item("session", bool(lead.get("session_id")), str(lead.get("session_id") or "lead session not set"), "TW lead --session <id>")]
+    items.append(item("model", a.model == a.served_model if a.model and a.served_model else None,
+                      f"served {a.served_model}, configured {a.model} (fallback)" if a.model and a.served_model and a.model != a.served_model else ""))
+    items.append(item("effort", a.effort == a.want_effort if a.want_effort else None,
+                      f"effort {a.effort}, wanted {a.want_effort}" if a.want_effort and a.effort != a.want_effort else ""))
+    folder = Path(st.get("repo", {}).get("path") or (d.parent if d else "."))
+    used = a.seats_used
+    if used is None:  # the seat cap counts every project's sessions on this computer, not only this one's
+        used = 1 if lead.get("session_id") else 0
+        own = d.parent.resolve() if d else None
+        for f in find_projects(Path(a.served).expanduser() if a.served else (d.parent.parent if d else Path("."))):
+            try:
+                o = json.loads((f / ".teamwork" / "state.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            used += sum(1 for t in (o.get("threads") or {}).values()
+                        if isinstance(t, dict) and t.get("status") != "archived" and t.get("session_id"))
+            used += 1 if f.resolve() != own and (o.get("lead") or {}).get("session_id") else 0
+    items.append(item("seats", used < a.seats_max, f"{used} of {a.seats_max} used"))
+    found = shutil.which("codex")
+    items.append(item("gpt", True if found else None, "codex CLI found" if found else "codex CLI not found; GPT work runs only through the codex plugin if installed"))
+    label, info = running_version(); newer = newer_release(info)
+    items.append(item("version", not bool(newer), f"newer release {newer} available" if newer else
+                      label + ("; unreleased changes: this is the live clone, not a release" if info.get("type") == "edge" else ""),
+                      "say which version you run, and that the user may want the newest release" if newer else ""))
+    items.append(item("ledger", bool(d and (d / "state.json").exists() and (d / "BOARD.md").exists()), "state.json and BOARD.md"))
+    found = {"SessionStart": False, "PreToolUse": False}  # RC sessions start in the served folder: its hooks count too
+    for base in dict.fromkeys([folder, Path(a.served).expanduser() if a.served else folder.parent]):
+        for name in ("settings.json", "settings.local.json"):
+            try:
+                hk = json.loads((base / ".claude" / name).read_text(encoding="utf-8")).get("hooks") or {}
+            except (OSError, ValueError, AttributeError):
+                continue
+            for ev, word in (("SessionStart", "context"), ("PreToolUse", "bash-guard")):
+                for g in hk.get(ev) or []:
+                    for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
+                        c = str(h.get("command", "")) if isinstance(h, dict) else ""
+                        found[ev] |= "tw.py" in c and word in c
+    hookok = all(found.values())
+    items.append(item("hooks", hookok, "SessionStart context and PreToolUse bash-guard" if hookok else "required hooks not found", "run install.py --link --project <folder> --served <served folder> (dry run, then --apply)"))
+    prefs = st.get("prefs", {}); missing = [k for k in ("perm_policy", "gpt_policy") if not prefs.get(k)]
+    items.append(item("opening", not missing, "unanswered: " + ", ".join(missing) if missing else "answered", "TW opening" if missing else ""))
+    modeitem, proj = items[0], st.get("project")
+    if not d:
+        first = f"No teamwork project here: run /teamwork in the project folder (teamwork {label})"
+    elif a.desktop:
+        first = f"I am the lead of {proj}, on the desktop: I open threads in the turn you send a message (teamwork {label})"
+    elif modeitem["ok"]:
+        first = f"I am the lead of {proj}, auto is in effect (teamwork {label})"
+    elif modeitem["ok"] is None:
+        first = (f"I am the lead of {proj}; I could not read this session's mode: check it says Auto in the mode menu "
+                 f"under the message box (teamwork {label})")
+    else:
+        first = f"I am the lead of {proj}; please switch this session to auto once: {modeitem['fix']} (teamwork {label})"
+    failed = [x for x in items if x["ok"] is False]
+    if a.json: print(json.dumps({"items": items, "first_line": first}, ensure_ascii=False))
+    else:
+        print(first)
+        for x in (failed if a.brief else items): print(f"{'✓' if x['ok'] else '✗' if x['ok'] is False else '?'} {x['item']}: {x['detail']}" + (f"; fix: {x['fix']}" if x['ok'] is False and x['fix'] else ""))
 
 
 def cmd_worker_prompt(a):
@@ -3982,6 +4126,60 @@ def thread_reminder(st, me):
             "tw-status block.\n\n")
 
 
+def running_version():
+    skill = Path(__file__).resolve().parents[1]
+    release = skill / "RELEASE.json"
+    if release.exists():
+        r = json.loads(release.read_text(encoding="utf-8"))
+        return f"release {r['name']} ({r['sha'][:7]})", {"type": "release", "name": r["name"], "sha": r["sha"]}
+    if (skill / ".git").exists():
+        try:
+            sha = subprocess.run(["git", "-C", str(skill), "rev-parse", "HEAD"], capture_output=True,
+                                 text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            sha = ""
+        return f"edge {sha[:7] or '?'} (live clone)", {"type": "edge", "sha": sha}
+    return "copy (unknown version)", {"type": "copy"}
+
+
+def _vkey(label):
+    """What makes two sessions' rules differ: the release name; every live-clone (edge) session counts as one."""
+    label = str(label or "")
+    return "edge" if label.startswith("edge ") else label.split(" (")[0]
+
+
+def cmd_version(a):
+    label, info = running_version()
+    newer = newer_release(info)
+    if not a.sessions and not a.json:
+        print(label)
+        if newer:
+            print(f"newer release {newer} available (rollback in effect?)")
+        return
+    result = {"running": {**info, "version": label}, "newer": newer}
+    if a.sessions:
+        d = find_dir()
+        latest = {}
+        if d and (d / "session-versions.jsonl").exists():
+            for line in (d / "session-versions.jsonl").read_text(encoding="utf-8").splitlines():
+                try:
+                    row = json.loads(line)
+                    latest[row["session"]] = row
+                except (ValueError, KeyError):
+                    continue
+        st = load(d) if d and (d / "state.json").exists() else {}
+        old = []
+        for name, thread in (st.get("threads") or {}).items():
+            sid = thread.get("session_id") if isinstance(thread, dict) else None
+            if sid in latest and _vkey(latest[sid].get("version")) != _vkey(label):
+                old.append({"thread": name, "session": sid, "version": latest[sid].get("version")})
+        sid = (st.get("lead") or {}).get("session_id")
+        if sid in latest and _vkey(latest[sid].get("version")) != _vkey(label):
+            old.append({"thread": "lead", "session": sid, "version": latest[sid].get("version")})
+        result["old_sessions"] = old
+    print(json.dumps(result, ensure_ascii=False) if a.json or a.sessions else label)
+
+
 def cmd_context(a):
     """SessionStart hook. Prints nothing outside a teamwork folder."""
     d = find_dir()
@@ -4020,8 +4218,39 @@ def cmd_context(a):
                   "cd into its folder first (its own board then applies)."}}, ensure_ascii=False))
         return
     st = load(d)
+    label, info = running_version()
+    newer = newer_release(info)
+    newer_note = ""
+    try:
+        rels = json.loads((Path(__file__).resolve().parents[1].parent / "index.json").read_text(encoding="utf-8"))["releases"]
+        if newer:
+            newer_note = next((r.get("note", "") for r in rels if r["name"] == newer), "")
+    except (OSError, ValueError, KeyError):
+        pass
+    try:  # the hook's JSON on stdin names the session; wait briefly, a stdin left open must not hang the hook
+        import select
+        import time
+        event, buf, end = None, b"", time.monotonic() + 0.5
+        fd = sys.stdin.fileno()
+        while not sys.stdin.isatty() and time.monotonic() < end and select.select([fd], [], [], max(0, end - time.monotonic()))[0]:
+            chunk = os.read(fd, 65536)  # what is there now; never wait for end of input
+            if not chunk:
+                break
+            buf += chunk
+            try:
+                event = json.loads(buf.decode("utf-8"))
+                break
+            except ValueError:
+                continue
+        sid = event.get("session_id") if isinstance(event, dict) else None
+        if sid:  # H9: which version each session started on
+            with (d / "session-versions.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"session": sid, "version": label, "at": os.environ.get("TW_NOW") or now(),
+                                    "cwd": str(Path.cwd())}) + "\n")
+    except Exception:
+        pass
     pw = permission_warning(st) if not in_worktree else ""
-    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\n" + (f"Lead: permissions: {pw}\n\n" if pw else "") + thread_reminder(st, me) + language_rule(st) + "\n\n" + (unreported_note(st) if not in_worktree else
+    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\nteamwork version: " + label + (f"\nnewer release {newer} available (rollback in effect?)" + (f": {newer_note}" if newer_note else "") if newer else "") + (f"\nThis project tests unreleased teamwork: read {st['prefs']['skill_edge']}/SKILL.md and run {st['prefs']['skill_edge']}/scripts/tw.py instead of the installed copy (staged rollout; the rest of the computer stays on the release)." if st.get("prefs", {}).get("skill_edge") else "") + "\n\n" + (f"Lead: permissions: {pw}\n\n" if pw else "") + thread_reminder(st, me) + language_rule(st) + "\n\n" + (unreported_note(st) if not in_worktree else
     "The board below is the lead's view: its requests, questions and commands are the lead's to act on, not yours. "
     "Read it for the roster, your tasks and the known issues.\n\n") + render_board(
         st
@@ -4845,6 +5074,16 @@ def main():
     x.add_argument("--set", nargs="*")
     x.add_argument("--user-said", metavar="WORDS", help="the user's words, needed to turn require_review off")
     x.set_defaults(f=cmd_prefs)
+    x = s.add_parser("opening", help="show the opening policy questions")
+    x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_opening)
+    x = s.add_parser("selfcheck", help="check this lead session and project setup")
+    x.add_argument("--mode"); x.add_argument("--model"); x.add_argument("--served-model"); x.add_argument("--served"); x.add_argument("--desktop", action="store_true"); x.add_argument("--effort"); x.add_argument("--want-effort")
+    x.add_argument("--seats-used", type=int); x.add_argument("--seats-max", type=int, default=32)
+    x.add_argument("--brief", action="store_true"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_selfcheck)
+    x = s.add_parser("version", help="show this skill copy and active sessions")
+    x.add_argument("--sessions", action="store_true")
+    x.add_argument("--json", action="store_true")
+    x.set_defaults(f=cmd_version)
     x = s.add_parser(
         "worker-prompt",
         help="filled worker protocol -> create_session append_system_prompt",

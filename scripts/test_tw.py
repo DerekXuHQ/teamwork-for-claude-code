@@ -70,6 +70,204 @@ class TwCase(unittest.TestCase):
         return json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
 
+class SessionVersions(TwCase):
+    def run_context(self, data):
+        return subprocess.run([sys.executable, str(TW), "context"], cwd=self.dir, env=self.env,
+                              input=data, capture_output=True, text=True)
+
+    def test_context_records_and_reports_versions(self):
+        r = self.run_context('{"session_id":"session_01Zorblax"}')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = [json.loads(x) for x in (self.dir / ".teamwork" / "session-versions.jsonl").read_text().splitlines()]
+        self.assertEqual(rows[-1]["session"], "session_01Zorblax")
+        self.assertIn("teamwork version:", r.stdout)
+        self.tw("thread", "add", "api")
+        st = self.state()
+        st["threads"]["api"]["session_id"] = "s-old"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        (self.dir / ".teamwork" / "session-versions.jsonl").write_text(
+            json.dumps({"session": "s-old", "version": "old release", "at": "now", "cwd": str(self.dir)}) + "\n")
+        got = json.loads(self.tw("version", "--sessions").stdout)
+        self.assertEqual(got["old_sessions"][0]["thread"], "api")
+        self.tw("prefs", "--set", "skill_edge=/tmp/x")
+        self.assertIn("tests unreleased teamwork", self.context())
+        self.assertEqual(self.run_context("garbage").returncode, 0)
+
+
+class OpeningAndSelfcheck(TwCase):
+    def test_title_with_goal(self):
+        self.tw("lead", "--session", "lead-session")
+        out = json.loads(self.tw("lead").stdout)
+        self.assertEqual(out["title"], f"[{self.state()['prefs']['short_name']}] lead · test project")
+
+    def test_policy_preferences_require_user_words(self):
+        self.assertNotEqual(self.tw("prefs", "--set", "spawn_policy=free", ok=False).returncode, 0)
+        self.tw("prefs", "--set", "spawn_policy=free", "--user-said", "let it proceed")
+        self.assertEqual(self.state()["prefs"]["spawn_policy"], "free")
+        self.assertNotEqual(self.tw("prefs", "--set", "spawn_policy=wild", "--user-said", "yes", ok=False).returncode, 0)
+
+    def test_opening_keys_unanswered_and_other_project_answer(self):
+        out = json.loads(self.tw("opening", "--json").stdout)
+        self.assertEqual([x["key"] for x in out["questions"]], ["spawn_policy", "perm_policy", "gpt_policy"])
+        self.assertEqual(out["unanswered_now"], ["spawn_policy", "perm_policy", "gpt_policy"])
+        sibling = self.dir / "sibling"; sibling.mkdir()
+        r = subprocess.run([sys.executable, str(TW), "init", "other"], cwd=sibling, env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        subprocess.run([sys.executable, str(TW), "prefs", "--set", "spawn_policy=free", "--user-said", "free is fine"], cwd=sibling, env=self.env, check=True, capture_output=True)
+        out = json.loads(self.tw("opening", "--json").stdout)
+        self.assertEqual(out["questions"][0]["last"]["value"], "free")
+        beside = self.dir.parent / f"{self.dir.name}-Beta-folder"; beside.mkdir()  # a sibling folder, other name
+        subprocess.run([sys.executable, str(TW), "init", "beta"], cwd=beside, env=self.env, check=True, capture_output=True)
+        r = subprocess.run([sys.executable, str(TW), "opening", "--json"], cwd=beside, env=self.env, capture_output=True, text=True)
+        self.assertEqual(json.loads(r.stdout)["questions"][0]["last"]["value"], "free")
+
+    def test_selfcheck_hooks_need_real_hook_entries(self):
+        c = self.dir / ".claude"; c.mkdir(exist_ok=True)
+        (c / "settings.local.json").write_text(json.dumps({"permissions": {"allow": ["Bash(python3 tw.py context)"]},
+            "hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "python3 tw.py bash-guard"}]}]}}))
+        hooks = lambda: next(x for x in json.loads(self.tw("selfcheck", "--json").stdout)["items"] if x["item"] == "hooks")
+        self.assertFalse(hooks()["ok"])  # an allow rule naming context is not a SessionStart hook
+        (c / "settings.json").write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "python3 /x/tw.py context"}]}]}}))
+        self.assertTrue(hooks()["ok"])
+        out = json.loads(self.tw("selfcheck", "--desktop", "--json").stdout)
+        self.assertIn("on the desktop", out["first_line"])
+
+    def test_selfcheck_mode_model_brief_and_zero_exit(self):
+        out = json.loads(self.tw("selfcheck", "--mode", "default", "--model", "configured", "--served-model", "served", "--json").stdout)
+        self.assertIn("please switch this session to auto once", out["first_line"])
+        self.assertFalse(next(x for x in out["items"] if x["item"] == "model")["ok"])
+        self.tw("lead", "--session", "lead-session", "--mode", "auto")
+        out = json.loads(self.tw("selfcheck", "--mode", "auto", "--json").stdout)
+        self.assertTrue(next(x for x in out["items"] if x["item"] == "mode")["ok"])
+        brief = self.tw("selfcheck", "--mode", "auto", "--brief").stdout
+        self.assertNotIn("✓ mode", brief)
+        self.assertEqual(self.tw("selfcheck", "--mode", "default").returncode, 0)
+
+
+class Releases(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "repo"; self.repo.mkdir()
+        self.git("init", "-q", "-b", "main")
+        (self.repo / "SKILL.md").write_text("release one\n")
+        (self.repo / "scripts").mkdir()
+        shutil.copy2(TW, self.repo / "scripts" / "tw.py")
+        self.commit("first")
+        self.home = self.root / "home"; self.home.mkdir()
+        self.configs = [self.home / ".claude", self.home / ".claude-b"]
+        for c in self.configs:
+            (c / "skills").mkdir(parents=True)
+            (c / "skills" / "teamwork").symlink_to(self.repo)
+        self.env = {**os.environ, "HOME": str(self.home), "TW_NOW": "20261121-120000"}
+        self.env.pop("CLAUDE_CONFIG_DIR", None)
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True, text=True)
+
+    def commit(self, message):
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", message)
+
+    def release(self, *args):
+        return subprocess.run([sys.executable, str(TW.parent / "release.py"), "--repo", str(self.repo), *args],
+                              env=self.env, capture_output=True, text=True)
+
+    def test_publish_rollback_edge_and_status(self):
+        dry = self.release("publish")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertTrue(all((c / "skills" / "teamwork").resolve() == self.repo for c in self.configs))
+        self.assertFalse((self.configs[0] / "teamwork-releases").exists())
+        self.assertEqual(self.release("publish", "--apply").returncode, 0)
+        first = json.loads((self.configs[0] / "teamwork-releases" / "index.json").read_text())["current"]
+        self.assertEqual((self.configs[1] / "skills" / "teamwork").resolve(),
+                         self.configs[1] / "teamwork-releases" / first)
+        self.assertTrue((self.configs[0] / "teamwork-releases" / first / "RELEASE.json").exists())
+        (self.repo / "SKILL.md").write_text("release two\n"); self.commit("second")
+        self.env["TW_NOW"] = "20261121-120100"
+        self.assertEqual(self.release("publish", "--apply").returncode, 0)
+        second = json.loads((self.configs[0] / "teamwork-releases" / "index.json").read_text())
+        self.assertEqual(second["previous"], first)
+        self.assertEqual(self.release("rollback", "--apply").returncode, 0)
+        idx = json.loads((self.configs[0] / "teamwork-releases" / "index.json").read_text())
+        self.assertEqual((idx["current"], idx["history"]), (first, [first]))  # one step back, not a swap
+        self.assertNotEqual(self.release("rollback", "--apply").returncode, 0)  # nothing further back
+        ver = subprocess.run([sys.executable, str(self.configs[0] / "skills" / "teamwork" / "scripts" / "tw.py"), "version"],
+                             capture_output=True, text=True)
+        self.assertIn("release " + first, ver.stdout)
+        self.assertIn("newer release", ver.stdout)
+        (self.repo / "SKILL.md").write_text("third\n"); self.commit("third")
+        report = json.loads(self.release("status", "--json").stdout)
+        self.assertIn("commits behind main", report["configs"][0]["freshness"])
+        self.assertEqual(self.release("edge", "--apply").returncode, 0)
+        self.assertEqual((self.configs[0] / "skills" / "teamwork").resolve(), self.repo)
+
+    def test_real_directory_is_refused(self):
+        link = self.configs[0] / "skills" / "teamwork"
+        link.unlink(); link.mkdir(); (link / "keep").write_text("safe")
+        result = self.release("publish", "--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((link / "keep").exists())
+        self.assertEqual((self.configs[1] / "skills" / "teamwork").resolve(), self.repo)  # the other one did not move
+
+    def test_all_or_none_and_safe_snapshots(self):
+        self.assertEqual(self.release("publish", "--apply").returncode, 0)
+        (self.repo / "SKILL.md").write_text("two\n"); self.commit("two")
+        self.env["TW_NOW"] = "20261121-120300"
+        self.assertEqual(self.release("publish", "--apply").returncode, 0)
+        idx = lambda c: json.loads((c / "teamwork-releases" / "index.json").read_text())
+        first, second = idx(self.configs[0])["history"]
+        gone = self.configs[1] / "teamwork-releases" / first
+        gone.rename(gone.with_name("moved-away"))  # one config dir lost the snapshot rollback needs
+        r = self.release("rollback", "--apply")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual((self.configs[0] / "skills" / "teamwork").resolve().name, second)  # neither moved
+        self.assertEqual(idx(self.configs[0])["current"], second)
+        self.assertIn("already", self.release("publish", "--apply").stdout)  # same commit: nothing to publish
+        (self.repo / "evil").symlink_to("../../..")
+        self.commit("link out")
+        self.env["TW_NOW"] = "20261121-120400"
+        r = self.release("publish", "--apply")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("links outside", r.stderr)
+
+    def test_partial_snapshot_is_never_linked(self):
+        sha = self.git("rev-parse", "HEAD").stdout.strip()
+        half = self.configs[0] / "teamwork-releases" / f"r20261121-120000-{sha[:7]}"
+        half.mkdir(parents=True)  # an interrupted copy: no SKILL.md, no RELEASE.json
+        r = self.release("publish", "--apply")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not a complete snapshot", r.stderr)
+        self.assertTrue(all((c / "skills" / "teamwork").resolve() == self.repo for c in self.configs))
+
+    def test_hook_does_not_wait_for_end_of_input(self):
+        proj = self.root / "proj"
+        subprocess.run([sys.executable, str(TW), "-C", str(proj), "init", "demo", "--goal", "x"], check=True,
+                       capture_output=True)
+        pr = subprocess.Popen([sys.executable, str(TW), "context"], cwd=proj, stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pr.stdin.write(b'{"session_id": "session_01Zorblax"}')
+        pr.stdin.flush()  # left open, as a host might
+        try:
+            pr.wait(timeout=5)  # the output is small: it fits the pipe without being read
+        finally:
+            pr.stdin.close()
+        self.assertEqual(pr.returncode, 0)
+        self.assertIn("session_01Zorblax", (proj / ".teamwork" / "session-versions.jsonl").read_text())
+
+    def test_rollback_to_edge_and_apply_flag(self):
+        self.assertEqual(self.release("publish", "--apply").returncode, 0)
+        self.assertEqual(self.release("edge", "--apply").returncode, 0)
+        self.env["TW_NOW"] = "20261121-120200"
+        self.assertEqual(self.release("publish", "--apply").returncode, 0)
+        r = self.release("rollback", "--apply")  # previous is edge: back to the live clone
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(all((c / "skills" / "teamwork").resolve() == self.repo for c in self.configs))
+
+
 class RouteByTopic(TwCase):
     """T34 (R41): work inside a thread's focus/owns goes to it; work inside none suggests a new thread; a task whose
     title shares no topic word with its owner gets a topic_mismatch warning (never a block)."""
@@ -199,7 +397,7 @@ class LessonsCommands(TwCase):
     def test_lead_prints_its_title_and_tags(self):
         out = json.loads(self.tw("lead", "--session", "session_0quixbar").stdout)
         short = self.state()["prefs"]["short_name"]
-        self.assertEqual((out["title"], out["tags"]), (f"[{short}] lead", [f"teamwork:{short}", "teamwork-thread:lead"]))
+        self.assertEqual((out["title"], out["tags"]), (f"[{short}] lead · test project", [f"teamwork:{short}", "teamwork-thread:lead"]))
 
     def test_route_path_names_the_owner(self):
         self.tw("thread", "add", "web", "--owns", "web/**")

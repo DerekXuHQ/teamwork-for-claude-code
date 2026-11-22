@@ -71,7 +71,7 @@ LABELS = {
         "stuck": "Possibly stuck (working, no report for over {n} min)", "no_report": "no report for {m} min",
         "overview": "Overview", "questions": "Waiting on the user", "roster": "Roster", "plan": "Plan",
         "requests": "Your requests (not closed)", "unreported": "Delivered, not yet reported to the user",
-        "req_open": "open", "req_dispatched": "dispatched", "req_delivered": "delivered (report it!)",
+        "req_open": "open", "req_held": "held: waiting for your material", "req_dispatched": "dispatched", "req_delivered": "delivered (report it!)",
         "req_reported": "reported", "req_closed": "closed", "req_proposed": "proposed (waiting for a yes)",
         "req_dropped": "dropped", "followup": "follow-up",
         "no_threads": "(no threads yet)",
@@ -84,7 +84,7 @@ LABELS = {
         "s_all": "Every requirement (strike out what is stale)", "s_ungrouped": "(no phase or category)",
         "merge_waiting": "Waiting to merge: {n} branch(es), oldest {m} min ({tasks})", "owner": "owner",
         "d_draft": "draft", "d_final": "final", "i_open": "open", "i_fixed-on-branch": "fixed on a branch",
-        "i_merged": "merged", "i_verified": "verified",
+        "i_merged": "merged", "i_verified": "verified", "qa_pending": "Merged, regression not run yet",
     },
     "zh": {
         "planned": "建议中（还没有会话）", "starting": "已创建，第一轮还没结束",
@@ -94,7 +94,7 @@ LABELS = {
         "stuck": "可能卡住（进行中，超过 {n} 分钟没有汇报）", "no_report": "{m} 分钟没有汇报",
         "overview": "总览", "questions": "等你回答", "roster": "成员", "plan": "计划",
         "requests": "你提的事（未关闭）", "unreported": "已交付、还没回报给用户",
-        "req_open": "待办", "req_dispatched": "已派", "req_delivered": "已交付（待回报！）",
+        "req_open": "待办", "req_held": "等你的材料", "req_dispatched": "已派", "req_delivered": "已交付（待回报！）",
         "req_reported": "已回报", "req_closed": "已关闭", "req_proposed": "已提议（等你同意）",
         "req_dropped": "已放弃", "followup": "回访",
         "no_threads": "（还没有线程）",
@@ -106,7 +106,7 @@ LABELS = {
         "s_missing": "还缺", "s_all": "全部需求（过时的划掉）", "s_ungrouped": "（未分阶段或类别）",
         "merge_waiting": "等待合并：{n} 个分支，最早的已等 {m} 分钟（{tasks}）", "owner": "负责",
         "d_draft": "草稿", "d_final": "定稿", "i_open": "未修", "i_fixed-on-branch": "已在分支上修好",
-        "i_merged": "已合并", "i_verified": "已验证",
+        "i_merged": "已合并", "i_verified": "已验证", "qa_pending": "已合并、还没跑回归",
     },
 }
 
@@ -116,11 +116,12 @@ def lab(st, key, **kw):
     return LABELS.get(code, LABELS["en"]).get(key, LABELS["en"].get(key, key)).format(**kw)  # unknown: the key
 
 
-REQ_STATUSES = ["open", "proposed", "dispatched", "delivered", "reported", "closed", "dropped"]
+REQ_STATUSES = ["open", "held", "proposed", "dispatched", "delivered", "reported", "closed", "dropped"]
 REQ_END = ("closed", "dropped")
 # Request moves the lead may make with `req set` (framework A9). closed/dropped only via close/drop (user action).
-REQ_MOVES = {"open": {"proposed", "dispatched", "reported"}, "proposed": {"dispatched"},
-             "dispatched": {"delivered"}, "delivered": {"reported"}, "reported": {"dispatched"}}
+REQ_MOVES = {"open": {"held", "proposed", "dispatched", "reported"}, "held": set(),  # held: back where it paused
+             "proposed": {"held", "dispatched"},
+             "dispatched": {"held", "delivered"}, "delivered": {"reported"}, "reported": {"dispatched"}}
 REQ_NEEDS_USER = {("proposed", "dispatched"), ("reported", "dispatched")}  # user said yes / asked for changes
 # Task moves (framework A9). done needs review first and passes the review gate.
 TASK_MOVES = {"planned": {"approved", "dropped"}, "approved": {"dispatched", "dropped"},
@@ -128,7 +129,7 @@ TASK_MOVES = {"planned": {"approved", "dropped"}, "approved": {"dispatched", "dr
               "blocked": {"working", "recalled"}, "review": {"working", "done"},
               "recalled": {"dispatched", "dropped"}, "done": set(), "dropped": set()}
 # Accepted when importing a markdown ledger (status column in either language).
-REQ_STATUS_ALIASES = {"待办": "open", "已派": "dispatched", "已交付": "delivered", "已回报": "reported",
+REQ_STATUS_ALIASES = {"待办": "open", "等材料": "held", "等你的材料": "held", "已派": "dispatched", "已交付": "delivered", "已回报": "reported",
                       "已关闭": "closed", "已提议": "proposed", "已放弃": "dropped", **{x: x for x in REQ_STATUSES}}
 
 
@@ -140,7 +141,7 @@ def render_requests(st):
     reqs = [(r, q) for r, q in st.get("requests", {}).items() if q["status"] not in REQ_END]
     if not reqs:
         return None
-    order = {"delivered": 0, "proposed": 1, "open": 2, "dispatched": 3, "reported": 4}
+    order = {"delivered": 0, "held": 1, "proposed": 2, "open": 3, "dispatched": 4, "reported": 5}
     reqs.sort(key=lambda x: (order.get(x[1]["status"], 9), int(x[0][1:]) if x[0][1:].isdigit() else 0))
     out = []
     for r, q in reqs:
@@ -276,6 +277,8 @@ def snapshots(st, ev):
         snap["snap_issues"] = st.get("issues", [])
     if ev.get("ev", "").startswith("deliverable-"):
         snap["snap_deliverables"] = st.get("deliverables", [])
+    if ev.get("ev") in ("merge", "qa-done"):
+        snap["snap_qa_pending"] = st.get("qa_pending", [])
     if "roster_version" in st:
         snap["snap_roster_version"] = st["roster_version"]
     return snap
@@ -543,6 +546,11 @@ def render_board(st):
     reqs = render_requests(st)
     if reqs:
         out += [f"## {lab(st, 'requests')}", "", reqs, ""]
+    pending = st.get("qa_pending", [])
+    if pending:
+        out += [f"## {lab(st, 'qa_pending')}", ""]
+        out += [f"- {x.get('branch', '?')}@{str(x.get('sha', ''))[:7]}" for x in pending]
+        out += ["", "`tw.py qa done` after the regression round", ""]
     out += [
         f"Goal: {st.get('goal') or '-'}",
         f"Plan: {approved}    Updated: {st.get('updated', '-')}",
@@ -617,6 +625,11 @@ def render_share(st):
     iss = [i for i in st.get("issues", []) if i.get("status") != "verified"]
     if iss:
         out += [f"## {L('s_issues')}", ""] + [render_issue(i, st) for i in iss] + [""]
+    pending = st.get("qa_pending", [])
+    if pending:
+        out += [f"## {L('qa_pending')}", ""]
+        out += [f"- {x.get('branch', '?')}@{str(x.get('sha', ''))[:7]}" for x in pending]
+        out += [""]
     if reqs:
         out += [f"## {L('s_all')}", ""]
         groups = {}
@@ -2187,6 +2200,206 @@ def cmd_issue(a):
         i["updated"] = now()
     save(d, st, {"ev": f"issue-{a.action}", "issue": i["id"], "status": i["status"]})
     print(render_issue(i, st))
+    if a.action == "add":
+        print(f"broadcast it: tw.py info --issue {i['id']}")
+
+
+def cmd_info(a):
+    d = need(find_dir())
+    st = load(d)
+    text = a.text.strip()
+    if a.issue:
+        issue = next((i for i in st.get("issues", []) if i["id"] == a.issue), None)
+        if not issue:
+            sys.exit(f"unknown issue {a.issue}")
+        line = render_issue(issue, st)
+        text = f"{text}\n{line}" if text else line
+    if not text:
+        sys.exit('usage: info "<text>" [--issue I3]')
+    message = f"[tw:{tag(st)}] INFO lead -> all -\n{text}"
+    to = [{"thread": n, "session_id": t.get("session_id")} for n, t in st.get("threads", {}).items()
+          if t.get("session_id") and t.get("status") not in ("archived", "resolved", "planned")]
+    log(d, {"ev": "info", "text": text, "to": to})
+    print(json.dumps({"message": message, "to": to}, ensure_ascii=False) if a.json else
+          message + "\n\nsend to:\n" + ("\n".join(f"{x['thread']} {x['session_id']}" for x in to) or "(no live threads)"))
+
+
+def _qa_label(x):
+    return f"{x.get('branch', '?')}@{str(x.get('sha', ''))[:7]}"
+
+
+def cmd_qa(a):
+    """IL-22: merges wait on the board until a regression round covered them."""
+    d = need(find_dir())
+    st = load(d)
+    pending = st.setdefault("qa_pending", [])
+    if a.action == "list":
+        print("\n".join(_qa_label(x) for x in pending) or "(none)")
+        return
+    if not a.items and not a.all:
+        sys.exit("qa done <branch or sha> ... (what the regression round covered), or --all; waiting: "
+                 + (", ".join(_qa_label(x) for x in pending) or "(none)"))
+    hit = lambda x, i: i in (x.get("branch"), _qa_label(x)) or (len(i) >= 7 and any(
+        str(x.get(k, "")).startswith(i) for k in ("sha", "to")))  # the reviewed commit or the one on the base
+    unknown = [i for i in a.items if not any(hit(x, i) for x in pending)]
+    if unknown:
+        sys.exit(f"not waiting for regression: {', '.join(unknown)}")
+    gone = [x for x in pending if a.all or any(hit(x, i) for i in a.items)]
+    st["qa_pending"] = [x for x in pending if x not in gone]
+    save(d, st, {"ev": "qa-done", "cleared": [_qa_label(x) for x in gone], "note": a.note or ""})
+    print(f"cleared {len(gone)} merge(s): {', '.join(_qa_label(x) for x in gone) or '-'}"
+          + (f"; still waiting: {', '.join(_qa_label(x) for x in st['qa_pending'])}" if st["qa_pending"] else ""))
+
+
+# Every header type in references/messages.md and templates/worker-protocol.md.
+MSG_TYPES = ("TASK FOLLOWUP HANDOFF RECALL ROSTER INFO ANSWER ACK UPDATE STATUS DONE BLOCKED QUESTION MEMORY "
+             "NEED-THREAD").split()
+# Words a hand-written template leaves in angle brackets (`<session id>`, `<thread>`); HTML-like `<button>` is not one.
+HOLE_WORDS = {"id", "sid", "session", "thread", "peer", "sha", "commit", "branch", "branchname", "recipient", "words",
+              "short", "task", "taskid", "goal", "owner", "fill", "here", "todo", "tbd", "name", "n", "session id",
+              "task id", "thread name", "fill in"}  # compared lowercased, - and _ as spaces
+HTML_TAGS = {"a", "abbr", "b", "br", "button", "div", "form", "hr", "i", "img", "input", "label", "li", "link", "ol",
+             "option", "p", "pre", "script", "select", "span", "style", "table", "td", "textarea", "th", "tr", "ul",
+             "video", "audio", "source", "meta", "section", "header", "footer", "nav", "main", "svg", "path"}
+SESSION_ID = re.compile(r"(?<![A-Za-z0-9_])(?:session_01|cse_)[A-Za-z0-9]{16,}(?![A-Za-z0-9_])")  # real id shapes
+
+
+def _memory_topics(memory, key):
+    """(topics, unchecked count) of one MEMORY.md special section: `- topic — note` gives `topic`."""
+    start = _memory_section(memory, key)
+    if start is None:
+        return [], 0
+    end = memory.find("\n## ", start + 1)
+    topics, unchecked = [], 0
+    for line in (memory[start:] if end < 0 else memory[start:end]).splitlines()[1:]:
+        if not line.startswith("- "):
+            continue
+        item = re.sub(r"\s*_\((?:temporary|added)\b.*?\)_", "", line[2:])  # tw.py memory's marks
+        phrase = re.split(r" — | -- |：|: |（| \(", item, maxsplit=1)[0].strip().strip("*`_ ").strip()
+        if len(phrase) < 2:
+            continue
+        if len(phrase.split()) > 5 or len(re.findall(r"[\u3400-\u9fff]", phrase)) > 16:
+            unchecked += 1  # a sentence, not a topic: matching it whole would never hit
+            continue
+        topics.append(phrase)
+    return topics, unchecked
+
+
+def _mentions(text, phrase):
+    if re.fullmatch(r"[\x00-\x7f]+", phrase):  # ASCII: whole words only (`AI` is not in `main`)
+        return re.search(r"(?<![A-Za-z0-9])" + re.escape(phrase) + r"(?![A-Za-z0-9])", text, re.I) is not None
+    return phrase.casefold() in text.casefold()
+
+
+# TASK fields (references/messages.md), English and the Chinese labels a zh project may use.
+MSG_FIELDS = ("Goal|User's words|Context|Read first|Depends on|Others waiting|You change only|Not doing|Done when|"
+              "Constraints|Review depth|Model / method|Model|Report|To|Owner|目标|用户原话|背景|先读|依赖|只改|不做|"
+              "完成标准|验收标准|完成条件|验收|任务目标|约束|评审|模型|汇报")
+GOAL_FIELDS, DONE_FIELDS = {"goal", "目标", "任务目标"}, {"done when", "完成标准", "验收标准", "完成条件", "验收"}
+FIELD_RE = re.compile(rf"\s*(?:[-*]|\d+[.)]|#+)?\s*\**({MSG_FIELDS})\**\s*(?:[:：]\**|$)\s*(.*)$", re.I)
+EMPTY_VALUES = {"", "...", "…", "?", "-", "n/a", "tbd", "todo", "fixme", "xxx", "???", "[tbd]", "待定", "待填"}
+PATH_RE = (r"(?<![\w/])(?:~/|\./|/)?(?:[\w.-]*[A-Za-z_][\w.-]*/)+[\w.-]*[A-Za-z_][\w.-]*"
+           r"|(?<![\w/])[\w.-]+\.(?:md|txt|json|ya?ml|toml)\b")  # a/b/c with a letter in each step; 2026/11/21 is not
+READ_RE = r"(?i)\b(?:read|see|follow|open)\b|读|看|见|按|照着|打开"
+
+
+def _wlen(text):
+    """Length with each CJK character counted as three: a short Chinese line says as much as a longer English one."""
+    return len(text) + 2 * len(re.findall(r"[\u3400-\u9fff]", text))
+
+
+def cmd_check_msg(a):
+    """IL-11, IL-16, IL-19: read a hand-written message (or, with --prompt, a session prompt) before sending it.
+    Problems fail (exit 1); warnings are for the lead to judge and do not."""
+    raw = (sys.stdin.read() if a.file == "-" else Path(a.file).read_text(encoding="utf-8")).lstrip("\ufeff")
+    findings = []
+
+    def add(kind, detail, level="problem"):
+        findings.append({"kind": kind, "detail": detail, "level": level})
+    if a.prompt:  # IL-19: the prompt must carry the protocol itself
+        if _wlen(raw.strip()) < 600 and re.search(PATH_RE, raw) and re.search(READ_RE, raw):
+            add("pointer", "this prompt only points to a file: pass the protocol text itself (TW worker-prompt)")
+        mode = "prompt"
+    else:
+        mode = "message"
+        lines = raw.lstrip().splitlines()
+        head = lines[0].strip() if lines else ""
+        body = "\n".join(lines[1:])
+        prose = re.sub(r"`[^`\n]*`", "", re.sub(r"```.*?(?:```|\Z)", "", body, flags=re.S))  # code is not prose
+        d = find_dir()
+        st = load(d) if d and (d / "state.json").exists() else None
+        m = re.fullmatch(r"(?i)\[tw:([^\]\s]+)\] ([A-Z-]+) (\S+) -> (\S+) (\S+)", head)
+        if not m:
+            add("header", "first line must be `[tw:<short>] <TYPE> <from> -> <to> <task id or ->` (one task id); "
+                          "a session prompt is checked with --prompt")
+        else:
+            short, typ, frm, to, tid = m.groups()
+            names = {"lead", "all", "user"} | set((st or {}).get("threads", {}))
+            bad = [f"tag {short} (this project is {tag(st)})" for _ in [0] if st and short != tag(st)]
+            bad += [f"type {typ}" for _ in [0] if typ not in MSG_TYPES]
+            bad += [f"{w} {n}" for w, n in (("from", frm), ("to", to)) if st and n not in names]
+            bad += [f"task id {tid}" for _ in [0] if not re.fullmatch(r"T\d+(?:-f\d+)*|-", tid)
+                    or st and tid != "-" and tid not in st.get("tasks", {})]
+            if bad:
+                add("header", ", ".join(bad) + f"; known types: {', '.join(MSG_TYPES)}")
+        fields, blines = {}, [ln for ln in body.splitlines()]
+        for i, ln in enumerate(blines):  # the raw lines: a value in backticks is a value
+            f = FIELD_RE.match(ln)
+            if not f:
+                continue
+            v = f.group(2).strip().strip("*").strip()
+            if not v:  # the value may start on the next line (a list under `Done when:`)
+                nxt = next((x for x in blines[i + 1:] if x.strip()), "")
+                v = "" if not nxt or FIELD_RE.match(nxt) else nxt.strip()
+            fields.setdefault(f.group(1).lower(), v)
+        holes = [f"{k}: {v[:30] or '(empty)'}" for k, v in fields.items()
+                 if v.lower() in EMPTY_VALUES or re.match(r"(?i)\[?(?:TBD|TODO|FIXME|XXX|待定|待填)\]?(?:$|[:(（.,，])", v)]
+        holes += [f"<{h}>" for h in re.findall(r"(?<![A-Za-z0-9<])<([A-Za-z\u3400-\u9fff][^<>\n]{0,199})>",
+                                               head + "\n" + prose)
+                  if not h[-1].isspace() and not h.endswith("-") and not re.search(r"[=\"]", h)
+                  and not re.fullmatch(r"[\w.]+(?:\s*[,|]\s*[\w.]+)+", h)  # a type list: <string, number>
+                  and not (re.fullmatch(r"[A-Za-z][\w-]*( [\w-]+)?", h) and (h.split()[0].lower() in HTML_TAGS
+                                                                              or h[0].isupper() and " " in h))
+                  and (" " in h or re.search(r"[\u3400-\u9fff]", h)
+                       or re.sub(r"[-_]", " ", h.lower()) in HOLE_WORDS)]
+        if holes:
+            add("placeholder", ", ".join(dict.fromkeys(holes)))
+        if m and m.group(2) == "TASK":
+            missing = [n for n, keys in (("Goal", GOAL_FIELDS), ("Done when", DONE_FIELDS)) if not keys & set(fields)]
+            if missing:
+                add("fields", "a TASK needs " + " and ".join(missing) + (
+                    " (it only points to a file: write the task in the message)" if re.search(PATH_RE, prose) else ""))
+        if st:
+            known = {(st.get("lead") or {}).get("session_id")}
+            for t in st.get("threads", {}).values():
+                known.add(t.get("session_id"))
+                known.update(h.get("session_id") for h in t.get("sessions", []) if isinstance(h, dict))
+            for sid in sorted(set(SESSION_ID.findall(raw)) - known):  # code too: a pasted id is checked anywhere
+                add("unknown-session", sid)
+            memory = (d / "MEMORY.md").read_text(encoding="utf-8") if (d / "MEMORY.md").exists() else ""
+            for key, kind in (("never_raise", "never-raise"), ("user_owned", "user-owned")):
+                topics, unchecked = _memory_topics(memory, key)
+                for t in topics:
+                    if _mentions(prose, t):
+                        add(kind, t + (" (the user ruled it out: do not raise it)" if kind == "never-raise" else
+                                       " (the user decides or provides it: do not decide it here)"), "warning")
+                if unchecked:
+                    add("unchecked", f"{kind}: {unchecked} entr{'y' if unchecked == 1 else 'ies'} too long to check: "
+                                     "write them as `topic — note`", "warning")
+            lang = str(st.get("prefs", {}).get("language") or "").lower()  # unset: follows the user, nothing to check
+            cjk, latin = len(re.findall(r"[\u3400-\u9fff]", prose)), len(re.findall(r"[A-Za-z]", prose))
+            if lang.startswith("zh") and latin >= 20 and not cjk:
+                add("language", "the conversation language is Chinese: write the body in Chinese", "warning")
+            elif lang.startswith("en") and cjk >= 10 and cjk > latin:
+                add("language", "the conversation language is English: write the body in English", "warning")
+    bad = [x for x in findings if x["level"] == "problem"]
+    if a.json:
+        print(json.dumps({"ok": not bad, "mode": mode, "findings": findings}, ensure_ascii=False))
+    else:
+        print("\n".join(f"{'' if x['level'] == 'problem' else 'warning '}{x['kind']}: {x['detail']}"
+                        for x in findings) or f"ok ({mode})")
+    if bad:
+        raise SystemExit(1)
 
 
 def cmd_deliverable(a):
@@ -2656,11 +2869,13 @@ def set_req_status(st, r, q, new, by_import=False, user_said=None):
     if new in REQ_END:
         sys.exit(f"only the user ends a request: `req close {r} --user-said \"<their words>\"` (accepted) or "
                  f"`req drop {r} --user-said \"<their words>\"` (not to do it)")
-    if new not in REQ_MOVES.get(cur, set()):
-        allowed = ", ".join(sorted(REQ_MOVES.get(cur, set()))) or "nothing (it has ended)"
-        sys.exit(f"{r} is {cur}: it can move to {allowed}")
+    frm = q.get("held_from") or "open" if cur == "held" else cur  # IL-33: held pauses a request where it was
+    moves = ({frm} | REQ_MOVES.get(frm, set())) - {"held"} if cur == "held" else REQ_MOVES.get(cur, set())
+    if new not in moves:
+        allowed = ", ".join(sorted(moves)) or "nothing (it has ended)"
+        sys.exit(f"{r} is {cur}" + (f" (paused while {frm})" if cur == "held" else "") + f": it can move to {allowed}")
     user_said = (user_said or "").strip() or None
-    if (cur, new) in REQ_NEEDS_USER and not user_said:
+    if (frm, new) in REQ_NEEDS_USER and not user_said:
         sys.exit(f"{r} {cur} -> {new} is the user's decision: add --user-said \"<their words>\"")
     if new == "delivered":
         ts = live_tasks(st, q)
@@ -2670,6 +2885,10 @@ def set_req_status(st, r, q, new, by_import=False, user_said=None):
                      + (f" (not yet: {', '.join(not_ready)})" if not_ready else
                         " (all linked tasks are dropped: link the new work, or ask the user to drop the request)"
                         if q.get("tasks") else " (no tasks linked)"))
+    if new == "held":
+        q["held_from"] = cur
+    else:
+        q.pop("held_from", None)
     q["status"] = new
     if user_said:
         q.setdefault("user_said", []).append({"t": now(), "to": new, "text": user_said})
@@ -2730,10 +2949,13 @@ def cmd_req(a):
     elif a.action == "set":
         if q["status"] in REQ_END:
             sys.exit(f"{r} has ended ({q['status']}); register a new request instead of editing it")
+        was_held = q["status"] == "held"
         if a.status:
             set_req_status(st, r, q, a.status, user_said=a.user_said)
         if a.status == "dispatched" and not q.get("tasks"):
             sys.exit(f"{r} has no tasks: link the work first (`req link {r} T<n>`), which dispatches it")
+        if was_held and a.status == "dispatched":
+            deliver_ready(st)  # back from held after the work finished meanwhile (rework stays dispatched)
         for k in ("where", "followup", "text", "phase", "category"):
             v = getattr(a, k)
             if v is not None:
@@ -3651,6 +3873,8 @@ def cmd_handover(a):
          f"{leaving.get('reason') or '-'}). Its history is not in your context; this brief is what it left."
          if leaving.get("session_id") else
          f"You start the {a.thread} seat (no earlier session). This brief is what the board knows."),
+        f"Goal: take over the {a.thread} seat and continue its open tasks below.",
+        "Done when: you replied ACK with what is done, what is next, and anything you cannot reach.",
         f"- Owns: {', '.join(t.get('owns', [])) or '-'}",
         f"- Branch: {branch_of(st, a.thread)} (base {base_name})" + (f"; worktree {t['worktree']}" if t.get("worktree") else ""),
         f"- Last summary: {t.get('summary') or '-'}",
@@ -3827,7 +4051,7 @@ def _replay(st, e, project, notes, d):
                 st["questions"][i]["answered"] = True
         if e.get("snap_plan_approved") is not None:
             st["plan_approved"] = e["snap_plan_approved"]
-        for k in ("issues", "deliverables"):
+        for k in ("issues", "deliverables", "qa_pending"):
             if e.get(f"snap_{k}") is not None:
                 st[k] = e[f"snap_{k}"]
         return st
@@ -4054,7 +4278,8 @@ def cmd_rebuild(a):
             summary["vs_current"][kind] = {"missing": sorted(set(o) - set(n)), "extra": sorted(set(n) - set(o)),
                                            "changed": {i: f for i, f in sorted(changed.items()) if f}}
         summary["vs_current"]["other"] = sorted(k for k in ("lead", "prefs", "questions", "plan_approved", "envs",
-                                                             "repo", "goal") if old.get(k) != st.get(k))
+                                                             "repo", "goal", "issues", "deliverables",
+                                                             "qa_pending") if old.get(k) != st.get(k))
         lost = sum(len(old.get(k, {})) for k in ("threads", "tasks", "requests"))
         kept = sum(len(st[k]) for k in ("threads", "tasks", "requests"))
         if a.apply and lost and kept < lost / 2 and not a.force:
@@ -4124,6 +4349,15 @@ def thread_reminder(st, me):
             "your thread protocol's Language, Messages and STATUS sections before your next message. Every message "
             f"starts with `[tw:{tag(st)}] <TYPE> {me} -> <recipient> <task-id or ->`, and every turn ends with the "
             "tw-status block.\n\n")
+
+
+def lead_reminder(st):
+    sid = (st.get("lead") or {}).get("session_id")
+    if not sid:
+        return ""
+    return (f"If you are this project's lead (session {sid}): if your context was just summarized, re-read SKILL.md's "
+            f"Rules (language, messages, approvals) before your next message. Messages to threads start with "
+            f"`[tw:{tag(st)}] <TYPE> lead -> <thread> <task-id or ->`.\n\n")
 
 
 def running_version():
@@ -4250,7 +4484,8 @@ def cmd_context(a):
     except Exception:
         pass
     pw = permission_warning(st) if not in_worktree else ""
-    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\nteamwork version: " + label + (f"\nnewer release {newer} available (rollback in effect?)" + (f": {newer_note}" if newer_note else "") if newer else "") + (f"\nThis project tests unreleased teamwork: read {st['prefs']['skill_edge']}/SKILL.md and run {st['prefs']['skill_edge']}/scripts/tw.py instead of the installed copy (staged rollout; the rest of the computer stays on the release)." if st.get("prefs", {}).get("skill_edge") else "") + "\n\n" + (f"Lead: permissions: {pw}\n\n" if pw else "") + thread_reminder(st, me) + language_rule(st) + "\n\n" + (unreported_note(st) if not in_worktree else
+    reminder = thread_reminder(st, me) if in_worktree else lead_reminder(st)
+    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\nteamwork version: " + label + (f"\nnewer release {newer} available (rollback in effect?)" + (f": {newer_note}" if newer_note else "") if newer else "") + (f"\nThis project tests unreleased teamwork: read {st['prefs']['skill_edge']}/SKILL.md and run {st['prefs']['skill_edge']}/scripts/tw.py instead of the installed copy (staged rollout; the rest of the computer stays on the release)." if st.get("prefs", {}).get("skill_edge") else "") + "\n\n" + (f"Lead: permissions: {pw}\n\n" if pw else "") + reminder + language_rule(st) + "\n\n" + (unreported_note(st) if not in_worktree else
     "The board below is the lead's view: its requests, questions and commands are the lead's to act on, not yours. "
     "Read it for the roster, your tasks and the known issues.\n\n") + render_board(
         st
@@ -4501,28 +4736,28 @@ def cmd_merge(a):
             for s_ in sigs:
                 signal.signal(s_, signal.SIG_IGN)
         final["past"] = True
-        now, now_at = _base_holder(git, base)
+        holder_now, now_at = _base_holder(git, base)
         cur = git("rev-parse", "--verify", "--quiet", f"refs/heads/{base}^{{commit}}").stdout.strip()
         moved = None
         if cur != old:
             moved = f"{base} moved to {cur[:9]} meanwhile"
-        elif (now and str(now) != str(holder)) or (holder and not now):
-            moved = f"the checkout that has {base} changed meanwhile ({holder or '-'} -> {now or '-'})"
-        elif now:
-            head = git("symbolic-ref", "-q", "HEAD", cwd=now).stdout.strip()
-            if head != f"refs/heads/{base}" or git("rev-parse", "HEAD", cwd=now).stdout.strip() != old:
-                moved = f"{now} is no longer on {base} at {old[:9]} (rebase or checkout in progress?)"
-            elif git("status", "--porcelain", "--untracked-files=no", cwd=now).stdout.strip():
-                moved = f"{now} got uncommitted changes on {base} meanwhile"
-            elif (late := _in_the_way(git, now, old, new)):
+        elif (holder_now and str(holder_now) != str(holder)) or (holder and not holder_now):
+            moved = f"the checkout that has {base} changed meanwhile ({holder or '-'} -> {holder_now or '-'})"
+        elif holder_now:
+            head = git("symbolic-ref", "-q", "HEAD", cwd=holder_now).stdout.strip()
+            if head != f"refs/heads/{base}" or git("rev-parse", "HEAD", cwd=holder_now).stdout.strip() != old:
+                moved = f"{holder_now} is no longer on {base} at {old[:9]} (rebase or checkout in progress?)"
+            elif git("status", "--porcelain", "--untracked-files=no", cwd=holder_now).stdout.strip():
+                moved = f"{holder_now} got uncommitted changes on {base} meanwhile"
+            elif (late := _in_the_way(git, holder_now, old, new)):
                 res["untracked_in_the_way"] = late
-                moved = f"untracked or ignored files in {now} that the merge would overwrite appeared meanwhile"
+                moved = f"untracked or ignored files in {holder_now} that the merge would overwrite appeared meanwhile"
         if moved:
             res["refused"] = moved
             print(json.dumps(res, ensure_ascii=False))
             sys.exit(f"{moved}: nothing changed; run merge again")
-        if now:  # a checkout has the base: fast-forward it there, files and all (refused if base moved)
-            r = git("merge", "--ff-only", "-q", new, cwd=now)
+        if holder_now:  # a checkout has the base: fast-forward it there, files and all (refused if base moved)
+            r = git("merge", "--ff-only", "-q", new, cwd=holder_now)
         else:  # base not checked out anywhere: move the ref, only if nobody moved it meanwhile
             r = git("update-ref", f"refs/heads/{base}", new, old)
         if r.returncode != 0:
@@ -4533,20 +4768,31 @@ def cmd_merge(a):
         if after != new and git("merge-base", "--is-ancestor", new, after).returncode == 0:
             res["note"] = f"{base} moved on to {after[:9]} right after the fast-forward (it contains the merge)"
         elif after != new:  # the checkout switched branches in the last instant: the fast-forward went elsewhere
-            moved_to = git("symbolic-ref", "-q", "--short", "HEAD", cwd=now).stdout.strip() if now else ""
+            moved_to = git("symbolic-ref", "-q", "--short", "HEAD", cwd=holder_now).stdout.strip() if holder_now else ""
             res["refused"] = f"{base} is at {after[:9]}, not {new[:9]}, after the fast-forward"
             log(d, {"ev": "merge-misfired", "branch": a.branch, "sha": sha, "base": base, "to": new,
                     "checkout_branch": moved_to})
             print(json.dumps(res, ensure_ascii=False))
-            if not now:
+            if not holder_now:
                 sys.exit(f"{base} is at {after[:9]} right after it was moved to {new[:9]}: something else moved it; "
                          f"check `git log -1 {base}` and run merge again")
-            sys.exit(f"{now or 'the repo'} switched to {moved_to or 'another branch'} during the fast-forward: that "
+            sys.exit(f"{holder_now or 'the repo'} switched to {moved_to or 'another branch'} during the fast-forward: that "
                      f"branch may now be at {new[:9]}, and {base} is unchanged. Check {moved_to or 'it'} "
-                     f"(`git -C \"{now}\" log -1`), then run merge again")
+                     f"(`git -C \"{holder_now}\" log -1`), then run merge again")
         res["applied"] = True
-        log(d, {"ev": "merge", "branch": a.branch, "sha": sha, "base": base, "from": old, "to": new,
-                "checks": res["checks"]})
+        ev = {"ev": "merge", "branch": a.branch, "sha": sha, "base": base, "from": old, "to": new,
+              "checks": res["checks"]}
+        fresh = None
+        try:  # IL-22: the board lists the merge until a regression round clears it (`qa done`)
+            fresh = st = load(d)  # fresh: the checks may have run for minutes
+            st.setdefault("qa_pending", []).append({"branch": a.branch, "sha": sha, "base": base, "to": new,
+                                                    "at": now()})
+            save(d, st, ev)
+        except Exception as e:  # the base already moved: report it, never fail the merge on bookkeeping
+            res["note"] = (res.get("note", "") + f"; regression list not updated ({e})").lstrip("; ")
+            if isinstance(fresh, dict) and isinstance(fresh.get("qa_pending"), list):
+                ev["snap_qa_pending"] = fresh["qa_pending"]  # rebuild then agrees with a state.json already written
+            log(d, ev)
         print(json.dumps(res, ensure_ascii=False))
     finally:
         git("worktree", "remove", "--force", str(wt))
@@ -5054,6 +5300,23 @@ def main():
     x.add_argument("--ref", help="branch@commit of the fix")
     x.add_argument("--all", action="store_true", help="list: include verified")
     x.set_defaults(f=cmd_issue)
+    x = s.add_parser("info", help="format a lead INFO broadcast for the live threads")
+    x.add_argument("text", nargs="?", default="")
+    x.add_argument("--issue")
+    x.add_argument("--json", action="store_true")
+    x.set_defaults(f=cmd_info)
+    x = s.add_parser("check-msg", help="check a hand-written message or session prompt before sending (IL-11/16/19)")
+    x.add_argument("file", help="message file or - for stdin")
+    x.add_argument("--prompt", action="store_true", help="the text is a session prompt (append_system_prompt): "
+                   "check only that it is not a file pointer")
+    x.add_argument("--json", action="store_true")
+    x.set_defaults(f=cmd_check_msg)
+    x = s.add_parser("qa", help="merges waiting for a regression round: list, or done <branch|sha> ... (IL-22)")
+    x.add_argument("action", choices=["list", "done"])
+    x.add_argument("items", nargs="*", help="done: the merges the round covered (branch, branch@sha7 or sha)")
+    x.add_argument("--all", action="store_true", help="done: every waiting merge")
+    x.add_argument("--note", help="done: what ran")
+    x.set_defaults(f=cmd_qa)
     x = s.add_parser("deliverable", help="index of what the user can open: add / set (IL-13, IL-14)")
     x.add_argument("action", choices=["add", "set"])
     x.add_argument("name", help='add: "<name>"; set: D<n>')

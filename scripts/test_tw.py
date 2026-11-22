@@ -4328,5 +4328,181 @@ class MergeRehearsal(LeasesGit):
         self.assertEqual(self.head(), self.main0)
 
 
+class H1Followups(TwCase):
+    def test_held_transitions_and_zh_board(self):
+        self.tw("req", "add", "材料待补")
+        self.tw("req", "set", "R1", "--status", "held", "--followup", "请发材料")
+        st = self.state(); st["prefs"]["language"] = "zh"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        self.assertIn("等你的材料", self.tw("board").stdout)
+        self.tw("req", "set", "R1", "--status", "open")
+        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "closed", ok=False).returncode, 0)
+        self.tw("req", "set", "R1", "--status", "proposed")
+        self.tw("req", "set", "R1", "--status", "held")  # paused while proposed
+        self.assertEqual(self.state()["requests"]["R1"]["held_from"], "proposed")
+        r = self.tw("req", "set", "R1", "--status", "dispatched", ok=False)  # still the user's yes
+        self.assertIn("--user-said", r.stderr)
+        self.assertNotEqual(self.tw("req", "set", "R1", "--status", "open", ok=False).returncode, 0)
+        self.tw("req", "set", "R1", "--status", "proposed")
+        self.assertNotIn("held_from", self.state()["requests"]["R1"])
+        st = self.state()  # work finished while the request was held: resuming delivers it
+        st["tasks"]["T1"] = {"title": "x", "status": "review", "thread": None}
+        st["requests"]["R2"] = {**st["requests"]["R1"], "status": "held", "held_from": "dispatched", "tasks": ["T1"]}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        self.tw("req", "set", "R2", "--status", "dispatched")
+        self.assertEqual(self.state()["requests"]["R2"]["status"], "delivered")
+        st = self.state()  # the user asks for rework of a reported request: it stays dispatched
+        st["requests"]["R3"] = {**st["requests"]["R2"], "status": "reported"}
+        st["requests"]["R3"].pop("held_from", None)
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        self.tw("req", "set", "R3", "--status", "dispatched", "--user-said", "改一下")
+        self.assertEqual(self.state()["requests"]["R3"]["status"], "dispatched")
+
+    def test_check_msg_findings_and_clean(self):
+        self.tw("memory", "Never topic", "--never-raise")
+        self.tw("memory", "AI", "--never-raise")
+        self.tw("memory", "Old pricing idea — dropped in March", "--never-raise", "--temporary")
+        self.tw("memory", "Do not ever mention the long sentence form of this rule", "--never-raise")
+        self.tw("memory", "User choice", "--user-owned")
+        lead, api, old = "session_01Lead1abcdefghijkl", "session_01Api1abcdefghijklm", "session_01Old1abcdefghijklm"
+        st = self.state(); st["lead"]["session_id"] = lead
+        st["threads"]["api"] = {"status": "working", "session_id": api, "sessions": [{"session_id": old}]}
+        for t in ("T1", "T3", "T4", "T41", "T3-f1-f1"):
+            st["tasks"][t] = {"title": t, "status": "working", "thread": "api"}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        short = st["prefs"]["short_name"]
+        msg = self.dir / "message.txt"
+
+        def check(text, *extra, ok=True):
+            msg.write_text(text)
+            r = self.tw("check-msg", str(msg), "--json", *extra, ok=ok)
+            return r.returncode, {(x["kind"], x["level"]) for x in json.loads(r.stdout)["findings"]}
+        quiet = lambda t: check(t)[1] - {("unchecked", "warning")}  # the long MEMORY entry warns every time
+        code, kinds = check(f"[tw:{short}] TASK lead -> api T1\nTo: <session id>\nGoal: TBD (ask user)\n"
+                            "Done when:\nNever topic and User choice; ask session_01Unknown9abcdefghij\n", ok=False)
+        self.assertEqual(code, 1)
+        self.assertTrue({("placeholder", "problem"), ("unknown-session", "problem"),
+                         ("never-raise", "warning"), ("user-owned", "warning")} <= kinds, kinds)
+        self.assertIn(("unchecked", "warning"), kinds)  # the long entry is reported as not checkable
+        # messages.md's own templates: the full form is all holes, the short form is a real task.
+        doc = (Path(__file__).resolve().parents[1] / "references" / "messages.md").read_text()
+        blocks = re.findall(r"```\n(\[tw:shop\] TASK.*?)```", doc, re.S)
+        st["prefs"]["short_name"] = "shop"; st["threads"]["ui"] = {"status": "working", "session_id": api}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        self.assertEqual(check(blocks[0])[0], 0)
+        self.assertIn(("placeholder", "problem"), check(blocks[1], ok=False)[1])
+        short = "shop"
+        for head in ("TASK lead -> api T1", "[tw:x] TASK lead -> api T1", "[tw:shop] TASK lead -> <thread> T1",
+                     "[tw:shop] TASK lead -> api", "[tw:shop] TASK lead -> api T2,T7", "[tw:shop] TASK lead -> nosuch T3"):
+            self.assertIn(("header", "problem"), check(head + "\nGoal: x.\nDone when: y.\n", ok=False)[1], head)
+        self.assertEqual(check("\n  [TW:shop] ANSWER lead -> api T4\nok\n")[0], 0)
+        # Normal task text passes.
+        for body in ("Goal: build the TODO list page with <button>, <Text>, <order-row>, Array<number>, "
+                     "useState<string | null> and {{ user.name }}; add a session_id column, a session_token1234abcd "
+                     f"dir and ask {old}; keep main and contain it.\nRead first: docs/spec.md\nDone when: tests pass.",
+                     "Goal: 把 README.md 里的安装步骤改成中文版本。\nDone when: 改完。",
+                     "Goal: 按 docs/spec.md §3 重做订单页。\n完成标准：截图两种宽度。"):
+            code, kinds = check(f"[tw:{short}] TASK lead -> api T1\n{body}\n")
+            self.assertEqual(code, 0, (body, kinds))
+        for body in ("T3 已合并，下一个做 docs/plan.md 里的第 4 项。", "Yes, ship by 2026/11/21.", "Yes. See docs/a.md",
+                     "先 rebase 到 main，再详见 CHANGELOG.md 里条目的格式"):
+            self.assertEqual(check(f"[tw:{short}] ANSWER lead -> api T1\n{body}\n")[0], 0, body)
+        for body in ("Goal:\n  make the list fast.\nDone when:\n- tests pass\n- screenshots",
+                     "**Goal:** make it fast.\n1. Done when: `make all` passes.",
+                     "## Goal\nmake it fast.\n**Done when**: ok.",
+                     "Goal: TODO list page with width < 600 and height > 400, <a href>, <Link to>, <string, number>.\n"
+                     "Done when: if count < 3 then route lead -> ui."):
+            code, kinds = check(f"[tw:{short}] TASK lead -> api T3-f1-f1\n{body}\n")
+            self.assertEqual(code, 0, (body, kinds))
+        for body in ("Goal: ...\nDone when: ok.", "Goal: x.\nDone when: ask <Thread> on <session-id>.",
+                     "Goal: x.\nDone when: session_<id> answers.", "Goal: TODO: write\nDone when: ok."):
+            self.assertIn(("placeholder", "problem"), check(f"[tw:{short}] TASK lead -> api T1\n{body}\n", ok=False)[1],
+                          body)
+        self.assertIn(("header", "problem"), check(f"[tw:{short}] TASK lead -> api T99\nGoal: x.\nDone when: y.\n",
+                                                   ok=False)[1])  # not on the board
+        code, kinds = check(f"[tw:{short}] TASK lead -> api T1\nYour task is in .teamwork/tasks/T3.md. Read it.\n",
+                            ok=False)
+        self.assertIn(("fields", "problem"), kinds)  # a pointer TASK has no Goal / Done when
+        code, kinds = check(f"[tw:{short}] TASK lead -> api T1\nGoal: 不要再提 old pricing idea 了，AI 也别提。\n"
+                            "Done when: ok.\n")
+        self.assertEqual(code, 0)
+        self.assertEqual([k for k in kinds if k[0] == "never-raise"], [("never-raise", "warning")])  # one item
+        self.assertIn("Old pricing idea", self.tw("check-msg", str(msg)).stdout)
+        for prompt in ("Read ~/.claude/skills/teamwork/references/protocol.md and follow it.",
+                       "Read templates/worker-protocol and follow it.",
+                       "你是 ui 线程。你的协议在 ~/.claude/x/worker-protocol.md：完整读一遍，照里面每条规则做。"):
+            self.assertEqual(check(prompt, "--prompt", ok=False)[1], {("pointer", "problem")}, prompt)
+        real = self.tw("worker-prompt", "api", ok=False).stdout or ("You are thread api; the rules follow. " * 40)
+        self.assertEqual(check(real, "--prompt")[0], 0)  # a real prompt is not a pointer
+        st["prefs"]["language"] = ""
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        self.assertEqual(quiet(f"[tw:{short}] ANSWER lead -> api T1\n这是中文回答，项目没设语言。\n"), set())
+        st["prefs"]["language"] = "zh"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        code, kinds = check(f"[tw:{short}] INFO lead -> all -\nOnly English prose here, nothing else at all.\n")
+        self.assertEqual((code, kinds - {("unchecked", "warning")}), (0, {("language", "warning")}))
+        self.assertEqual(quiet(f"[tw:{short}] ANSWER lead -> api T41\nT41/T42 已合并，见看板。\n"), set())
+        self.assertEqual(quiet(f"[tw:{short}] ACK lead -> api T1\nok\n"), set())
+
+    def test_info_issue_and_thread_filter(self):
+        self.tw("thread", "add", "api", "--session", "session_api1")
+        self.tw("thread", "add", "old")
+        self.tw("thread", "set", "old", "--status", "archived")
+        self.assertIn("broadcast it: tw.py info --issue I1", self.tw("issue", "add", "broken", "--owner", "api").stdout)
+        got = json.loads(self.tw("info", "hello", "--issue", "I1", "--json").stdout)
+        self.assertIn("[tw:demo] INFO lead -> all -", got["message"])
+        self.assertIn("broken", got["message"])
+        self.assertEqual(got["to"], [{"thread": "api", "session_id": "session_api1"}])
+
+    def test_qa_board_and_done(self):
+        st = self.state(); st["qa_pending"] = [{"branch": "tw/demo/x", "sha": "1234567890"}]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        self.assertIn("Merged, regression not run yet", self.tw("board").stdout)
+        self.assertIn("Merged, regression not run yet", self.tw("board", "--share").stdout)
+        self.assertNotEqual(self.tw("qa", "done", ok=False).returncode, 0)  # say what the round covered
+        self.assertNotEqual(self.tw("qa", "done", "tw/demo/other", ok=False).returncode, 0)
+        st = self.state(); st["qa_pending"].append({"branch": "tw/demo/y", "sha": "abcdef0123"})
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        st = self.state(); st["qa_pending"][0]["to"] = "fedcba9876"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st))
+        self.assertIn("still waiting: tw/demo/y@abcdef0", self.tw("qa", "done", "fedcba9", "--note", "checked").stdout)
+        self.assertEqual([x["branch"] for x in self.state()["qa_pending"]], ["tw/demo/y"])
+        self.tw("qa", "done", "--all")
+        self.assertEqual(self.state()["qa_pending"], [])
+        self.assertNotIn("Merged, regression not run yet", self.tw("board").stdout)
+
+    def test_merge_apply_adds_qa_pending(self):
+        git = lambda *args: subprocess.run(["git", "-C", str(self.dir), *args], check=True,
+                                           capture_output=True, text=True)
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "t"); git("config", "user.email", "t@example.invalid")
+        (self.dir / "base.txt").write_text("base\n"); git("add", "base.txt"); git("commit", "-qm", "base")
+        git("checkout", "-q", "-b", "tw/demo/ui")
+        (self.dir / "change.txt").write_text("merged\n"); git("add", "change.txt"); git("commit", "-qm", "T1: change")
+        sha = git("rev-parse", "HEAD").stdout.strip()
+        git("checkout", "-q", "main")
+        out = self.tw("merge", "tw/demo/ui", "--sha", sha, "--test", "true", "--apply")
+        self.assertTrue(json.loads(out.stdout)["applied"])
+        pending = self.state()["qa_pending"]
+        self.assertEqual((pending[0]["branch"], pending[0]["sha"], pending[0]["base"]),
+                         ("tw/demo/ui", sha, "main"))
+        self.tw("rebuild")  # preview: the journal carries the list
+        rebuilt = json.loads((self.dir / ".teamwork" / "state.json.rebuilt").read_text())
+        self.assertEqual([x["sha"] for x in rebuilt["qa_pending"]], [sha])
+        self.tw("qa", "done", "tw/demo/ui")
+        self.tw("rebuild")
+        self.assertEqual(json.loads((self.dir / ".teamwork" / "state.json.rebuilt").read_text())["qa_pending"], [])
+
+    def test_context_lead_reminder_and_worktree_suppression(self):
+        self.tw("lead", "--session", "session_lead1")
+        self.assertIn("If you are this project's lead", self.context())
+        worktrees = self.dir.parent / (self.dir.name + "-worktrees")
+        work = worktrees / "api"
+        work.mkdir(parents=True)
+        result = subprocess.run([sys.executable, str(TW), "context"], cwd=work, env=self.env,
+                                capture_output=True, text=True)
+        self.assertNotIn("If you are this project's lead", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

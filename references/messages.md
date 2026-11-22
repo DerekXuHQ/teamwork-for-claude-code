@@ -49,7 +49,7 @@ Report: ACK now, DONE or BLOCKED when finished, as in the short form.
 
 - **Goal is digested, User's words is evidence (IL-35).** Never forward the user's words as the only goal: say what you understood they want. A task that merges, dedupes or rewrites sources says in Done when: "every source checked, 0 items missing; a dedupe keeps the union".
 - **Unblocking slice first (IL-6).** When other threads wait on this task, name them and ask for the slice they need first, committed separately, announced with an UPDATE.
-- **No placeholders (IL-11).** A TASK is sent only when every field is filled in: no `<session id>`, `TBD`, `TODO` or `<fill in>`. Read it through for `<` and `TBD` before sending; a peer created later in the same wave is named after you have its id, or in a FOLLOWUP.
+- **No placeholders (IL-11).** A TASK is sent only when every field is filled in: no `<session id>`, `TBD`, `TODO` or `<fill in>`. Run `TW check-msg <file>` (or `-` for stdin) before sending. It fails on a header that is not `[tw:<short>] <TYPE> <from> -> <to> <one task id or ->` with a known type, names on the roster and a task on the board; template holes (`<session id>`, `<the lead's digested target ...>`, an empty field, `Goal: TBD`); a TASK without Goal and Done when (fields as in the templates above, `Goal:` / `Done when:`, bold or numbered is fine; in Chinese 目标 / 完成标准, 验收标准 or 完成条件); and session ids (`session_01...`, `cse_...`) that are not on the roster, in code too. It warns, without failing, on never-raise and user-owned topics from MEMORY.md and on a body in the other language (prose only, not code). `TW check-msg --prompt <file>` checks a session prompt: it fails when the prompt only points to a file (IL-19); a peer created later in the same wave is named after you have its id, or in a FOLLOWUP.
 - **Mark examples and dev markers (IL-12).** An example string in a TASK (a button label, a sample message) is labelled "example, not product text". Dev markers ("rough, to tune") go in code comments or the DONE, never in text the end user sees.
 
 ## FOLLOWUP: more work in an area the thread already owns
@@ -74,7 +74,7 @@ A task that has to be reopened after it is closed gets a new task with a new id 
 
 ## INFO: news for every thread, no reply needed
 
-For things every thread should know at once: a new known issue ("main is red"), a fix that landed, a rule that changed. No ACK, no task id. Threads check the board's "Known issues" before reporting a problem (IL-20).
+For things every thread should know at once: a new known issue ("main is red"), a fix that landed, a rule that changed. No ACK, no task id. Threads check the board's "Known issues" before reporting a problem (IL-20). `TW info "<text>"` (or `TW info --issue I3`) prints the message and every live thread's session id: send it to each one; `TW issue add` reminds you to.
 
 ```
 [tw:shop] INFO lead -> all -

@@ -49,7 +49,7 @@ Where each item of `docs/field-tests/2026-11-18-overnight-run-lessons.md` §6 la
 
 | IL | Task | Where / decision |
 |---|---|---|
-| IL-1 | T39 | SKILL Rules "Never block your own turn on a question"; pref `default_after_minutes` (default 30). The lead applies the default; gated steps never time out. |
+| IL-1 | T39 | SKILL Rules "Never block your own turn on a question"; pref `default_after_minutes` (default 30). The lead applies the default; gated steps never time out. T53 (H1): no `disallowed-tools` frontmatter is relied on (a skill can only pre-approve tools, not forbid them for the session); the written rule stands. |
 | IL-2 | T36, T39 | Standing `merge` grant (T36); SKILL §7 "Merging is your standing job". |
 | IL-3 | T40 | `ready` lists `merge_waiting` and `merge_overdue`; the board shows "Waiting to merge"; SKILL §5.10. |
 | IL-4 | T39 | SKILL §3 step 6 "Self-wake": a timer before every turn with work in flight; `send_later` after a quota reset, then sweep and nudge. |
@@ -59,18 +59,18 @@ Where each item of `docs/field-tests/2026-11-18-overnight-run-lessons.md` §6 la
 | IL-8 | T39 | messages.md "Close and continue" FOLLOWUP; a reopened task gets a new id. |
 | IL-9 | T39 | messages.md ANSWER: reasons, "this replaces", only the lead broadcasts decisions. |
 | IL-10 | T39 | SKILL §4 "Batch direction changes". |
-| IL-11 | T39 | SKILL §3 step 3 "Waves" and messages.md "No placeholders". Not adopted: a `TW check-msg` command; the written rule (read the TASK for `<`, `TBD`, `TODO`) is the lighter option the lessons allow. |
+| IL-11 | T39 | SKILL §3 step 3 "Waves" and messages.md "No placeholders". T53 (H1): `TW check-msg <file>` fails on placeholders, unknown session ids, a bad header and a TASK without Goal / Done when, and warns on the wrong language; `--prompt` fails a pointer-only prompt. |
 | IL-12 | T39 | messages.md "Mark examples and dev markers". |
 | IL-13 | T40 | `TW board --share` writes SHARE.md (deliverables, requests, waiting items, issues, requirements); `TW deliverable add/set`; SKILL §5.9. |
 | IL-14 | T39 | SKILL "Deliverables as openable links": phone-readable links with a status line, an index, private by default, sharing is an approval step. |
 | IL-15 | T39 | SKILL §4 "Every ask, also from an interrupt or a document". |
-| IL-16 | T39 | `TW memory --never-raise` / `--user-owned` write sections in MEMORY.md (new projects get both headings); SKILL §5.5 checks reports against them. The `TW check-msg` flag is not adopted (IL-11). |
+| IL-16 | T39 | `TW memory --never-raise` / `--user-owned` write sections in MEMORY.md (new projects get both headings); SKILL §5.5 checks reports against them. T53 (H1): `TW check-msg` warns on never-raise and user-owned topics (written as `topic — note`). |
 | IL-17 | T39 | SKILL §4 "Ask or decide". |
-| IL-18 | T41 | Protocol header: re-read Language, Messages, STATUS after a summary; `tw.py context` (SessionStart, which fires after compaction) now finds the board from an rc worktree and adds the thread's header format; SKILL Rules for the lead. |
-| IL-19 | T39, T41 | SKILL §3: `append_system_prompt` is the worker prompt itself, never a file pointer. T41: the protocol now reads tasks first, then the rules, with instructions and memory last. |
-| IL-20 | T40 | `TW issue add/set/list` (fixed-on-branch needs `--ref`), board "Known issues", `INFO` in messages.md and the worker protocol; SKILL §5.11. |
+| IL-18 | T41 | Protocol header: re-read Language, Messages, STATUS after a summary; `tw.py context` (SessionStart, which fires after compaction) now finds the board from an rc worktree and adds the thread's header format; SKILL Rules for the lead. T53 (H1): `tw.py context` in the project folder also repeats the lead's header format. |
+| IL-19 | T39, T41, T53 | SKILL §3: `append_system_prompt` is the worker prompt itself, never a file pointer (`TW check-msg --prompt` fails a prompt that only points to a file; a TASK without Goal / Done when fails too). T41: the protocol now reads tasks first, then the rules, with instructions and memory last. |
+| IL-20 | T40 | `TW issue add/set/list` (fixed-on-branch needs `--ref`), board "Known issues", `INFO` in messages.md and the worker protocol; SKILL §5.11. T53 (H1): `TW info` prints the INFO message and every live thread's session id. |
 | IL-21 | T41 | Protocol Working rules "Fix states": `FIXED <branch>@<commit>`, merged, verified; QA re-tests only merged work or the lead's integration branch. |
-| IL-22 | T39 | SKILL §7 "QA after merge"; `TW route --path <file>` maps a file to its owner (owns and active leases). |
+| IL-22 | T39 | SKILL §7 "QA after merge"; `TW route --path <file>` maps a file to its owner (owns and active leases). T53 (H1): `TW merge --apply` lists the merge on the board until `TW qa done`. |
 | IL-23 | T41 | Protocol Working rules "Clean up what you start": DONE says `processes closed`; temp folders and made-up data, never the user's apps or data. |
 | IL-24 | T36 | Command shapes and the `bash-guard` hook (SKILL Rules, worker protocol, setup.md). |
 | IL-25 | T39 | SKILL §7 "Announce only what is merged". |
@@ -81,7 +81,7 @@ Where each item of `docs/field-tests/2026-11-18-overnight-run-lessons.md` §6 la
 | IL-30 | T36 | Standing grants (`prefs standing_grants`, `--user-said`). |
 | IL-31 | T40 | `thread add/set --model` (passed as `create_session` `model`), `task add/set --model --no-scripts`, `ready` lists `models`; TASK "Model / method" line. |
 | IL-32 | T39 (rule); code deferred | SKILL §7 "Review depth by phase": decided once by the user, recorded with their words, applied with today's gate (`review_max_rounds=1` with `--user-said` for "one round", `--skip-review` with `--user-said` for "none"). Deferred: `tw.py` reading phases in the review gate, phases set at `plan approve`, and "none" requiring a recorded `--checks pass`; proposed as a new task. |
-| IL-33 | T39 (rule); state deferred | SKILL §4 "Hold while input is arriving", marked with `req set --followup "held: ..."`, which the board shows under the request. Deferred: a `held` request status in the request machine. |
+| IL-33 | T39, T53 | SKILL §4 "Hold while input is arriving"; `req set --status held` (board: "waiting for your material"), back to open/proposed/dispatched when the input is complete. |
 | IL-34 | T39 | `TW lead` prints `title` and `tags`; SKILL §0.2 sets them, §1.6 setup checklist. |
 | IL-35 | T39 | messages.md "Goal is digested, User's words is evidence"; merge/dedupe done-when. |
 | IL-36 | T39 | `TW memory --temporary`; SKILL §5.5: rules found only in old history are confirmed before they are enforced; ledger table memory row. |

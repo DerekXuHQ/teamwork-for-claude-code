@@ -185,7 +185,7 @@ LABELS = {
         "stale_recorded": "Already recorded; updated the existing stale result",
         "sensitive_guard": "sensitive tier: you said you want to review this kind of command",
         "decided_warning": "This may already be decided: {items}; check decided first",
-        "decided_none": "no matches", "quota_due": "due", "quota_idle": "not due · idle: nothing is running", "quota_not_due": "not due · {minutes} minutes remaining",
+        "decided_none": "no matches", "quota_due": "due", "quota_idle": "not due · idle: nothing is running", "quota_trigger_off": "Turn the quota timer off: the team is idle (set {id} enabled=false, then prefs --set quota_trigger_on=false)", "quota_trigger_on": "Turn the quota timer on: work is running or ready to send out (set {id} enabled=true, then prefs --set quota_trigger_on=true)", "quota_not_due": "not due · {minutes} minutes remaining",
         "package_ok": "ok", "package_missing": "missing: {items}", "package_empty": "empty files: {items}",
         "package_bad": "package is corrupt or incomplete", "path_missing": "path not found",
         "route_fable": "gpt, with Claude handling fable",
@@ -352,7 +352,7 @@ LABELS = {
         "stale_recorded": "已记过，已更新原有过期结果",
         "sensitive_guard": "敏感档：这类命令你说过要看一眼",
         "decided_warning": "这件可能已经定过：{items}，先看 decided", "decided_none": "没有命中",
-        "quota_due": "该查额度了", "quota_idle": "不用查 · 空闲：没有活在跑", "quota_not_due": "还没到时间 · 还剩 {minutes} 分钟",
+        "quota_due": "该查额度了", "quota_idle": "不用查 · 空闲：没有活在跑", "quota_trigger_off": "关掉额度定时：团队空闲（把 {id} 设成 enabled=false，再 prefs --set quota_trigger_on=false）", "quota_trigger_on": "打开额度定时：有活在跑或可以派（把 {id} 设成 enabled=true，再 prefs --set quota_trigger_on=true）", "quota_not_due": "还没到时间 · 还剩 {minutes} 分钟",
         "package_ok": "齐全", "package_missing": "缺少：{items}", "package_empty": "空文件：{items}",
         "package_bad": "包坏了或不完整", "path_missing": "找不到这个路径",
         "route_fable": "gpt，Claude 侧给 fable",
@@ -1389,6 +1389,7 @@ def cmd_init(a):
             "screen_mode": "shadow", "signals_red_at": 3, "relay_max_per_day": 2, "succ_watchdog_minutes": 45,
             "archive_idle_days": 3,
             "reconcile_every": "wrapup", "selfcheck_every": "wrapup", "quota_every_minutes": 60,
+            "quota_trigger_id": "", "quota_trigger_on": "",  # R66: the lead's hourly quota timer and whether it is enabled
         },
     }
     if not (d / "INSTRUCTIONS.md").exists():
@@ -2761,11 +2762,15 @@ def cmd_ready(a):
     notice = (model_lab(st, "ready_notice", n=len(to_open)) if len(to_open) >= 2 else None)
     if notice:
         print(notice, file=sys.stderr)
+    trigger = quota_trigger_hint(st, bool(ready))
+    if trigger:
+        print(quota_trigger_line(st, trigger), file=sys.stderr)
     print(
         json.dumps(
             {
                 "ready": ready,
                 "quota_due": quota_due(st, dispatching=bool(ready)),
+                **({"quota_trigger": trigger} if trigger else {}),
                 "route_hints": {t: route_hint(st, t) for t in ready},
                 "urgent_unacked": urgent,
                 "blocked_by_lease": blocked,
@@ -3307,8 +3312,11 @@ def cmd_wrapup(a):
         lab(st, "replied_not_reported"): [r for r,q in st.get("requests",{}).items() if q.get("status")=="delivered"] + [t for t,x in st.get("tasks",{}).items() if x.get("status")=="done" and any(t in q.get("tasks",[]) and q.get("status") not in REQ_SETTLED + ("delivered",) for q in st.get("requests",{}).values())],
         lab(st, "promises_open"): [f"{x['id']}: {x['text']}" for x in st.get("promises",[]) if x.get("status")=="open"],
         lab(st, "notice_heading"): [f"{x['thread']}: {x.get('text') or x.get('kind')}" for x in st.get("notices", []) if not x.get("done")]}
-    data = {"sections": sections, "reconcile": st["reconcile"]}
-    lines = [f"## {lab(st,'wrapup')}"] + [f"### {k}\n" + ("\n".join("- "+x for x in v) if v else lab(st,"no_items")) for k,v in sections.items()]
+    done_ids = {t for t, k in st.get("tasks", {}).items() if k.get("status") == "done"}
+    sendable = any(k.get("status") == "approved" and set(k.get("deps", [])) <= done_ids for k in st.get("tasks", {}).values())
+    trigger = quota_trigger_hint(st, sendable)
+    data = {"sections": sections, "reconcile": st["reconcile"], **({"quota_trigger": trigger} if trigger else {})}
+    lines = [f"## {lab(st,'wrapup')}"] + ([quota_trigger_line(st, trigger)] if trigger else []) + [f"### {k}\n" + ("\n".join("- "+x for x in v) if v else lab(st,"no_items")) for k,v in sections.items()]
     lines.append(f"### {lab(st,'reconcile')}\n" + ("\n".join("- " + _rc_line(st, x) for x in rows) or lab(st, "no_items")))
     _json_or_text(a, data, lines)
 
@@ -4443,6 +4451,8 @@ def cmd_prefs(a):
             sys.exit(f"{k}: a whole number" + ("" if k in QUOTA_DEFAULTS else " of minutes"))
         if k == "quota_every_minutes" and int(v) < 1:
             sys.exit("quota_every_minutes: a positive whole number of minutes")
+        if k == "quota_trigger_on" and v.lower() not in ("true", "false"):
+            sys.exit("quota_trigger_on: true or false")
         if k == "notice_merge" and v not in ("thread", "none"):
             sys.exit("notice_merge: thread or none")
         if k == "screen_mode" and v not in ("shadow", "off"):
@@ -4554,6 +4564,26 @@ def quota_due(st, dispatching=False):
     interval = int(st.get("prefs", {}).get("quota_every_minutes", 60) or 60)
     last = _when(st.get("last_quota_at"))
     return last is None or (_when(now()) - last).total_seconds() >= interval * 60
+
+
+def quota_trigger_hint(st, sendable):
+    """R66: tw.py cannot switch the platform timer; it only says when the lead should (prefs quota_trigger_id / _on).
+    Idle with the timer on -> "off"; work running or to send out with the timer off -> "on"; nothing when no timer is recorded."""
+    p = st.get("prefs", {})
+    if not str(p.get("quota_trigger_id") or "").strip():
+        return None
+    flag = p.get("quota_trigger_on")
+    on = flag in (None, "") or str(flag).lower() not in ("false", "0")  # a timer is created enabled; prefs may store a bool
+    if on and quota_idle(st) and not sendable:
+        return "off"
+    if not on and (sendable or not quota_idle(st)):  # work out or about to go out: the lead should be woken
+        return "on"
+    return None
+
+
+def quota_trigger_line(st, hint):
+    if not hint: return None
+    return lab(st, "quota_trigger_" + hint, id=st["prefs"]["quota_trigger_id"])
 
 
 def quota_due_minutes(st):

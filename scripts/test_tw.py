@@ -6116,6 +6116,46 @@ class QuotaIdle(Quota):
         self.assertTrue(self.due()["due"])
 
 
+class QuotaTrigger(TwCase):
+    """R66: tw.py only says when the lead should switch the hourly quota timer; the lead records what it did."""
+
+    def test_hints_follow_idle_and_sendable_work(self):
+        self.tw("prefs", "--set", "language=en")
+        r = self.tw("ready")
+        self.assertNotIn("quota_trigger", json.loads(r.stdout))  # no timer recorded: no hint
+        self.tw("prefs", "--set", "quota_trigger_id=trig_1")
+        r = self.tw("ready")
+        self.assertEqual(json.loads(r.stdout)["quota_trigger"], "off")
+        self.assertIn("Turn the quota timer off", r.stderr)
+        self.assertIn("Turn the quota timer off", self.tw("wrapup").stdout)
+        self.tw("prefs", "--set", "quota_trigger_on=false")
+        self.assertNotIn("quota_trigger", json.loads(self.tw("ready").stdout))
+        self.tw("thread", "add", "ui", "--session", "s-ui")
+        self.tw("task", "add", "T1", "--title", "page", "--owner", "ui")
+        self.tw("plan", "approve", "--user-said", "approved")
+        r = self.tw("ready")
+        self.assertEqual(json.loads(r.stdout)["quota_trigger"], "on")
+        self.assertIn("Turn the quota timer on", r.stderr)
+        self.assertEqual(json.loads(self.tw("wrapup", "--json").stdout)["quota_trigger"], "on")
+        self.tw("prefs", "--set", "quota_trigger_on=true")
+        self.assertNotIn("quota_trigger", json.loads(self.tw("ready").stdout))
+        self.assertNotEqual(self.tw("prefs", "--set", "quota_trigger_on=maybe", ok=False).returncode, 0)
+
+    def test_running_work_with_timer_off_keeps_saying_on(self):
+        self.tw("prefs", "--set", "quota_trigger_id=trig_1"); self.tw("prefs", "--set", "quota_trigger_on=false")
+        self.tw("thread", "add", "ui", "--session", "s-ui", "--status", "working")
+        self.tw("task", "add", "T1", "--title", "page", "--owner", "ui"); self.tw("task", "set", "T1", "--status", "dispatched")
+        self.assertEqual(json.loads(self.tw("ready").stdout)["quota_trigger"], "on")
+        self.assertEqual(json.loads(self.tw("wrapup", "--json").stdout)["quota_trigger"], "on")
+        self.tw("prefs", "--set", "quota_trigger_on=true"); self.tw("thread", "set", "ui", "--status", "idle")
+        self.tw("task", "set", "T1", "--status", "blocked")
+        self.assertEqual(json.loads(self.tw("wrapup", "--json").stdout)["quota_trigger"], "off")
+
+    def test_zh_hint(self):
+        self.tw("prefs", "--set", "language=zh"); self.tw("prefs", "--set", "quota_trigger_id=trig_1")
+        self.assertIn("关掉额度定时", self.tw("ready").stderr)
+
+
 class T57Round3Core(Quota):
     """Fixes made by hand after review round 3 (D10 positive path, sensitive-tier normalisation)."""
 

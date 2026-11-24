@@ -7,11 +7,11 @@
 - **B 部分：Claude Code 绑定层。** A 部分的每个概念在本仓库里怎么实现（`SKILL.md`、`scripts/tw.py`、`templates/worker-protocol.md`、`scripts/install.py`），底层用的是 `claude-code-remote` 工具。
 - **C 到 F 部分**：不变量、失效模式、移植清单，以及换一个宿主怎么承载这套框架。
 
-英文版 [`framework.md`](framework.md) 是规范文本。本文内容与它一致，按中文习惯重写；两者有出入时以英文版为准，并请当作问题报告。编号（A1–A17、B1–B10、I1–I54、F1–F67、H1–H17、FW1–FW30、PF1–PF3）两版完全对应。
+英文版 [`framework.md`](framework.md) 是规范文本。本文内容与它一致，按中文习惯重写；两者有出入时以英文版为准，并请当作问题报告。编号（A1–A19、B1–B11、I1–I55、F1–F67、H1–H17、FW1–FW30、PF1–PF3）两版完全对应。
 
 文中“必须”“应当”“可以”按规范用语理解。由代码强制执行、而不是靠提示词约束的规则，会专门注明。
 
-基线：`main` 分支 `3640ebe`。`SKILL.md` 和 worker protocol 逐项对到本文的映射，以及核对时发现的不一致，放在 [`framework-audit.md`](framework-audit.md)（英文）。
+基线：`main` 分支 `cdfd601`。`SKILL.md` 和 worker protocol 逐项对到本文的映射，以及核对时发现的不一致，放在 [`framework-audit.md`](framework-audit.md)（英文）。
 
 ---
 
@@ -23,6 +23,7 @@
   - A7 每轮状态块 · A8 传输：推与拉 · A9 状态机 · A10 生命周期与巡检
   - A11 接单与路由 · A12 同意边界 · A13 恢复 · A14 容量与并行 · A15 成果合并
   - A16 团队类型：生产型与协调型 · A17 哪些规则必须写进代码
+  - A18 体检与席位接班 · A19 发布与回滚
 - [B 部分：Claude Code 绑定层](#b-部分claude-code-绑定层)
 - [C 部分：不变量](#c-部分不变量)
 - [D 部分：失效模式与对策](#d-部分失效模式与对策)
@@ -231,14 +232,17 @@ prefs:     short_name             标题、消息头、标签里用的简称（A
            intake_default         拿不准的请求走哪一档：heavy（默认）或 light（A11）
 requests:  id -> { words（用户原话，逐字）, text（一行摘要）, owner, t（提出时间）,
                    intent, success, tier (light | heavy), decision (do | propose | drop),
-                   route, tasks[], status, reported_at, seen_at, closed_by }
+                   route, tasks[], status, held_from, evidence, reason, reported_at, seen_at, closed_by }
 deliveries: id -> { task, package（冻结的内容 + 版本）, target, policy (direct | confirm | queue),
                    policy_set_by, signoff (who, when, version), round, status, sent_at, ack, idem_key,
                    reply { text, signoff (who, when) } }
 threads:   name -> { kind, kind_reason, focus, owns[], session_id, status, branch, worktree, title,
                      created, last_seen, last_status_at, summary }
 tasks:     id -> { title, owner, deps[], accept（“完成标准”）, status, notes, created,
-                   check { by, session, verdict, at } }
+                   dispatch_v, merged_sha, 评审/核对证据, check { by, session, verdict, at } }
+features:  id -> { requirement, phase, status (planned | building | landed | dropped), tasks[], evidence }
+promises:  id -> { request, text, status, evidence }
+issues:    id -> { owner, status, 分支/提交引用, 验证证据 }
 questions: [ { from, text, t, answered } ]
 ```
 
@@ -246,6 +250,7 @@ questions: [ { from, text, t, answered } ]
 - `deliveries` 只在工作离开团队、交给别的 agent 或工具时才有（A16）。
 - `requests.route` 取值为 `answer`、`owner:<线程>`、`new:<线程>`、`split`（A11）。
 - `threads.last_status_at` 是**线程自己**最近一次汇报的时间，用于判断是否卡住；`last_seen` 是台账任何一次触碰。
+- 派发版本把结果绑在当前这次指派上；旧版本迟到的结果不能推进它。功能的证据和合并提交的引用，让产品进度能追到已经落地的工作。承诺记的是 lead 对用户说过要做什么，以及做到了的证据。
 - 移植时可以加字段，不能删这些字段，也不能改它们的含义。
 
 ## A6 消息协议
@@ -379,6 +384,8 @@ lead 只在轮到它时才动。它的回合来自：用户发消息；线程推
 
 ### 请求状态
 
+台账接受这些请求状态：`open`、`held`、`proposed`、`dispatched`、`delivered`、`reported`、`waiting_user`、`landed`、`wont`、`remark`、`closed`、`dropped`。`held`（等你的材料）把一个 open、proposed 或 dispatched 的请求暂停，缺的材料到了，从暂停前的状态接着走。`waiting_user`（等你定）表示还差用户的一个决定或确认。`landed`（已落地）表示已汇报的工作落地了，必须附证据。`wont`（不做）记下被搁置的请求和理由。`remark`（备注）是用户的一句评论或提醒，只记录，不派。`closed` 和 `dropped` 是由用户决定的终态。哪些转移允许，由代码校验（图里画的就是代码里的表；另外，任何没结束的请求都能用 `req set` 改成 `wont`，`held` 的请求能走到暂停前那个状态能走到的地方）；代码不替用户推断“已接受”。图中是 `req set` 的状态转移；`req close` 和 `req drop` 是单独的用户操作命令。
+
 | 状态 | 含义 |
 |---|---|
 | `open` | 已存下原话；接单还没完成，或者已经就地回答、马上要汇报。 |
@@ -388,26 +395,59 @@ lead 只在轮到它时才动。它的回合来自：用户发消息；线程推
 | `reported` | lead 的汇报（交回了什么、在哪、怎么验证的）已经在用户的界面里。宿主有“已看到”信号、且只有用户本人能触发时，记下来；没看到的汇报下次巡检再提一次。 |
 | `closed` | 用户接受了。 |
 | `dropped` | 用户说不做了。 |
+| `held` | 暂停，等待用户补材料；材料到了回到暂停前的状态。 |
+| `waiting_user` | 等用户决定或确认。 |
+| `landed` | 已落地：已汇报的工作落地，证据已记录。 |
+| `wont` | 不做：搁置，附理由。 |
+| `remark` | 备注：用户的一句评论，记下，不派。 |
 
 ```mermaid
 stateDiagram-v2
     [*] --> open: lead 存下用户原话
     open --> proposed: 接单决定先提议
     proposed --> dispatched: 用户同意
-    proposed --> dropped: 用户不同意
     open --> dispatched: 接单决定直接做，发出 TASK
     open --> reported: 就地回答
-    open --> delivered: 线程里直接做完，事后登记
-    open --> closed: 拆分出的父请求，子请求都已结束
+    open --> held: 等用户补材料
+    proposed --> held: 等用户补材料
+    dispatched --> held: 等用户补材料
+    held --> open: 恢复暂停前状态
+    held --> proposed: 恢复暂停前状态
+    held --> dispatched: 恢复暂停前状态
     dispatched --> delivered: 关联任务都到 review 或 done
     delivered --> reported: lead 向用户汇报
-    reported --> closed: 用户接受
+    open --> waiting_user: 等用户决定
+    proposed --> waiting_user: 等用户决定
+    dispatched --> waiting_user: 等用户决定
+    reported --> waiting_user: 等用户决定
+    reported --> landed: 工作落地并记录证据
     reported --> dispatched: 用户要求修改
-    delivered --> dispatched: 核对没过，退回
-    open --> dropped: 用户说不做
-    dispatched --> dropped: 用户说不做
-    delivered --> dropped: 用户说不做
-    reported --> dropped: 用户说不做
+    waiting_user --> open: 恢复
+    waiting_user --> proposed: 恢复
+    waiting_user --> dispatched: 恢复
+    landed --> dispatched: 用户要求修改
+    open --> wont: 搁置并说明理由
+    held --> wont: 搁置并说明理由
+    proposed --> wont: 搁置并说明理由
+    dispatched --> wont: 搁置并说明理由
+    delivered --> wont: 搁置并说明理由
+    reported --> wont: 搁置并说明理由
+    waiting_user --> wont: 搁置并说明理由
+    landed --> wont: 搁置并说明理由
+    wont --> open: 重开
+    remark --> open: 转成请求
+    reported --> closed: 用户接受
+    landed --> closed: 用户接受
+    open --> dropped: 用户明确说不做
+    held --> dropped: 用户明确说不做
+    proposed --> dropped: 用户明确说不做
+    dispatched --> dropped: 用户明确说不做
+    delivered --> dropped: 用户明确说不做
+    reported --> dropped: 用户明确说不做
+    waiting_user --> dropped: 用户明确说不做
+    landed --> dropped: 用户明确说不做
+    wont --> dropped: 用户明确说不做
+    remark --> dropped: 用户明确说不做
 ```
 
 - **只有用户能结束请求**，也就是提出它的人：接受就是 `closed`，明确说不做就是 `dropped`。lead 不能自己关，线程更不能。
@@ -665,7 +705,7 @@ sequenceDiagram
    - **汇报了但没关** → 每条状态回复里都问一次要不要关；
    - **proposed** → 还在等用户点头：在同一条回复里列出；
    - **交付**（协调型团队）：`sent` 超过一次巡检间隔没回执 → 查接收方，用同一个键重发，或告诉用户；`accepted` 超过预期时间没 `done` → 问接收方，或告诉用户。
-9. 派发新就绪的任务；设下一次定时器。
+9. 把请求、功能和任务对一遍；把合并 QA、过期派发版本的结果、通知、承诺、到期的额度检查、紧急或卡住的工作都摆出来。新就绪的任务先过依赖、租约、容量三项检查，过了才派；有活在跑就设下一次定时器，没有就暂停。
 
 状态回复格式（只写最新情况）：
 
@@ -709,6 +749,10 @@ sequenceDiagram
 **拿不准就走重量档。** 简单的事多想几句，只多几行字；真事想少了，赔进去的是整件活。拿不准时默认走哪一档是项目偏好（`intake_default`，默认 `heavy`）；出现触发条件一律走重量档。
 
 决定推动请求状态机（A9）：直接做 → `dispatched`；先提议 → `proposed`；不做 → 带理由进 `reported`，由用户结束。线程收到 TASK 时可以自己做一次轻量接单，但绝不重新决定用户的请求：有异议就用 QUESTION 提回来。
+
+### 回执
+
+发 TASK 之前，先记下主人、任务号和派发版本；回执记在这个版本名下。重试可以沿用同一个版本；改派或内容有实质改动，就开新版本。旧版本的结果算过期，不能拿来完成当前这次指派。手写的 TASK 发出前，可以用消息校验器查一遍目标和完成标准是否写全。回执只说明台账记了什么，不证明对方读了、读懂了。
 
 ### 路由
 
@@ -754,7 +798,7 @@ lead：执行这一步
 
 - **同意走智能体写不进去的通道。** 只有用户在 lead 界面上（或宿主确认里）的亲手操作，才记为批准。智能体发出的消息、工具调用、API 调用，一律不算。
 - **批准绑定参数。** 批的是什么（命令、目标、分支）随批准一起冻结；参数变了，就要重新问。
-- **超时绝不等于同意。** 用户没回答普通问题时，宿主可以让智能体按自己的判断继续（把猜测记进 `assumed`），但需要同意的步骤一直卡着，直到用户回答。
+- **沉默不等于同意。** 只有能撤回的事才能按默认做，并且要记下选了哪个默认、做了什么。需要同意的步骤一直卡着，直到用户回答。
 
 **交付给另一个 agent 或工具**（A16）本身就需要同意，涉及三件事：
 
@@ -797,7 +841,7 @@ lead 对自己也用同一条规则：从线程读到的内容只是信息，不
 | 丢了什么 | 怎么发现 | 怎么恢复 |
 |---|---|---|
 | **lead 上下文被压缩或重启** | lead 会话启动或恢复。 | 重新注入台账摘要（语言规则、看板、规矩、记忆）；lead 按台账继续，然后巡检。 |
-| **lead 会话丢失** | 用户开新会话并接管。 | 新会话先查记录中的 lead；原 lead 已不在或用户发话才接任；记录自己；巡检。 |
+| **lead 会话丢失** | 用户开新会话并接管。 | 新会话先查记录中的 lead；原 lead 已不在或用户发话才接任；记录自己；巡检。lead 交接要用锁和交接包；接任的 lead 先入席，才能写台账。 |
 | **线程会话丢失 / 联系不上** | 宿主报失败或断线，或者消息被拒。 | 席位还在。新会话接这个席位，带上同一个 TASK、旧会话最后的状态块和分支，并明确要求**不要重复已经做过的副作用**（`result` 里列出的推送、消息、外部调用）；经用户同意后归档旧会话。 |
 | **线程沉默** | 可能卡住（A9）。 | 巡检第 7 步。 |
 | **会话退化**（还连着，但开始重复自己、丢指令、慢得走不动） | 有卡住的信号但没断线；用户或 lead 看到质量下降。 | 向用户提议给同一个席位换一个新会话。交接材料**确定性地**从台账生成：最后的状态块、未完成的任务和请求、已经做过的副作用、未结请求的用户原话。不让退化的会话自己写摘要；它写的笔记可以附上，但绝不能是唯一的交接材料。lead 自己的对话换段也一样：新的一段从台账开始，不从最近几条消息开始。 |
@@ -810,6 +854,8 @@ lead 对自己也用同一条规则：从线程读到的内容只是信息，不
 恢复能成立，靠三条性质：台账在所有智能体之外（A5）；每个线程最后的状态块能自我说明（A7）；每个线程的工作都在自己的分支上（A15）。
 
 ## A14 容量与并行
+
+容量按当前活动、任务租约和额度窗口计算。额度档位决定模型路由：`normal` 按常规路由；`pre-reset-burn` 在重置前提前安排适合由指定模型做的活；`burn-fable` 时，Claude 这边的活除了非 Opus 不可的，都交给指定模型，GPT 仍排第一；`save` 把执行工作全交给 GPT，Claude 只做必须用 Opus 的工作；`lead-only` 只有 lead 使用 Claude，线程把执行工作交给 GPT；`unknown` 保留上一档。阈值和完整规则见 `references/routing.md`。团队空闲时跳过到期检查。当前路由由 lead 广播；工作者照通知办，不自己查额度。记录每个模型的实际结果和适配情况，供后续路由参考。没有命令或宿主关口强制的地方，路由策略只是指引。
 
 - **默认不限。** 批准的计划需要几个线程就开几个。
 - `max_parallel` 限制处于 `starting`/`working` 的线程数；只有用户要求时才设。
@@ -911,6 +957,10 @@ lead 对自己也用同一条规则：从线程读到的内容只是信息，不
 | 在宿主负责路由消息的地方，消息必须锚定到对象 | 没有锚点的消息找不到，也推不进台账。 | I37 |
 | 线程的权限模式不比 lead 更宽松 | 放宽模式就是提权。 | I26 |
 | 工作区由 lead 创建 | 让线程猜路径，线程之间就会撞车。 | I16 |
+| 请求状态、派发版本、等材料的暂停、证据、状态转移校验 | 过期结果和虚假完成会弄丢用户的意图。 | I25、I28 |
+| 单写者锁、台账修订号、保存锁 | 几个 lead 同时写，状态会被互相覆盖。 | I1、I2 |
+| 分支、租约、合并和 QA 检查 | 合并可能把过期或倒退的工作带进去。 | I17、I34 |
+| Bash 防护和隐私数据防护 | 破坏性命令和隐私数据，要靠能执行的检查来拦。 | I38、I54 |
 
 | 可以只写在指令里 | 为什么 | 不变量 |
 |---|---|---|
@@ -921,6 +971,16 @@ lead 对自己也用同一条规则：从线程读到的内容只是信息，不
 | 语言规则、简称 | 属于呈现方式。 | I23、I24 |
 | 从记录里抽取派生工作 | 什么算行动项要靠判断；来源指针让漏掉的能被找到。 | I33 |
 | 先改看板再告诉用户 | 属于顺序上的纪律。 | I4 |
+
+## A18 体检与席位接班
+
+`screen record` 记录分数并打印提示，不会锁住 lead；只在 `screen relead` 后才会加只读锁。lead 三次体检都没过后，不再提供第四个候选，会请用户决定下一步。`screen_mode=off` 时不做体检；`screen unavailable --why` 也会把体检记为未评分，允许没体检就开工。默认的 `shadow` 模式只记分，不拦工作；但曾经没通过体检的会话，代码不让它上座关键席位，也不让它当新的 lead；已经在座的 lead 不会因为体检没过就被撤下，只能走 relead 换人。工具分不清命令来自哪个会话，旧 lead 必须自行遵守只读要求。
+
+线程席位不随会话消失。交接包记下任务、分支、最后一次提交、状态、副作用和下一步。接任者先核对交接包、交出回执，再动手。换席和 lead 交接都用单写者锁；交接期间，交出方停止工作。小测验检查接任者是否读过交接包。这些是代码记录的状态和协议步骤，不代表接任者已经理解交接内容。
+
+## A19 发布与回滚
+
+一次发布，是从校验过的 Git 归档生成一份独立快照；后续发布不会改写已有快照。配置里的技能链接指向发布快照，不指向工作克隆。发布和回滚默认只是试运行，加了 `--apply` 才真正执行。回滚恢复到上一个发布，或者指定名字的发布；edge 模式把链接指回克隆。旧快照一直保留。发布命令必须拒绝归档里不安全的条目，也不能替换一个真实的技能目录。这些行为由 `release.py` 强制；先在目标环境试一遍再用。
 
 ---
 
@@ -937,7 +997,7 @@ lead 对自己也用同一条规则：从线程读到的内容只是信息，不
 | 席位 | `state.json` 里 `threads` 的一项；当前会话记在 `session_id`。 |
 | 台账接口 | `scripts/tw.py`（只用标准库的 Python），一律以 `tw.py -C <项目目录>` 调用。 |
 | 台账存储 | `<项目>/.teamwork/`：`state.json`、`BOARD.md`、`INSTRUCTIONS.md`、`MEMORY.md`、`log.jsonl`。 |
-| 请求 | 本文 A5、A9、A11 已规定；core 正在实现（任务 T14），合并后本节再核对一遍。 |
+| 请求 | `tw.py req` 记录请求文本、关联、状态、用户原话、证据、导入和关闭。 |
 | 接单 | 只在指令里（lead 操作手册）；重量档以大局观方法为参照。 |
 | 交付 | 不用：本绑定是生产型团队，成果靠合并，不靠交付。 |
 | 协议注入 | `tw.py worker-prompt <thread>` 填好 `templates/worker-protocol.md`，作为 `append_system_prompt` 传入。 |
@@ -947,7 +1007,10 @@ lead 对自己也用同一条规则：从线程读到的内容只是信息，不
 | 打断 | `interrupt_session`（会清掉排队消息：`cancel_queued: true`）。 |
 | 工作区 | rc：由 `tw.py worktree` 创建的 git worktree `<项目目录>-worktrees/<thread>`。cloud：容器里的检出，加 `outcome_branch`。 |
 | 上下文恢复 | 运行 `tw.py context` 的 SessionStart 钩子。 |
-| 安装 | `scripts/install.py`。 |
+| 安装 | `scripts/install.py`；默认试运行，加 `--apply` 才写设置和钩子。 |
+| 分阶段发布 | `scripts/release.py` 的 publish、rollback、edge、status；默认试运行。 |
+| 额度与路由 | `tw.py quota`、`model-log`、`model-status`、任务的 `--route`，以及 `references/routing.md`。 |
+| 体检与接班 | `tw.py opening`、`selfcheck`、`screen`、`succ`、`handover`；锁和回执的状态存在台账里。 |
 
 ## B2 会话、环境与类型
 
@@ -960,7 +1023,7 @@ lead 对自己也用同一条规则：从线程读到的内容只是信息，不
   1. git 项目里的 rc 线程：`TW worktree <thread>`（幂等；`--dry-run` 预览）。
   2. `TW worker-prompt <thread>`。
   3. `create_session`，参数：`environment_id`（一定要显式传，默认值是调用方自己的环境）；`TW thread add` 输出的 `title` 和 `tags`（`[<简称>] <thread> · <focus>`，约 24 个字符；`teamwork:<简称>`、`teamwork-thread:<thread>`）；`append_system_prompt`；`prompt`（TASK 消息）；`extra_allowed_tools`（`send_message`、`get_session`、`list_events`）；`permission_mode`（设了 `thread_permission_mode` 就用它，否则用 lead 自己的模式；绝不比 lead 宽松）。cloud 线程另加 `source_url`、`source_revision`、`outcome_branch`。
-  4. `TW thread set <thread> --session <id> --status working`，`TW task set <id> --status dispatched`。
+  4. `TW thread set <thread> --session <id> --status working`，`TW task set <id> --status dispatched`（只有已批准的任务才能派出：先跑 `TW plan approve --user-said "<用户原话>"`）。
 - **收编**已有会话：`TW thread add <name> --session <id>`，然后发 ROSTER 和 FOLLOWUP。
 
 ## B3 台账：`tw.py`
@@ -985,6 +1048,12 @@ lead 对自己也用同一条规则：从线程读到的内容只是信息，不
 | `worker-prompt <thread>` | 填好的协议；有占位符没填就拒绝输出。 | B5 |
 | `projects --root <served> [--json]` | 只读的组合视图。 | A3 |
 | `context` | SessionStart 钩子的输出。 | B7 |
+| `req add/link/set/close/list/import`、`ask --default`、`decided` | 请求的生命周期、等材料的暂停、可追溯的用户选择、安全的默认做法。 | A9、A11、A12 |
+| `feature`、`reconcile`、`wrapup`、`sprint`、`promise`、`card`、`docs`、`intro`、`issue`、`deliverable`、`package-check` | 产品需求、承诺、给用户看的视图、交付包检查。 | A5、A10、A15 |
+| `threads`、`notice`、`nudge`、`spawn-refused`、`archive`、`handover`、`succ`、`signals` | 巡检、会话接班、归档关口、交接证据。 | A10、A13、A18 |
+| `screen`、`opening`、`selfcheck`、`version` | lead 就绪检查和发布版本标识。 | A18、A19 |
+| `quota`、`model-log`、`model-status`、任务的 `--route` | 额度档位和模型结果。 | A14 |
+| `check-msg`、`info`、`qa`、`merge`、`bash-guard`、`guard`、`trace` | 消息校验、广播、合并 QA、命令防护与隐私防护、来源追溯。 | A5、A10、A17 |
 
 ## B4 本宿主上的传输
 
@@ -995,7 +1064,7 @@ lead 对自己也用同一条规则：从线程读到的内容只是信息，不
 | rc lead → rc / cloud 线程：创建、发消息、读取 | 可以 | lead 必须具备的可达性 |
 | rc 线程 → rc lead | 预先放行 `send_message` 后可以 | 推 |
 | rc ↔ rc 同伴 | 可以 | 直接 HANDOFF |
-| cloud → cloud | 据报告可以 | 直接 HANDOFF |
+| cloud → cloud | 未证实：2026-11-24 发送方的 `send_message` 被拦下等用户批准，cloud 的工具列表里也没看到这个工具（看到的工具列表不全） | 中转：状态块 + lead 转发 |
 | cloud → rc，经 lead 通过 `handed_off` 中转 | 可以；延迟等于巡检间隔 | 中转 |
 | cloud → rc，直接发 | 被拒，除非用户批准一张信任卡 | — |
 | rc → 已提升信任的 cloud 会话 | 被拒 | 提升信任会切断 lead 的线路 |
@@ -1005,7 +1074,8 @@ lead 对自己也用同一条规则：从线程读到的内容只是信息，不
 - **rc 线程推送** DONE/BLOCKED/QUESTION/HANDOFF/MEMORY，同时照写状态块。
 - **cloud 线程只拉不推。** 它们从不向 lead 或 rc 同伴 `send_message`，也从不调用 `confirm_repository_trust`；lead 也从不替它们批准信任。它们写状态块、推送自己的分支；lead 用 `get_session` / `list_events` 和 `git fetch` 读取。
 - **读取：** `list_events` 是读完一页再按 `kinds` 过滤，所以用 `limit: 100`，并以 `before_id = first_id` 往前翻，直到出现 `result`；还在第一轮的线程没有 `result`，改用 `task_summary`。
-- **失败事件：** 按工具文档，子会话某一轮失败会由平台通知 lead；实测中还没观察到。
+- **失败事件：** 按工具文档，子会话某一轮失败会由平台通知 lead。2026-11-24 实测（`docs/field-tests/2026-11-24-t73-field-tests.md`）：10 分钟内父会话没收到任何子会话事件；被打断的一轮显示 `REVIEW_READY`，不是 `FAILED`；模型名写错不会失败，而是悄悄回退（只能从 `model_fallback` 事件，或 `configured_model` ≠ `last_served_model` 看出来）。
+- **延迟：** 一轮正常结束，父会话什么也收不到（2026-11-24 实测）。lead 要到下一次读取才知道线程做完了，所以发现延迟就是巡检间隔。只有线程自己发的 DONE/BLOCKED 消息才算推。
 - **定时器：** 派发 cloud 线程后启动后台 `sleep <checkin_minutes*60>`；超过一小时的检查用 `send_later`。
 - **先打断再 RECALL：** `interrupt_session` 返回 `cancel_queued: true`；线程只看到“[Request interrupted by user]”，所以 RECALL 的第一句是“lead 刚打断了你”。
 
@@ -1063,6 +1133,14 @@ A 部分要求写进代码（A17）、而本绑定目前只靠提示词、或者
 已不再是偏离（见审计的状态表）：I25 和 I28（`tw.py` 里有请求台账、任务状态机和评审关口；每条用户消息在路由前登记，仍只靠提示词），I34（DONE 前的独立评审，有记录），I42、I44、I49、I51（写进了操作手册，`tw.py` 拒绝把形似子 agent 的 id 当会话），I43（默认 `rc`，`--cloud-reason` 有记录），I48（等别的线程、第一次断线都保持 `working`；`waiting` 只表示要用户出手）。
 
 I26 没有列进来：`create_session` 本身会拒绝比调用方更宽松的模式（宿主强制）；`tw.py prefs` 看不到 lead 的模式，对最宽松的几种会打印提示（审计 Y-22）。
+
+## B11 发布、额度与体检
+
+全局参数放在子命令前：`release.py [--repo R] [--config-dir D] <publish|rollback|edge|status>`。`publish` 不加 `--apply` 时只打印计划动作，不改任何配置目录，也不生成发布（检查时可能把归档解到临时目录）。`status` 显示各配置目录指向哪个发布、比 main 落后几个提交；不传 `--config-dir` 时，会读取 `$CLAUDE_CONFIG_DIR` 和每个链接了该技能的 `~/.claude*` 目录。`rollback` 默认只预览；加 `--apply` 才执行，可用 `--to <name>` 指定目标。`edge --apply` 改回直接用克隆仓库。
+
+`TW quota [--due]` 读本地的用量窗口，报出档位；旁边有 `scripts/quota.py` 这个读取模块时就用它。这个模块读用量数据、划分额度档位；结果取决于本地有哪些数据。`TW model-log` 记录模型结果。`TW model-status <gpt|fable|opus> --down|--up [--why quota|connection|other]` 记录模型是否可用。任务可以设 `--route` 和 `--work-kind`；各档位怎么做由 `references/routing.md` 规定。团队空闲时，额度检查暂停或跳过。
+
+`TW opening` 打印开场默认值和问题单。`TW selfcheck` 检查 lead 的设置。`TW screen` 记录体检步骤。`TW succ` 负责核对、测验、评分、上座和交接。`TW handover` 确定性地生成交接包。`TW version` 报告当前生效的副本版本和会话版本。
 
 ---
 
@@ -1126,6 +1204,7 @@ I26 没有列进来：`create_session` 本身会拒绝比调用方更宽松的�
 | I52 | 代理人的每个动作都带一个由系统按调用通道打上的来源标识；客户端自报的来源一律忽略。 | 代码（有该功能的地方）+ 宿主 |
 | I53 | 代理人越界查看时，静默通知管理方和受影响的人，有阈值、去重和申诉渠道。 | 代码（有该功能的地方）+ 宿主 |
 | I54 | 本人亲手设的常设授权，算是对那一类动作事先给了同意；但确认、验收、重开、放宽授权或某一层策略（包括调长有效期）、放行越界警报、查看明文机密，每一件都要单独同意。动作的内容或版本变了、多出一个动作、对象被别人改过或超时，同意就失效；某一步失败，后面的步骤停下，直到重新征得同意；每一步只执行一次；同意只来自本人的真人通道。 | 代码（有该功能的地方）+ 宿主 |
+| I55 | 请求应保留用户原话；`landed` 必须带 `--evidence`，`close` / `drop` 必须带非空的 `--user-said`。代码只检查这些关口；逐字保存原话、标明是谁说的，靠约定。 | 代码（关口）+ 约定 |
 
 ---
 

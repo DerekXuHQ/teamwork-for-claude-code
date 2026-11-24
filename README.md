@@ -3,12 +3,14 @@
 [English](README.md) · [中文](README.zh.md)
 
 **Run a team of Claude sessions from claude.ai. One lead plans the work, named threads do it, and every request you
-make comes back to you.**
+make stays on the ledger until you close it.**
 
 One session is the **lead**. It plans the work and starts named **threads** (other sessions). It sends each request to
 the thread that already owns that area, watches the threads, recalls or reassigns work, and merges the results.
 Threads know about each other, pass work to the right owner, and report back in a fixed format. Each project keeps its
-board, instructions and memory in a `.teamwork/` folder, so a long session or a restart loses nothing.
+board, instructions and memory in a `.teamwork/` folder, and a new session starts from that ledger rather than from
+what the last session remembered. Tested: the ledger summary is injected when a session starts. Not yet tested by
+hand: a thread after you type `/clear` in it yourself (the lead cannot reset a thread remotely).
 
 This is a community skill, not an Anthropic product. It is for people who want to work the way the
 [Claude Code Projects beta](https://code.claude.com/docs/en/claude-projects.md) works but don't have access yet, or
@@ -120,8 +122,9 @@ lead  ── Remote Control session, runs /teamwork, owns .teamwork/ for one pro
    └── cloud thread "research" ── cloud session, reports through its transcript and git
 ```
 
-- **Every request is tracked until you close it.** The lead stores your words, routes them, checks what comes back,
-  reports it, and keeps listing it until you say it is done or dropped.
+- **Each request stays on the ledger until you close it.** The lead stores your words, routes them, checks what comes back,
+  reports it, and keeps listing it until you say it is done or dropped. The ledger enforces parts of this in code:
+  dropping a request needs your words, and "landed" needs evidence. Following the steps is still the lead's job.
 - **Board**: `.teamwork/BOARD.md`, regenerated from `state.json` on every change. Threads are grouped like the Projects
   overview (Waiting on you, Ready for review, Working, Landing, Idle, Resolved), with open questions, the roster and
   the plan.
@@ -136,7 +139,9 @@ run the same framework. Start with its "Overview in 5 minutes".
 
 Which session can message which was tested on a real account; see [`references/transport.md`](references/transport.md).
 In short: Remote Control sessions can message each other in both directions; the lead can create and message
-cloud threads; cloud threads cannot message a Remote Control lead, so the lead reads their transcripts instead.
+cloud threads; cloud threads cannot message a Remote Control lead, so the lead reads their transcripts instead. A thread that
+finishes a turn without sending DONE pushes nothing, so the lead finds out at its next sweep, not within seconds
+(tested 2026-11-24). Cloud-to-cloud messages are not proven; those handoffs go through the lead.
 
 > **Screenshot placeholder:** a thread's `DONE` message and the lead's report to the user.
 

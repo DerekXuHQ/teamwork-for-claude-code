@@ -14,7 +14,7 @@ which rules hold them together, and what a host platform must provide to run it.
 The words **must**, **should** and **may** are used in their usual specification sense. Where a rule is enforced by
 code rather than by a prompt, the text says so.
 
-Baseline: `main` at `3640ebe`. The item-by-item mapping from `SKILL.md` and the worker protocol to this document, and the
+Baseline: `main` at `cdfd601`. The item-by-item mapping from `SKILL.md` and the worker protocol to this document, and the
 inconsistencies found while checking them, live in [`framework-audit.md`](framework-audit.md).
 
 ---
@@ -30,6 +30,7 @@ inconsistencies found while checking them, live in [`framework-audit.md`](framew
   - [A11. Intake and routing](#a11-intake-and-routing) · [A12. Consent](#a12-the-consent-boundary) · [A13. Recovery](#a13-recovery)
   - [A14. Capacity](#a14-capacity-and-parallelism) · [A15. Integration](#a15-integration-of-results)
   - [A16. Team types and delivery](#a16-team-types-producing-and-coordinating) · [A17. Code vs instructions](#a17-what-code-must-enforce)
+  - [A18. Screening and seat succession](#a18-screening-and-seat-succession) · [A19. Releases and rollback](#a19-releases-and-rollback)
 - [Part B. Claude Code binding](#part-b-claude-code-binding)
 - [Part C. Invariants](#part-c-invariants)
 - [Part D. Failure modes and mitigations](#part-d-failure-modes-and-mitigations)
@@ -292,14 +293,17 @@ prefs:     short_name             display name in titles, headers, labels (A3)
            intake_default         tier for ambiguous asks: heavy (default) or light (A11)
 requests:  id -> { words (the user's message, verbatim), text (one-line summary), owner, t (asked at),
                    intent, success, tier (light | heavy), decision (do | propose | drop),
-                   route, tasks[], status, reported_at, seen_at, closed_by }
+                   route, tasks[], status, held_from, evidence, reason, reported_at, seen_at, closed_by }
 deliveries: id -> { task, package (frozen content + version), target, policy (direct | confirm | queue),
                    policy_set_by, signoff (who, when, version), round, status, sent_at, ack, idem_key,
                    reply { text, signoff (who, when) } }
 threads:   name -> { kind, kind_reason, focus, owns[], session_id, status, branch, worktree, title,
                      created, last_seen, last_status_at, summary }
 tasks:     id -> { title, owner, deps[], accept ("done when"), status, notes, created,
-                   check { by, session, verdict, at } }
+                   dispatch_v, merged_sha, review/check evidence, check { by, session, verdict, at } }
+features:  id -> { requirement, phase, status (planned | building | landed | dropped), tasks[], evidence }
+promises:  id -> { request, text, status, evidence }
+issues:    id -> { owner, status, branch/commit ref, verification evidence }
 questions: [ { from, text, t, answered } ]
 ```
 
@@ -309,6 +313,9 @@ questions: [ { from, text, t, answered } ]
 - `requests.route` is one of `answer`, `owner:<thread>`, `new:<thread>`, `split` (A11).
 - `threads.last_status_at` is the time of the last report **from the thread itself**; it drives stuck detection.
   `last_seen` is any ledger touch.
+- Dispatch versions bind a result to the current assignment; a late result from an older dispatch must not advance it.
+  Feature evidence and merged commit references make product progress traceable to landed work. Promises record what
+  the lead told the user it would do and the evidence that it was done.
 - A port may add fields; it must not drop these or change their meaning.
 
 ## A6. Message protocol
@@ -468,6 +475,9 @@ the user, the threads and the host.
 
 ### Request status
 
+The ledger accepts these request states: `open`, `held`, `proposed`, `dispatched`, `delivered`, `reported`, `waiting_user`, `landed`, `wont`, `remark`, `closed`, and `dropped`. `held` pauses an open, proposed or dispatched request until its missing input arrives; it resumes from the paused state. `waiting_user` records a user decision or confirmation still needed. `landed` means reported work has landed and requires evidence. `wont` records a request set aside with a reason. `remark` is a remark or reminder from the user, recorded and not dispatched. `closed` and `dropped` are terminal user outcomes. The code validates transitions (the diagram shows the table in code; in addition `req set` lets any live request be set aside as `wont`, and a
+`held` request move wherever its paused state could); it does not infer the user's acceptance. `req set` uses the transitions in this diagram; `req close` and `req drop` are separate user-action commands.
+
 | Status | Meaning |
 |---|---|
 | `open` | Captured; intake not finished, or answered in place and about to be reported. |
@@ -477,26 +487,59 @@ the user, the threads and the host.
 | `reported` | The lead's report (what came back, where, how checked) is in the user's surface. If the host has a "seen" signal that only the user can trigger, record it; an unseen report is re-surfaced at the next sweep. |
 | `closed` | The user accepted it. |
 | `dropped` | The user said not to do it. |
+| `held` | Paused for user material; resumes at the prior state. |
+| `waiting_user` | A user decision is pending. |
+| `landed` | Reported work landed with recorded evidence. |
+| `wont` | Set aside with a reason. |
+| `remark` | A user remark recorded, not dispatched. |
 
 ```mermaid
 stateDiagram-v2
     [*] --> open: lead captures user message
     open --> proposed: intake says propose first
     proposed --> dispatched: user says yes
-    proposed --> dropped: user says no
+    proposed --> held: waiting for user material
+    open --> held: waiting for user material
+    dispatched --> held: waiting for user material
+    held --> open: resume prior open state
+    held --> proposed: resume prior proposed state
+    held --> dispatched: resume prior dispatched state
     open --> dispatched: intake says do it, TASK sent
     open --> reported: answered in place
-    open --> delivered: work done directly in a thread, registered after
-    open --> closed: split parent, all children ended
     dispatched --> delivered: all live linked tasks review/done
     delivered --> reported: lead reports to the user
-    reported --> closed: user accepts
+    open --> waiting_user: user decision pending
+    proposed --> waiting_user: user decision pending
+    dispatched --> waiting_user: user decision pending
+    reported --> waiting_user: user decision pending
+    reported --> landed: work landed, evidence recorded
     reported --> dispatched: user asks for changes
-    delivered --> dispatched: check failed, sent back
-    open --> dropped: user says don't
-    dispatched --> dropped: user says don't
-    delivered --> dropped: user says don't
-    reported --> dropped: user says don't
+    waiting_user --> open: resume
+    waiting_user --> proposed: resume
+    waiting_user --> dispatched: resume
+    landed --> dispatched: user asks for changes
+    open --> wont: set aside with reason
+    held --> wont: set aside with reason
+    proposed --> wont: set aside with reason
+    dispatched --> wont: set aside with reason
+    delivered --> wont: set aside with reason
+    reported --> wont: set aside with reason
+    waiting_user --> wont: set aside with reason
+    landed --> wont: set aside with reason
+    wont --> open: reopen
+    remark --> open: turn into a request
+    reported --> closed: user accepts
+    landed --> closed: user accepts
+    open --> dropped: user says not to do it
+    held --> dropped: user says not to do it
+    proposed --> dropped: user says not to do it
+    dispatched --> dropped: user says not to do it
+    delivered --> dropped: user says not to do it
+    reported --> dropped: user says not to do it
+    waiting_user --> dropped: user says not to do it
+    landed --> dropped: user says not to do it
+    wont --> dropped: user says not to do it
+    remark --> dropped: user says not to do it
 ```
 
 - **Only the user ends a request**: the person who raised it; `closed` by accepting, `dropped` by explicitly saying
@@ -783,7 +826,7 @@ before any status answer to the user.
    - **proposed** → still waiting for the user's yes: list them in the same reply.
    - **deliveries** (coordinating teams): `sent` without `ack` past one check-in → check the target, retry with the same
      key or tell the user; `accepted` without `done` past the expected time → ask the target or tell the user.
-9. Dispatch newly ready tasks; set the next timer.
+9. Reconcile requests, features and tasks; surface merge QA, stale dispatch results, notices, promises, quota checks due, and urgent or stuck work. Dispatch newly ready tasks only after dependency, lease and capacity checks; set or pause the next timer according to whether work is active.
 
 Status reply shape (newest information only):
 
@@ -833,6 +876,14 @@ always mean heavy.
 The decision feeds the request machine (A9): do it → `dispatched`; propose first → `proposed`; drop → `reported` with
 the reason, for the user to end. A thread receiving a TASK may run its own light intake on it, but it never re-decides
 the user's request: disagreement goes back as a QUESTION.
+
+### Receipts
+
+Before a TASK is sent, record its owner, task id, and dispatch version. Record its receipt against that version. A
+retry may repeat the same version; reassignment or material change creates a new version. Results from an older version
+are stale and must not complete the current assignment. A message validator may check that a hand-written TASK has a
+complete goal and done condition before it is sent. These receipts establish what the ledger recorded; they do not
+prove the recipient read or understood the message.
 
 ### Routing
 
@@ -890,10 +941,9 @@ Three rules make the boundary hold in practice:
   lead's surface (or the host prompt). A message, a tool call or an API call made by an agent is never accepted as one.
 - **An approval is bound to its parameters.** What was approved (the command, the target, the branch) is frozen with the
   approval; if the parameters change, it must be asked again.
-- **A timeout never grants consent.** A host may let an agent proceed on its own judgment when the user does not answer
-  an ordinary question (recording the guess in `assumed`), but a consent-gated step stays blocked until the user answers.
+- **Silence is not a yes.** A default may be used only for undoable things, with the selected default and action recorded. A consent-gated step stays blocked until the user answers.
 
-**Delivery to another agent or tool** (A16) is itself consent-gated, in two places:
+**Delivery to another agent or tool** (A16) is itself consent-gated, in three decisions:
 
 | Decision | Who makes it | Recorded as |
 |---|---|---|
@@ -973,7 +1023,7 @@ context and the succession of sessions in a seat.
 | Loss | Detection | Recovery |
 |---|---|---|
 | **Lead context compacted or restarted** | Lead session starts or resumes. | Ledger summary (language rule, board, instructions, memory) is re-injected; the lead continues from the ledger, then sweeps. |
-| **Lead session lost** | User opens a new session and attaches. | New session checks the recorded lead; takes over only if it is gone or the user says so; records itself; sweeps. |
+| **Lead session lost** | User opens a new session and attaches. | New session checks the recorded lead; takes over only if it is gone or the user says so; records itself; sweeps. A lead handover uses a lock and a handover pack, and the incoming lead must be seated before it writes. |
 | **Thread session lost / unreachable** | Host reports failed or disconnected, or a send is refused. | The seat survives. A new session takes it with the same TASK, the old one's last status block and branch, and an explicit instruction **not to repeat side effects already done** (pushes, messages, external calls listed in `result`); the old session is archived after the user agrees. |
 | **Thread silent** | Possibly stuck (A9). | Sweep step 7. |
 | **Session degraded** (still connected, but repeating itself, losing instructions, or slowing to a crawl) | Stuck signals without a disconnect; the user or the lead sees quality drop. | Propose to the user a fresh session for the same seat. The handoff is **built deterministically** from the ledger: the last status block, open tasks and requests, side effects already done, and the user's verbatim words for the open requests. The degraded session is not asked to write its own summary; notes it wrote may be attached, never as the only handoff. The same applies when the lead's own conversation is rolled over: the new segment starts from the ledger, not from the last few messages. |
@@ -987,6 +1037,8 @@ Recovery rests on three properties: the ledger is outside every agent (A5); ever
 itself (A7); every thread's work is on its own branch (A15).
 
 ## A14. Capacity and parallelism
+
+Capacity is measured against current activity, task leases and quota windows. Quota tiers control model routing: `normal` uses the usual routes; `pre-reset-burn` pulls forward suitable scoped-model work before reset; `burn-fable` sends Claude-side work, except Opus-only work, to the scoped model while GPT stays first; `save` sends all execution to GPT and keeps Claude for Opus-only work; `lead-only` keeps Claude for the lead while threads hand execution to GPT; `unknown` keeps the last tier. See `references/routing.md` for thresholds and details. Due checks are skipped while idle. The lead broadcasts the active route; workers follow that notice and do not inspect quota state themselves. Record each model's outcome and whether it suited that kind of work, so later routing uses evidence. Routing policy is guidance unless a command or host gate enforces it.
 
 - **Default: no limit.** Start every thread the approved plan needs.
 - `max_parallel` caps threads in `starting`/`working`; set only when the user asks.
@@ -1126,6 +1178,10 @@ and corrected at the next sweep.
 | Messages anchored to an object, where the host routes messages | An unanchored message cannot be found or derived into the ledger. | I37 |
 | A thread's permission mode no looser than the lead's | A widened mode is an escalation. | I26 |
 | Workspace created by the lead | Guessing paths is how threads collide. | I16 |
+| Request states, dispatch versions, held input, evidence and transition guards | Stale results and false completion lose user intent. | I25, I28 |
+| Single-writer lock, ledger revision and save lock | Concurrent leads can overwrite state. | I1, I2 |
+| Branch, lease, merge and QA checks | A merge can land stale or regressed work. | I17, I34 |
+| Bash guard and private-data guard | Destructive commands and private data need executable checks. | I38, I54 |
 
 | May stay in instructions | Why | Invariants |
 |---|---|---|
@@ -1136,6 +1192,17 @@ and corrected at the next sweep.
 | Language rule, short names | Presentation. | I23, I24 |
 | Extracting derived work from records | Judgment on what is an action item; the source pointer makes misses findable. | I33 |
 | Board before telling the user | Ordering discipline. | I4 |
+
+## A18. Screening and seat succession
+
+`screen record` records scores and prints a hint; it does not lock the lead. The read-only lock starts with `screen relead`. After three failed lead screens, there is no fourth candidate; the tool asks the user what to do next. `screen_mode=off` skips screening. `screen unavailable --why` records an unscored screen and lets work start without screening. The default `shadow` mode records scores without gating work, except that a session that has ever failed cannot be seated as a critical seat or as a new lead (code refuses it); a
+lead that is already seated is not removed by a failed screen, only by the relead path. The tool cannot identify which session issued a command, so the old lead must follow the read-only instruction.
+
+A thread seat survives its session. A handover pack records the task, branch, last commit, status, side effects and next step. The successor verifies the pack and supplies a receipt before acting. A seat swap and lead handover use a single-writer lock; outgoing work freezes during transfer. A quiz checks that the successor read the pack. These are code-recorded transitions plus protocol instructions; they do not prove the successor understood the information.
+
+## A19. Releases and rollback
+
+A release publishes a separate snapshot from a validated Git archive; later publishes do not rewrite earlier snapshots. Configured skill links point to the release snapshot, not the working clone. Publish and rollback are dry runs unless `--apply` is supplied. Rollback restores the prior release or a named release; edge mode points back to the clone. Old snapshots remain available. A release command must reject unsafe archive entries and must not replace a real skill directory. This behavior is enforced by `release.py`; try each release operation once in the target environment before relying on it.
 
 ---
 
@@ -1152,7 +1219,7 @@ and corrected at the next sweep.
 | Seat | Entry in `state.json` `threads`; current session in `session_id`. |
 | Ledger interface | `scripts/tw.py` (stdlib Python), always called as `tw.py -C <project folder>`. |
 | Ledger store | `<project>/.teamwork/`: `state.json`, `BOARD.md`, `INSTRUCTIONS.md`, `MEMORY.md`, `log.jsonl`. |
-| Requests | Specified here (A5, A9, A11); implementation in progress in core (task T14). This section will be re-checked when it lands. |
+| Requests | `tw.py req` records request text, links, states, user words, evidence, imports and closure. |
 | Intake | Instructions only (the lead playbook); the big-picture method is the reference for the heavy tier. |
 | Deliveries | Not used: this binding is a producing team whose results are merged, not delivered. |
 | Protocol injection | `tw.py worker-prompt <thread>` fills `templates/worker-protocol.md`; passed as `append_system_prompt`. |
@@ -1162,7 +1229,10 @@ and corrected at the next sweep.
 | Interrupt | `interrupt_session` (clears queued messages: `cancel_queued: true`). |
 | Workspace | rc: git worktree `<project folder>-worktrees/<thread>` created by `tw.py worktree`. cloud: container checkout with `outcome_branch`. |
 | Context restore | SessionStart hook running `tw.py context`. |
-| Install | `scripts/install.py`. |
+| Install | `scripts/install.py`; dry run by default, `--apply` writes settings and hooks. |
+| Staged release | `scripts/release.py` publish, rollback, edge and status; dry run by default. |
+| Quota and routing | `tw.py quota`, `model-log`, `model-status`, task `--route`, and `references/routing.md`. |
+| Screening and succession | `tw.py opening`, `selfcheck`, `screen`, `succ`, `handover`; lock and receipt state live in the ledger. |
 
 ## B2. Sessions, environments and kinds
 
@@ -1184,7 +1254,8 @@ and corrected at the next sweep.
      `extra_allowed_tools` (`send_message`, `get_session`, `list_events`), and `permission_mode`
      (`thread_permission_mode` if set, else the lead's own mode; never looser than the lead). cloud only:
      `source_url`, `source_revision`, `outcome_branch`.
-  4. `TW thread set <thread> --session <id> --status working`, `TW task set <id> --status dispatched`.
+  4. `TW thread set <thread> --session <id> --status working`, `TW task set <id> --status dispatched` (only an
+     approved task can be dispatched: `TW plan approve --user-said "<the user's words>"` comes first).
 - **Adopting** an existing session: `TW thread add <name> --session <id>`, then ROSTER and FOLLOWUP.
 
 ## B3. The ledger: `tw.py`
@@ -1211,6 +1282,12 @@ is regenerated and an event appended to `log.jsonl`.
 | `worker-prompt <thread>` | Filled protocol; refuses if a placeholder is left. | B5 |
 | `projects --root <served> [--json]` | Read-only portfolio. | A3 |
 | `context` | SessionStart hook output. | B7 |
+| `req add/link/set/close/list/import`, `ask --default`, `decided` | Request lifecycle, held material, traceable user choices and safe defaults. | A9, A11, A12 |
+| `feature`, `reconcile`, `wrapup`, `sprint`, `promise`, `card`, `docs`, `intro`, `issue`, `deliverable`, `package-check` | Product requirements, commitments, user-facing views and package checks. | A5, A10, A15 |
+| `threads`, `notice`, `nudge`, `spawn-refused`, `archive`, `handover`, `succ`, `signals` | Sweep, session succession, archive gates and handover evidence. | A10, A13, A18 |
+| `screen`, `opening`, `selfcheck`, `version` | Lead readiness and release identity. | A18, A19 |
+| `quota`, `model-log`, `model-status`, task `--route` | Quota tiers and model outcomes. | A14 |
+| `check-msg`, `info`, `qa`, `merge`, `bash-guard`, `guard`, `trace` | Message validation, broadcast, merge QA, command and privacy guards, provenance. | A5, A10, A17 |
 
 ## B4. Transport on this host
 
@@ -1221,7 +1298,7 @@ Tested 2026-11-15, re-tested 2026-11-16 (`references/transport.md`):
 | rc lead → rc / cloud thread: create, send, read | works | required lead reach |
 | rc thread → rc lead | works once `send_message` is pre-allowed | push |
 | rc ↔ rc peers | works | direct HANDOFF |
-| cloud → cloud | reported working | direct HANDOFF |
+| cloud → cloud | not proven: 2026-11-24 the sender's `send_message` was held for the user's approval, and the tool was not seen in the cloud tool list (the visible tool list is partial) | relay: STATUS block + lead forwards |
 | cloud → rc, relayed by the lead via `handed_off` | works; latency = sweep interval | relay |
 | cloud → rc, direct | refused unless the user approves a trust card | — |
 | rc → a trust-elevated cloud session | refused | elevation would cut lead reach |
@@ -1234,8 +1311,12 @@ Per the trust trade rule (A8):
   branch; the lead reads with `get_session` / `list_events` and `git fetch`.
 - **Reading:** `list_events` filters `kinds` after reading the page, so use `limit: 100` and page back with
   `before_id = first_id` until a `result` appears; a thread in its first turn has none, so use `task_summary`.
-- **Failure events:** per the tool documentation, a failed child turn is reported to the lead by the platform; not yet
-  observed in field tests.
+- **Failure events:** per the tool documentation, a failed child turn is reported to the lead by the platform. Field
+  test 2026-11-24 (`docs/field-tests/2026-11-24-t73-field-tests.md`): no child-session event reached the parent within
+  10 minutes; an interrupted turn shows `REVIEW_READY`, not `FAILED`; an invalid model name does not fail, it falls back
+  silently (visible only as a `model_fallback` event or `configured_model` ≠ `last_served_model`).
+- **Latency:** a clean turn end sends the parent nothing (tested 2026-11-24). The lead learns that a thread finished at
+  its next read, so detection latency is the sweep interval. Only a thread's own DONE/BLOCKED message is a push.
 - **Timers:** background `sleep <checkin_minutes*60>` after dispatching cloud threads; `send_later` for checks more than
   an hour away.
 - **Interrupt then RECALL:** `interrupt_session` returns `cancel_queued: true`; the thread sees only
@@ -1318,6 +1399,14 @@ disconnect keep the seat `working`; `waiting` means the user has to act).
 I26 is not listed: `create_session` itself refuses a mode looser than the caller's (host); `tw.py prefs` cannot see
 the lead's mode and prints a note for the loosest ones (audit Y-22).
 
+## B11. Releases, quota and screening
+
+Global options go before the subcommand: `release.py [--repo R] [--config-dir D] <publish|rollback|edge|status>`. `publish` without `--apply` prints the planned actions and changes no config dir or release (it may unpack the archive into a temporary folder to check it). `status` shows each configuration directory's release pointer and lag; without `--config-dir`, it reads `$CLAUDE_CONFIG_DIR` and every `~/.claude*` directory whose `skills/teamwork` link exists. `rollback` previews rollback; add `--apply` and optionally `--to <name>` to perform it. `edge --apply` points the install at the checked-out clone.
+
+`TW quota [--due]` reads local usage windows and reports a tier; it uses the adjacent `scripts/quota.py` reader when present. That module reads usage data and classifies quota tiers; results depend on available local data. `TW model-log` records outcomes. `TW model-status <gpt|fable|opus> --down|--up [--why quota|connection|other]` records availability. Tasks may set `--route` and `--work-kind`; `references/routing.md` defines tier behavior. Idle teams pause or skip quota checks.
+
+`TW opening` prints opening defaults and question sheets. `TW selfcheck` checks lead setup. `TW screen` records screening steps. `TW succ` verifies, quizzes, grades, swaps or hands over seats. `TW handover` builds a deterministic pack. `TW version` reports the active copy and session versions.
+
 ---
 
 # Part C. Invariants
@@ -1382,6 +1471,7 @@ platform), or **convention**.
 | I52 | Every agent action carries an origin tag set by the system from the calling channel; client-supplied origin is ignored. | code (where it exists) + host |
 | I53 | Out-of-scope viewing by an agent silently alerts the administrator and the affected person, with a threshold, deduplication and an appeal path. | code (where it exists) + host |
 | I54 | A standing authorization the principal set counts as advance consent for its class, except for confirming, accepting, reopening, loosening an authorization or a policy layer (including a longer expiry), releasing an out-of-scope alert and viewing secrets in clear text, which each need their own consent. A consent is void if its actions' content or version changes, an action is added, the target was changed by someone else, or it times out; a failed step stops the rest until consent is asked again; each step runs once; consent comes only from the principal's own human channel. | code (where it exists) + host |
+| I55 | A request retains the user's verbatim words; `landed` requires `--evidence`, and `close`/`drop` require non-empty `--user-said`. Code enforces those gates; preserving the exact wording and whose words they are is convention. | code (gates) + convention |
 
 ---
 

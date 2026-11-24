@@ -6,7 +6,7 @@ Companion to [`framework.md`](framework.md). Two parts:
   `framework.md` that specifies it.
 - **Findings**: places where the implementation and the specification disagree, or the implementation is silent.
 
-Checked against `main` at `3640ebe`; the status of each finding was updated in T26 (end of Findings).
+Checked against `main` at `cdfd601`; the status of each finding was updated in T26 (end of Findings).
 
 ---
 
@@ -231,3 +231,10 @@ test in `scripts/test_tw.py` (`AuditFollowups`) that checks the wording or the b
 | Y-21 | fixed (T24) | rc by default; `--kind cloud` needs `--cloud-reason`; SKILL §2.3. |
 | Y-22 | partial | `prefs --set thread_permission_mode=auto` or `bypassPermissions` prints a note that the host refuses a thread looser than the lead. Gap: the ledger still records the mode, because tw.py cannot see the lead's mode; `create_session` is what refuses it. |
 | Y-23 | fixed (T20) | `task set --status done` only from `review`, with a passing or capped review (TASK_MOVES, accept gate). |
+
+
+## 2026-11-24 update (cdfd601)
+
+`framework.md` now covers request states and held input, safe defaults, sweep and reconciliation, quota and model routing, dispatch versions, merge QA, notices and archive rules, handover and succession locks, lead screening, release snapshots and rollback. It also maps the added CLI families in Part B and adds A18/A19 without moving existing Part A anchors. The documented CLI examples were checked with the relevant `--help` commands; command help evidence is recorded separately for this update.
+
+Inconsistency found: the skill and worker protocol describe the old lead as read-only after a failed opening screen and instruct it not to run the successor's `--relead` operation itself. The CLI records and locks the relead state, but command execution does not identify the calling session, so the code cannot verify that the command came from the newly opened lead. This remains an instruction-level constraint. No code change was made.

@@ -378,6 +378,9 @@ LABELS = {
         "screen_p4_base": "这个项目的 base 分支是什么？说明你在哪查的。",
         "screen_p4_commit": "最新提交号的前七位是什么？说明你在哪查的。",
         "opening_recommended": "（推荐）",
+        "opening_current": "  现在：{current}；别的项目上次选的：{last}", "opening_unset": "没设", "opening_no_last": "没有",
+        "opening_all_answered": "三问都答过了",
+        "opening_last": "{value}（原话「{text}」）", "opening_unanswered": "还没回答：{keys}",
         "opening_change": "以后想改，说一句话就行；lead 会跑：prefs --set {pref}={value} --user-said \"<你的话>\"",
         "opening_rule": "没回答时：权限按托管（managed），GPT 能用就用（推荐默认）；开线程沿用上次的答案。任何一项以后一句话就能改。",
         "opening_defaults_detail": "按默认：{pairs}（可随时改）",
@@ -477,8 +480,13 @@ LABELS = {
 }
 
 
+def _lang_code(st):
+    """zh, zh-CN, zh_TW -> zh: one reading of the language pref for every label table."""
+    return (st.get("prefs", {}).get("language") or "en").strip().lower().replace("_", "-").split("-")[0]
+
+
 def lab(st, key, **kw):
-    code = (st.get("prefs", {}).get("language") or "en").strip().lower().split("-")[0]
+    code = _lang_code(st)
     return LABELS.get(code, LABELS["en"]).get(key, LABELS["en"].get(key, key)).format(**kw)  # unknown: the key
 
 
@@ -513,7 +521,7 @@ MODEL_STATUS_LABELS = {
 
 
 def model_lab(st, key, **kw):
-    code = (st.get("prefs", {}).get("language") or "en").strip().lower().split("-")[0]
+    code = _lang_code(st)
     return MODEL_STATUS_LABELS.get(code, MODEL_STATUS_LABELS["en"])[key].format(**kw)
 
 
@@ -5047,6 +5055,26 @@ OPENING = {
 }
 
 
+def _zh(st):
+    return _lang_code(st) == "zh"
+
+
+OPENING_ZH = {  # the same questions in Chinese (question, steps, what each step costs); keys and values stay as in OPENING
+    "spawn_policy": ("我开新线程，要先问你吗？",
+                     ["每开一个都先问你（spawn_policy=ask）", "只有新话题才问（用一句话告诉我）",
+                      "按话题直接开，不用问（spawn_policy=free）"],
+                     ["每个线程你都要看一行、回一句", "每出一个新话题问你一次", "不打扰你，开了哪些在看板上都看得到"]),
+    "perm_policy": ("权限交给我来管吗？（我用 auto 模式跑，弹出来的确认我来处理）",
+                    ["每次都问你（perm_policy=ask，不用 auto）", "交给我管，但敏感的给你看（用一句话说清哪些算敏感）",
+                     "全交给我管（perm_policy=managed）"],
+                    ["线程之间每发一条消息都要你点一下，一晚上大概上百次", "只有你点名的那几类才要你点",
+                     "服务器要是还没认 auto，你把这个会话切到 auto，切一次就行；之后只有撤不回来的操作才问你"]),
+    "gpt_policy": ("能交给 GPT 的活，都交给 GPT 吗？",
+                   ["不用 GPT（gpt_policy=no）", "只用在你点名的地方（用一句话说范围）", "能用就用（gpt_policy=yes）"],
+                   ["所有活都用 Claude 的额度", "GPT 只在你划的范围里干活", "Claude 出方案、做评审，GPT 动手写，省 Claude 的额度"]),
+}
+
+
 OPENING_DEFAULTS = {"perm_policy": "managed", "gpt_policy": "yes"}
 OPENING_RECOMMENDED = {"spawn_policy": 2, "perm_policy": 2, "gpt_policy": 2}  # index into each scale
 OPENING_CHANGE = {"spawn_policy": "ask", "perm_policy": "ask", "gpt_policy": "no"}  # the example value in the change line
@@ -5079,7 +5107,9 @@ def opening_data(d, st):
         except (OSError, ValueError, TypeError, AttributeError):  # another project's broken state is skipped
             continue
     rows = []
+    zh = _zh(st)
     for key, (question, scale, costs, _) in OPENING.items():
+        if zh: question, scale, costs = OPENING_ZH[key]
         prior = max((x for x in answers if x[1] == key), default=None)
         rows.append({"key": key, "question": question, "scale": [{"step": s, "cost": c} for s, c in zip(scale, costs)],
                      "current": st.get("prefs", {}).get(key) or None,
@@ -5125,11 +5155,15 @@ def cmd_opening(a):
             print(f"{row['key']}: {row['question']}")
             for n, step in enumerate(row["scale"], 1):
                 print(f"  {n}. {step['step']} — {step['cost']}" + (lab(st, "opening_recommended") if n - 1 == row["recommended"] else ""))
-            print(f"  current: {row['current']}; last elsewhere: {row['last']}")
+            last = row["last"]
+            print(lab(st, "opening_current", current=row["current"] or lab(st, "opening_unset"),
+                      last=lab(st, "opening_last", value=last["value"], text=last["text"]) if last else lab(st, "opening_no_last"))
+                  if _zh(st) else f"  current: {row['current']}; last elsewhere: {row['last']}")
             print("  " + row["change"])
         print(result["gpt_private_question"])
         if result.get("managed_note"): print(result["managed_note"])
-        print("unanswered_now: " + ", ".join(result["unanswered_now"]))
+        print((lab(st, "opening_unanswered", keys="、".join(result["unanswered_now"])) if result["unanswered_now"] else lab(st, "opening_all_answered"))
+              if _zh(st) else "unanswered_now: " + ", ".join(result["unanswered_now"]))
         for name, status in result["thread_screens"].items(): print(f"{name}: {status}")
         print(result["rule"])
 

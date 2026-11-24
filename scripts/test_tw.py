@@ -151,6 +151,40 @@ class OpeningAndSelfcheck(TwCase):
         self.assertEqual(self.tw("selfcheck", "--mode", "default").returncode, 0)
 
 
+class OpeningZh(TwCase):
+    """T65: in Chinese the opening questions and their steps read in Chinese; keys, values and English stay as they were."""
+
+    def test_zh_questions_steps_and_status_lines(self):
+        self.tw("prefs", "--set", "language=zh")
+        out = self.tw("opening").stdout
+        for text in ("我开新线程，要先问你吗？", "权限交给我来管吗？", "能交给 GPT 的活，都交给 GPT 吗？",
+                     "全交给我管（perm_policy=managed）", "现在：没设", "还没回答："):
+            self.assertIn(text, out)
+        self.assertNotIn("May the lead open", out); self.assertNotIn("last elsewhere", out); self.assertNotIn("unanswered_now", out)
+        self.assertIn("按话题直接开，不用问（spawn_policy=free） — 不打扰你，开了哪些在看板上都看得到（推荐）", out)
+        rows = json.loads(self.tw("opening", "--json").stdout)["questions"]
+        self.assertEqual([r["key"] for r in rows], ["spawn_policy", "perm_policy", "gpt_policy"])
+        self.assertEqual(rows[1]["question"], "权限交给我来管吗？（我用 auto 模式跑，弹出来的确认我来处理）")
+
+    def test_zh_variants_and_all_answered(self):
+        for code in ("zh_TW", "ZH-cn"):
+            self.tw("prefs", "--set", f"language={code}")
+            out = self.tw("opening").stdout
+            self.assertIn("还没回答：", out); self.assertIn("（推荐）", out)
+            self.assertNotIn("opening_current", out); self.assertNotIn("opening_unanswered", out)
+        for kv in ("spawn_policy=free", "perm_policy=managed", "gpt_policy=yes"):
+            self.tw("prefs", "--set", kv, "--user-said", "好")
+        self.assertIn("三问都答过了", self.tw("opening").stdout)
+        self.assertIn("只用在你点名的地方", self.tw("opening").stdout)
+
+    def test_en_unchanged(self):
+        self.tw("prefs", "--set", "language=en")
+        out = self.tw("opening").stdout
+        self.assertIn("May the lead open sessions (threads) freely?", out)
+        self.assertIn("  current: None; last elsewhere: None", out)
+        self.assertIn("unanswered_now: spawn_policy, perm_policy, gpt_policy", out)
+
+
 class LeadOpening(TwCase):
     def setUp(self):
         super().setUp()

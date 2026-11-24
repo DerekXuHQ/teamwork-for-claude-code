@@ -29,6 +29,8 @@ Tested on a Pro account on 2026-11-15 with the `claude-code-remote` tools (`send
 4. **Peers hand off directly.** rc↔rc works. cloud → cloud is unproven (2026-11-24: held for the user, tool presence unverified), so until it is proven, cloud-to-cloud handoffs also go through the STATUS block and the lead. A cloud thread that needs an rc thread asks through its STATUS block, and the lead forwards the request.
 5. **Completion signals.** RC threads send DONE/BLOCKED to the lead, which arrive as new turns. For cloud threads the lead uses a background timer and sweeps.
 
+The lead keeps one session-directory Claude Doc per project. At project start, after opening a thread, on each sweep, and at wrap-up, save the complete `list_sessions` JSON (all pages) under `.teamwork/private/`, run `TW nav --sessions <file>`, and replace the content of the Doc recorded under `TW docs` `nav` (create one and `TW docs set nav --link <url>` only when none is recorded; never a second Doc). Keep archive candidates informational until the user authorizes archiving.
+
 ## Reading another thread's STATUS
 
 `list_events` applies `kinds` after it reads the page. On a busy thread, `kinds: ["result"]` with

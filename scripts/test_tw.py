@@ -104,7 +104,7 @@ class OpeningAndSelfcheck(TwCase):
     def test_title_with_goal(self):
         self.tw("lead", "--session", "lead-session")
         out = json.loads(self.tw("lead").stdout)
-        self.assertEqual(out["title"], f"[{self.state()['prefs']['short_name']}] lead · test project")
+        self.assertEqual(out["title"], f"[{self.state()['prefs']['short_name']}] ★lead · lead")
 
     def test_policy_preferences_require_user_words(self):
         self.assertNotEqual(self.tw("prefs", "--set", "spawn_policy=free", ok=False).returncode, 0)
@@ -1366,7 +1366,7 @@ class LessonsCommands(TwCase):
     def test_lead_prints_its_title_and_tags(self):
         out = json.loads(self.tw("lead", "--session", "session_0quixbar").stdout)
         short = self.state()["prefs"]["short_name"]
-        self.assertEqual((out["title"], out["tags"]), (f"[{short}] lead · test project", [f"teamwork:{short}", "teamwork-thread:lead"]))
+        self.assertEqual((out["title"], out["tags"]), (f"[{short}] ★lead · lead", [f"teamwork:{short}", "teamwork-thread:lead"]))
 
     def test_route_path_names_the_owner(self):
         self.tw("thread", "add", "web", "--owns", "web/**")
@@ -6486,10 +6486,6 @@ class ReportCards(TwCase):
         self.assertEqual(self.tw("board").stdout, board)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReviewRound1(TwCase):
     """T56 review round 1: crashes and side doors around the user's yes."""
     def setUp(self):
@@ -6659,6 +6655,118 @@ class ThreadView(TwCase):
         self.tw("notice", "add", "--thread", "ui", "--session", "s1", "--ref", "z")
         self.tw("rebuild")
         self.assertEqual(len(self.state()["notices"]), 1)
+
+
+class TestNav(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.tw("lead", "--session", "session_test_lead")
+        self.tw("thread", "add", "ui", "--session", "session_test_ui", "--status", "working", "--summary", "build screen")
+
+    def sessions(self, rows, wrapped=False):
+        path = self.dir / "sessions.json"
+        value = {"ccr": {"data": rows}} if wrapped else rows
+        path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def nav_json(self, rows):
+        return json.loads(self.tw("nav", "--sessions", str(self.sessions(rows)), "--json").stdout)
+
+    def test_primary_markdown_lead_first_and_other_project_excluded(self):
+        rows = [
+            {"id": "session_test_lead", "title": "old lead title", "tags": ["teamwork:DEMO"]},
+            {"id": "session_test_ui", "title": "[DEMO] ui · screen", "tags": ["teamwork:DEMO", "teamwork-thread:ui"],
+             "status_bucket": "WORKING", "updated_at": "2026-11-24T12:34:00Z", "task_summary": "build page"},
+            {"id": "session_other", "title": "[OTHER] api", "tags": ["teamwork:OTHER"]},
+        ]
+        result = self.tw("nav", "--sessions", str(self.sessions(rows)))
+        out = result.stdout
+        self.assertIn("docs set nav", result.stderr)  # no Doc yet: told to create and record one
+        first = next(line for line in out.splitlines() if line.startswith("- "))
+        self.assertIn("[old lead title](https://claude.ai/code/session_test_lead)", first)
+        self.assertIn("[ui · screen](https://claude.ai/code/session_test_ui) — build page", out)
+        self.assertNotIn("要你", out); self.assertNotIn("You:", out)
+        self.assertNotIn("session_other", out)
+        self.assertLess(out.index("session_test_lead"), out.index("session_test_ui"))
+
+    def test_parent_chain_test_group_live_bucket_and_archive_accounting(self):
+        rows = [
+            {"id": "session_test_lead", "title": "[DEMO] ★lead · lead", "tags": ["teamwork:DEMO"]},
+            {"id": "session_test_ui", "title": "[DEMO] ui", "tags": ["teamwork:DEMO", "teamwork-thread:ui"],
+             "status_bucket": "BLOCKED", "post_turn_summary": {"needs_action": "approve build"}},
+            {"id": "session_test_child", "title": "helper", "parent_session_id": "session_test_ui"},
+            {"id": "session_test_test", "title": "[DEMO] （可删）test", "parent_session_id": "session_test_child",
+             "tags": ["teamwork-test:can-delete"], "status_bucket": "COMPLETED"},
+            {"id": "session_test_archived", "title": "[demo] old", "tags": ["teamwork:demo"],
+             "session_status": "SESSION_STATUS_ARCHIVED"},
+        ]
+        data = self.nav_json(rows)
+        self.assertEqual(data["groups"]["waiting"][0]["id"], "session_test_ui")
+        self.assertEqual(data["groups"]["test"][0]["id"], "session_test_test")
+        self.assertTrue(data["groups"]["test"][0]["name"].startswith("↳ ui:"))
+        self.assertEqual(data["archived_count"], 1)
+        self.assertNotIn("session_test_archived", json.dumps(data["groups"]))
+        self.assertEqual(data["groups"]["working"], [])
+
+    def test_old_seat_candidate_title_fix_docs_and_json_shape(self):
+        rows = [
+            {"id": "session_test_lead", "title": "incorrect", "tags": ["teamwork:demo"]},
+            {"id": "session_test_ui", "title": "[demo] ui", "tags": ["teamwork:demo", "teamwork-thread:ui"], "status_bucket": "WORKING"},
+            {"id": "session_test_old", "title": "[demo] ui old", "tags": ["teamwork:demo", "teamwork-thread:ui"], "status_bucket": "COMPLETED"},
+        ]
+        data = self.nav_json(rows)
+        self.assertEqual(set(data), {"lead", "groups", "archived_count", "archive_candidates", "title_fixes"})
+        self.assertEqual(data["archive_candidates"][0]["id"], "session_test_old")
+        self.assertEqual(data["title_fixes"][0]["suggested"], "[demo] ★lead · lead")
+        self.tw("docs", "set", "nav", "--link", "https://claude.ai/doc/nav")
+        self.assertEqual(self.state()["docs"]["nav"]["link"], "https://claude.ai/doc/nav")
+        self.assertIn("Session directory", self.tw("docs", "list").stdout)
+        rerun = self.tw("nav", "--sessions", str(self.sessions(rows)))
+        self.assertIn("https://claude.ai/doc/nav", rerun.stderr)  # rerun points at the same Doc
+
+    def test_real_list_shape_old_seat_hidden_parent_from_state_resolved_only_tick(self):
+        self.tw("thread", "add", "field", "--session", "session_test_field", "--status", "idle")
+        self.tw("thread", "add", "done1", "--session", "session_test_done", "--status", "resolved")
+        rows = [
+            {"id": "session_test_ui", "title": "[demo] ui · new", "tags": ["teamwork:demo", "teamwork-thread:ui"], "status_bucket": "SESSION_STATUS_BUCKET_WORKING", "updated_at": "2026-11-24T10:00:00Z"},
+            {"id": "session_test_ui_old", "title": "[demo] ui · old", "tags": ["teamwork:demo", "teamwork-thread:ui"], "status_bucket": "SESSION_STATUS_BUCKET_BLOCKED", "post_turn_summary": {"needs_action": "go"}},
+            {"id": "session_test_t1", "title": "[demo] t1 · 实测（可删）", "tags": ["teamwork:demo", "teamwork-thread:field-test"], "parent_session_id": "session_test_field", "status_bucket": "SESSION_STATUS_BUCKET_COMPLETED"},
+        ]
+        data = self.nav_json(rows)
+        self.assertEqual(data["groups"]["waiting"], [])  # an old seat is only an archive candidate
+        self.assertIn("session_test_ui_old", [x["id"] for x in data["archive_candidates"]])
+        self.assertEqual(data["groups"]["test"][0]["name"], "↳ field: t1 · 实测（可删）")
+        ticks = [x.get("thread") for x in data["title_fixes"] if x.get("thread")]
+        self.assertEqual(ticks, ["done1"])  # idle = standby: no ✓
+        rows.append({"id": "session_test_lead", "title": "[demo] ★lead · lead", "status_bucket": "SESSION_STATUS_BUCKET_WORKING"})
+        out = self.tw("nav", "--sessions", str(self.sessions(rows))).stdout
+        self.assertNotIn("SESSION_STATUS", out)
+        self.assertIn("— working", next(line for line in out.splitlines() if line.startswith("- ★")))
+
+    def test_review_fixes_zh_none_url_other_project_child_seatless_thread_bad_file(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "api", "--status", "working")  # no session id yet
+        self.tw("thread", "add", "gone", "--status", "resolved")  # resolved, never seated
+        rows = [
+            {"id": "session_test_api", "title": "[demo] api", "tags": ["teamwork:demo", "teamwork-thread:api"], "status_bucket": "SESSION_STATUS_BUCKET_FAILED"},
+            {"id": "session_test_other", "title": "[OTHER] x", "tags": ["teamwork:OTHER"], "parent_session_id": "session_test_ui"},
+        ]
+        result = self.tw("nav", "--sessions", str(self.sessions(rows)))
+        out = result.stdout
+        self.assertIn("会话目录", out); self.assertIn("等你处理", out)
+        self.assertIn("(https://claude.ai/code/session_test_api)", out.split("**等你处理**")[1])  # only seat is not an "old seat"
+        self.assertNotIn("session_test_other", out)
+        self.assertNotIn("(None)", out)
+        self.assertIn("更新已有" if "docs" in self.state() else "docs set nav", result.stderr)
+        bad = self.tw("nav", "--sessions", str(self.dir / "missing.json"), ok=False)
+        self.assertNotEqual(bad.returncode, 0); self.assertNotIn("Traceback", bad.stderr)
+
+    def test_all_projects_row_uses_state_and_directory_link(self):
+        self.tw("docs", "set", "nav", "--link", "https://claude.ai/doc/demo")
+        out = self.tw("nav", "--all-projects", "--root", str(self.dir)).stdout
+        self.assertIn("[demo ★lead](https://claude.ai/code/session_test_lead)", out)
+        self.assertIn("waiting on you 0 · working 1", out)
+        self.assertIn("https://claude.ai/doc/demo", out)
 
 
 class ArchiveAndSeats(TwCase):
@@ -8132,3 +8240,7 @@ class LeadBatch5(TwCase):
         self.tw("prefs", "--set", "language=zh")
         self.tw("notice", "add", "--kind", "needs-user", "--note", "确认登录设备")
         self.assertIn("这一步要你本人来点：确认登录设备", self.tw("board").stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

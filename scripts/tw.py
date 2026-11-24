@@ -159,7 +159,14 @@ LABELS = {
         "package_unreadable": "This package cannot be read here; open it and check it manually",
         "chain_recorded": "recorded", "chain_dispatched": "dispatched", "chain_accepted": "accepted",
         "chain_review": "review", "chain_merged": "merged", "chain_reported": "reported",
-        "doc_board": "Board", "doc_ledger": "Ledger", "doc_features": "Features",
+        "doc_board": "Board", "doc_ledger": "Ledger", "doc_features": "Features", "doc_nav": "Session directory",
+        "nav_doc_update": "Update the existing directory Doc {link} (replace its content); do not create a new one", "nav_doc_create": "No directory Doc yet: create one with this content, then run docs set nav --link <url>", "nav_title": "Session directory", "nav_updated": "Updated", "nav_waiting": "waiting on you",
+        "nav_working": "working", "nav_review": "ready for review", "nav_test": "test sessions — can delete",
+        "nav_done": "done", "nav_archived": "Archived sessions: {n}; restore them at claude.ai/code/sessions → Archived.",
+        "nav_archive_candidates": "archive candidates (listed only; waiting for your authorization)",
+        "nav_title_fixes": "title fixes", "nav_lead_state": "lead", "nav_needs_you": "You: ",
+        "nav_reason_test": "completed or review-ready test session", "nav_reason_old_seat": "old seat for {thread}",
+        "nav_reason_resolved": "thread resolved", "nav_no_directory": "no directory yet",
         "archive_idle_note": "show to the user first", "archive_disconnected_note": "candidate only; wait for the user",
         "archive_verified": "Verified and archived", "archive_verify_first": "Stop the session, verify by session ID, then archive it",
         "archive_restorable": "The lead can restore this with the platform tool",
@@ -383,7 +390,14 @@ LABELS = {
         "package_unreadable": "这种包读不了内容，要人工打开核对",
         "chain_recorded": "记台账", "chain_dispatched": "派", "chain_accepted": "接单",
         "chain_review": "评审", "chain_merged": "合并", "chain_reported": "回报",
-        "doc_board": "看板", "doc_ledger": "台账", "doc_features": "功能清单",
+        "doc_board": "看板", "doc_ledger": "台账", "doc_features": "功能清单", "doc_nav": "会话目录",
+        "nav_doc_update": "更新已有的目录 Doc {link}（替换全文），不要新建", "nav_doc_create": "还没有目录 Doc：用这份内容新建一个，再运行 docs set nav --link <url>", "nav_title": "会话目录", "nav_updated": "更新于", "nav_waiting": "等你处理",
+        "nav_working": "进行中", "nav_review": "等你复核", "nav_test": "测试会话 — 可删",
+        "nav_done": "已完成", "nav_archived": "已归档 {n} 个会话；可在 claude.ai/code/sessions → Archived 恢复。",
+        "nav_archive_candidates": "可归档候选（只列不动，等用户授权）",
+        "nav_title_fixes": "标题待修", "nav_lead_state": "主控", "nav_needs_you": "要你：",
+        "nav_reason_test": "测试会话已完成或待复核", "nav_reason_old_seat": "{thread} 的旧席位",
+        "nav_reason_resolved": "线程已解决", "nav_no_directory": "尚无会话目录",
         "archive_idle_note": "先列给用户看", "archive_disconnected_note": "只列候选，等你定",
         "archive_verified": "已核实并归档", "archive_verify_first": "先停手、按会话 ID 核实，再归档",
         "archive_restorable": "lead 可用平台工具恢复",
@@ -940,7 +954,7 @@ def snapshots(st, ev):
     return snap
 
 
-DOC_KINDS = ("board", "ledger", "features")
+DOC_KINDS = ("board", "ledger", "features", "nav")
 CHAIN_STEPS = ("recorded", "dispatched", "accepted", "review", "merged", "reported")
 
 
@@ -984,6 +998,10 @@ def title_for(st, name):
     t = st["threads"][name]
     focus = t.get("focus") or ""
     return f"[{tag(st)}] {name} · {focus}" if focus else f"[{tag(st)}] {name}"
+
+
+def lead_title(st):
+    return f"[{tag(st)}] ★lead · " + ("主控" if _lang_code(st) == "zh" else "lead")
 
 
 PERMISSION_MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions")
@@ -1624,7 +1642,7 @@ def cmd_lead(a):
                  **({"lead_change":{"from":old,"to":a.session,"history":st["lead"].get("sessions",[])[-2:]}} if a.session and old and old != a.session else {}),
                  **({"mode": a.mode} if a.mode else {})})
     out = {"lead": st["lead"], "envs": st["envs"], "repo": st["repo"], "thread_permission_mode": thread_mode(st),
-           "title": f"[{tag(st)}] lead" + (f" · {st['goal'][:40]}{'…' if len(st['goal']) > 40 else ''}" if st.get("goal") else ""), "tags": [f"teamwork:{tag(st)}", "teamwork-thread:lead"],
+           "title": lead_title(st), "tags": [f"teamwork:{tag(st)}", "teamwork-thread:lead"],
            "set_up": "set_session_title and set_session_tags on your own session with these (IL-34)"}
     w = permission_warning(st)
     if w:
@@ -4661,6 +4679,270 @@ def cmd_threads(a):
     print("\n".join(out) or lab(st, "no_threads"))
 
 
+def _nav_time(value):
+    if not value:
+        return "-"
+    try:
+        stamp = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return stamp.astimezone().strftime("%m-%d %H:%M") if stamp.tzinfo else stamp.strftime("%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return str(value)[:16]
+
+
+def _nav_clip(value):
+    value = " ".join(str(value or "").split())
+    return value if len(value) <= 40 else value[:39] + "…"  # phone width
+
+
+def _nav_link(text, url):
+    return f"[{text}]({url})" if url else str(text)
+
+
+def _nav_sort_key(value):
+    try:
+        stamp = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return (stamp if stamp.tzinfo else stamp.replace(tzinfo=dt.timezone.utc)).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _nav_short_title(st, title):
+    """Drop the [TAG] / [project] prefix: the directory is already per project."""
+    title = str(title or "")
+    for prefix in (f"[{tag(st)}] ", f"[{st['project']}] "):
+        if title.lower().startswith(prefix.lower()): return title[len(prefix):]
+    return title
+
+
+_NAV_BUCKET_GROUP = {"BLOCKED": "waiting", "FAILED": "waiting", "WORKING": "working", "REVIEW_READY": "review", "COMPLETED": "done"}
+
+
+def _nav_live_rows(path):
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        rows = data.get("data")
+        if rows is None and isinstance(data.get("ccr"), dict):
+            rows = data["ccr"].get("data")
+    else:
+        rows = None
+    if not isinstance(rows, list):
+        raise ValueError("sessions JSON must be a list or contain data rows")
+    return [dict(row) for row in rows if isinstance(row, dict)]
+
+
+def _nav_state_rows(st):
+    rows = []
+    lead = st.get("lead", {}).get("session_id")
+    if lead:
+        rows.append({"id": lead, "title": lead_title(st),
+                     "teamwork_thread": "lead", "state_status": "lead"})
+    for name, thread in st.get("threads", {}).items():
+        if thread.get("session_id"):
+            rows.append({"id": thread["session_id"], "title": thread.get("title") or title_for(st, name),
+                         "teamwork_thread": name, "state_status": thread.get("status"),
+                         "state_summary": thread.get("summary"), "updated_at": thread.get("updated") or st.get("updated")})
+    return rows
+
+
+def _nav_data(st, live_rows):
+    project, short = st["project"], tag(st)
+    threads = st.get("threads", {})
+    current = {st.get("lead", {}).get("session_id"): "lead"}
+    current.update({t.get("session_id"): name for name, t in threads.items() if t.get("session_id")})
+    by_id = {str(row.get("id")): row for row in live_rows if row.get("id") is not None}
+    selected = set(current)
+    selected.discard(None)
+    for row in live_rows:
+        tags = row.get("tags") or []
+        if isinstance(tags, str): tags = [tags]
+        title = str(row.get("title") or "")
+        if (f"teamwork:{short}" in tags or title.startswith(f"[{short}]") or title.startswith(f"[{project}]")
+                or str(row.get("id")) in current):
+            selected.add(str(row.get("id")))
+    changed = True
+    while changed:
+        changed = False
+        for row in live_rows:
+            parent = row.get("parent_session_id")
+            sid = str(row.get("id"))
+            other = any(str(x).startswith("teamwork:") and x != f"teamwork:{short}" for x in (row.get("tags") or []))
+            if parent is not None and str(parent) in selected and sid not in selected and not other:
+                selected.add(sid); changed = True
+    rows = []
+    archived_count = 0
+    for sid in selected:
+        row = dict(by_id.get(sid) or {"id": sid})
+        if sid in current: row["teamwork_thread"] = current[sid]
+        tags = row.get("tags") or []
+        if isinstance(tags, str): tags = [tags]
+        row["_tags"] = tags
+        thread_name = row.get("teamwork_thread")
+        if not thread_name:
+            thread_tag = next((x[len("teamwork-thread:"):] for x in tags if x.startswith("teamwork-thread:") and x != "teamwork-thread:field-test"), None)
+            if thread_tag: thread_name = thread_tag
+            else:
+                title = str(row.get("title") or "")
+                prefix = f"[{short}] "
+                if title.startswith(prefix): thread_name = title[len(prefix):].split(" ·", 1)[0].split(" ", 1)[0]
+            row["teamwork_thread"] = thread_name
+        row["_thread"] = threads.get(thread_name, {}) if thread_name else {}
+        if str(row.get("session_status") or "").lower().endswith("archived"):
+            archived_count += 1
+            continue
+        rows.append(row)
+
+    lead_id = st.get("lead", {}).get("session_id")
+    lead_row = next((r for r in rows if str(r.get("id")) == str(lead_id)), None) if lead_id else None
+    if lead_row is None:
+        lead_row = {"id": lead_id, "title": lead_title(st), "teamwork_thread": "lead", "_thread": {}}
+    lead_title_actual = str(lead_row.get("title") or "")
+    groups = {key: [] for key in ("waiting", "working", "review", "test", "done")}
+    archive_candidates, title_fixes = [], []
+    if lead_id and lead_title_actual != lead_title(st):
+        title_fixes.append({"session_id": lead_id, "current": lead_title_actual, "suggested": lead_title(st),
+                            "url": f"https://claude.ai/code/{lead_id}"})
+
+    for row in rows:
+        sid = str(row.get("id") or "")
+        thread_name = row.get("teamwork_thread") or "session"
+        thread = row.get("_thread") or {}
+        title = str(row.get("title") or thread.get("title") or thread_name)
+        tags = row.get("_tags", [])
+        bucket = str(row.get("status_bucket") or "").upper()
+        if bucket.startswith("SESSION_STATUS_BUCKET_"):
+            bucket = bucket[len("SESSION_STATUS_BUCKET_"):]
+        state_status = row.get("state_status") or thread.get("status")
+        is_test = ("可删" in title or "(can delete)" in title.lower()
+                   or any(x.startswith("teamwork-test:") for x in tags)
+                   or "teamwork-thread:field-test" in tags)
+        if str(row.get("teamwork_thread")) == "lead" or sid == str(lead_id):
+            continue
+        thread_tag = next((x[len("teamwork-thread:"):] for x in tags if x.startswith("teamwork-thread:") and x != "teamwork-thread:field-test"), None)
+        if not is_test and thread_tag and threads.get(thread_tag, {}).get("session_id") and sid != str(threads[thread_tag]["session_id"]):
+            archive_candidates.append({"id": sid, "url": f"https://claude.ai/code/{sid}", "name": _nav_short_title(st, title),
+                                       "reason": lab(st, "nav_reason_old_seat", thread=thread_tag)})
+            continue
+        if bucket in ("BLOCKED", "FAILED"):
+            group = "waiting"
+        elif bucket == "WORKING": group = "working"
+        elif bucket == "REVIEW_READY": group = "review"
+        elif bucket == "COMPLETED": group = "done"
+        elif is_test: group = "test"
+        elif state_status == "waiting": group = "waiting"
+        elif state_status in ("working", "starting"): group = "working"
+        elif state_status == "review": group = "review"
+        elif state_status in ("idle", "resolved"): group = "done"
+        else: group = None
+        # Test seats remain visible in the dedicated test group, including completed sessions.
+        if is_test: group = "test"
+        if group is None:
+            if thread_tag and thread_tag in threads and sid != str(threads[thread_tag].get("session_id")):
+                archive_candidates.append({"id": sid, "url": f"https://claude.ai/code/{sid}",
+                                           "reason": lab(st, "nav_reason_old_seat", thread=thread_tag)})
+            continue
+        summary = row.get("post_turn_summary") or {}
+        if not isinstance(summary, dict): summary = {}
+        detail = summary.get("needs_action")
+        detail = (lab(st, "nav_needs_you") + str(detail)) if detail else (summary.get("recent_action") or row.get("task_summary")
+                  or row.get("state_summary") or thread.get("summary") or "")
+        timestamp = row.get("updated_at") or row.get("updated") or thread.get("updated")
+        prefix = f"↳ {row.get('parent_thread_name')}: " if is_test and row.get("parent_session_id") and row.get("parent_thread_name") else ""
+        parent = by_id.get(str(row.get("parent_session_id"))) if row.get("parent_session_id") else None
+        if is_test and not parent and current.get(str(row.get("parent_session_id"))):
+            prefix = f"↳ {current[str(row.get('parent_session_id'))]}: "
+        if is_test and parent:
+            ancestor, seen = parent, set()
+            while ancestor and str(ancestor.get("id")) not in seen:
+                ancestor_id = str(ancestor.get("id")); seen.add(ancestor_id)
+                ptag = ancestor.get("tags") or []
+                if isinstance(ptag, str): ptag = [ptag]
+                pname = next((x[len("teamwork-thread:"):] for x in ptag if x.startswith("teamwork-thread:") and x != "teamwork-thread:field-test"), None)
+                pname = pname or current.get(ancestor_id)
+                if pname: break
+                ancestor = by_id.get(str(ancestor.get("parent_session_id"))) if ancestor.get("parent_session_id") else None
+            if pname: prefix = f"↳ {pname}: "
+        display = _nav_short_title(st, title) if (by_id.get(sid) or {}).get("title") else f"{thread_name} · {thread.get('focus') or title}"
+        if prefix: display = prefix + display
+        item = {"id": sid, "thread": thread_name, "title": title, "name": display,
+                "summary": _nav_clip(detail),
+                "updated_at": _nav_time(timestamp) if timestamp else "", "_sort": _nav_sort_key(timestamp), "url": f"https://claude.ai/code/{sid}",
+                "status": row.get("status_bucket") or state_status or "unknown"}
+        groups[group].append(item)
+        if ((is_test and bucket in ("COMPLETED", "REVIEW_READY"))):
+            archive_candidates.append({"id": sid, "url": item["url"], "name": display, "reason": lab(st, "nav_reason_test")})
+    for items in groups.values():  # newest first; a set gave a random order
+        items.sort(key=lambda x: x.pop("_sort"), reverse=True)
+    for name, thread in threads.items():
+        if thread.get("status") == "resolved":
+            sid = thread.get("session_id")
+            archive_candidates.append({"id": sid, "url": f"https://claude.ai/code/{sid}" if sid else None,
+                                       "thread": name, "reason": lab(st, "nav_reason_resolved")})
+        if thread.get("status") == "resolved":  # idle = on standby, may get more work: no ✓
+            title = title_for(st, name)
+            if not title.startswith("✓") and not title.endswith("✓"):
+                title_fixes.append({"thread": name, "current": title, "suggested": title + " ✓"})
+    data = {"lead": {"id": str(lead_id or ""), "title": lead_title_actual or lead_title(st),
+                      "url": f"https://claude.ai/code/{lead_id}" if lead_id else None,
+                      "status": lead_row.get("status_bucket") or lead_row.get("state_status") or "lead",
+                      "status_label": (lab(st, "nav_" + _NAV_BUCKET_GROUP[_b]) if (_b := str(lead_row.get("status_bucket") or "").upper().replace("SESSION_STATUS_BUCKET_", "")) in _NAV_BUCKET_GROUP else "")},
+            "groups": groups, "archived_count": archived_count,
+            "archive_candidates": archive_candidates, "title_fixes": title_fixes,
+            "updated_at": now()}
+    return data
+
+
+def cmd_nav(a):
+    d = need(find_dir()); st = load(d)
+    try:
+        live_rows = _nav_live_rows(a.sessions) if a.sessions else _nav_state_rows(st)
+    except (OSError, ValueError) as e:
+        sys.exit(f"nav: cannot read --sessions {a.sessions}: {e}")
+    data = _nav_data(st, live_rows)
+    if a.sessions: data["updated_at"] = dt.datetime.fromtimestamp(Path(a.sessions).stat().st_mtime, dt.timezone.utc).isoformat()
+    if a.json:
+        print(json.dumps({k: v for k, v in data.items() if k != "updated_at"}, ensure_ascii=False, indent=2)); return
+    lines = [f"# {st['project']} · {lab(st, 'nav_title')}", f"{lab(st, 'nav_updated')}: {_nav_time(data['updated_at'])}",
+             "- ★ " + " — ".join(y for y in (lab(st, 'nav_lead_state'), _nav_link(_nav_short_title(st, data['lead']['title']), data['lead']['url']), data['lead']['status_label']) if y)]
+    for key in ("waiting", "working", "review", "test", "done"):
+        items = data["groups"][key]
+        if not items: continue
+        lines.extend(["", f"**{lab(st, 'nav_' + key)}**"])
+        lines.extend("- " + " — ".join(y for y in (f"[{x['name']}]({x['url']})", x["summary"], x["updated_at"]) if y) for x in items)
+    if data["archived_count"]:
+        lines.extend(["", lab(st, "nav_archived", n=data["archived_count"])])
+    if data["archive_candidates"]:
+        lines.extend(["", f"**{lab(st, 'nav_archive_candidates')}**"])
+        lines.extend(f"- {_nav_link(x.get('name') or x.get('thread') or x['id'], x.get('url'))} — {x['reason']}" for x in data["archive_candidates"])
+    if data["title_fixes"]:
+        lines.extend(["", f"**{lab(st, 'nav_title_fixes')}**"])
+        lines.extend(f"- {x.get('thread') or 'lead'}: {x['suggested']}" for x in data["title_fixes"])
+    print("\n".join(lines))
+    link = ((st.get("docs") or {}).get("nav") or {}).get("link")
+    # one Doc per project: rerunning updates the recorded Doc, it never makes a second one
+    print(lab(st, "nav_doc_update", link=link) if link else lab(st, "nav_doc_create"), file=sys.stderr)
+
+
+def cmd_nav_all(a):
+    rows = []
+    for folder in find_projects(a.root):
+        try: st = json.loads((folder / ".teamwork" / "state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError): continue
+        threads = list((st.get("threads") or {}).values())
+        waiting = sum(1 for t in threads if t.get("status") == "waiting")
+        working = sum(1 for t in threads if t.get("status") in ("working", "starting"))
+        sid = st.get("lead", {}).get("session_id")
+        url = f"https://claude.ai/code/{sid}" if sid else None
+        nav = (st.get("docs") or {}).get("nav") or {}
+        rows.append({"project": st.get("project"), "lead": sid, "url": url, "waiting": waiting,
+                     "working": working, "directory": nav.get("link"), "_st": st})
+    if a.json: print(json.dumps([{k: v for k, v in x.items() if k != "_st"} for x in rows], ensure_ascii=False, indent=2)); return
+    print("\n".join(f"- {_nav_link(x['project'] + ' ★lead', x['url'])} — {lab(x['_st'], 'nav_waiting')} {x['waiting']} · {lab(x['_st'], 'nav_working')} {x['working']} — "
+                    f"{x['directory'] or lab(x['_st'], 'nav_no_directory')}" for x in rows)
+          or "(no teamwork projects under this folder)")
+
+
 def cmd_notice(a):
     d = need(find_dir()); st = load(d); rows = st.setdefault("notices", [])
     if a.action == "add":
@@ -5040,7 +5322,7 @@ def cmd_screen(a):
             st["write_lock"] = {"ho": f"RL{n}", "relead": True, "since": now(), "old_session": rec.get("session_id")}
             save(d, st, {"ev": "succ-relead", "screen": sidarg, "attempt": n + 1})
         out = {"attempt": n + 1,
-               "create_session": {"title": f"[{tag(st)}] lead",
+               "create_session": {"title": lead_title(st),
                                   "prompt": first + "\n\n" + lab(st, "relead_prompt_note", n=n + 1),
                                   "permission_mode": st["lead"].get("permission_mode") or "auto"},
                "user_line": lab(st, "relead_user_line", verdict=_verdict_word(st, rec["verdict"]), score=rec.get("score"),
@@ -9624,6 +9906,12 @@ def main():
 
     x = s.add_parser("threads", help="thread overview for the lead")
     x.add_argument("--json", action="store_true"); x.add_argument("--all", action="store_true"); x.set_defaults(f=cmd_threads)
+    x = s.add_parser("nav", help="phone-width session directory for this project")
+    x.add_argument("--sessions", metavar="FILE", help="JSON rows exported from claude-code-remote list_sessions")
+    x.add_argument("--json", action="store_true")
+    x.add_argument("--all-projects", action="store_true", help="show one directory row per project under --root")
+    x.add_argument("--root", default=".", help="root folder for --all-projects")
+    x.set_defaults(f=lambda a: cmd_nav_all(a) if a.all_projects else cmd_nav(a))
     x = s.add_parser("notice", help="record and handle turn notices")
     x.add_argument("action", choices=["add", "list", "done"]); x.add_argument("--thread"); x.add_argument("--session")
     x.add_argument("--ref"); x.add_argument("--kind", choices=["turn-end", "done", "blocked", "failed", "needs-user"])

@@ -1,30 +1,111 @@
 # Teamwork for Claude Code
 
-**A Projects-style team of Claude sessions, run entirely from claude.ai through Remote Control.**
+[English](README.md) · [中文](README.zh.md)
 
-One session is the **lead**. It plans the work, starts named **threads** (other sessions), routes every request to
-the thread that already owns that area, watches them, recalls or reassigns work, and merges the results. Threads
-know each other, hand work to the right owner, and report back in a fixed format. Each project keeps its own board,
-instructions and memory in a `.teamwork/` folder.
+**Run a team of Claude sessions from claude.ai. One lead plans the work, named threads do it, and every request you
+make comes back to you.**
 
-It is a community skill, not an Anthropic product. It was built for people who want the
-[Claude Code Projects beta](https://code.claude.com/docs/en/claude-projects.md) way of working but don't have access
-yet, or who need threads that work in their own machine's folders.
+One session is the **lead**. It plans the work and starts named **threads** (other sessions). It sends each request to
+the thread that already owns that area, watches the threads, recalls or reassigns work, and merges the results.
+Threads know about each other, pass work to the right owner, and report back in a fixed format. Each project keeps its
+board, instructions and memory in a `.teamwork/` folder, so a long session or a restart loses nothing.
 
-## Why
+This is a community skill, not an Anthropic product. It is for people who want to work the way the
+[Claude Code Projects beta](https://code.claude.com/docs/en/claude-projects.md) works but don't have access yet, or
+who need threads that work in folders on their own computer.
 
-| You want | Teamwork gives you |
-|---|---|
-| One coordinator for many sessions | A lead session that creates, messages, reads, interrupts and recalls threads |
-| Follow-ups to land in the right place | Threads are split by ownership area; new requests go to the owner, so its history carries over |
-| Threads that talk to each other | Every thread gets the roster; out-of-scope work is handed to the owner, with the lead copied |
-| Work on your own machine | Remote Control threads run in your folders, driven from claude.ai |
-| Work that needs no files | Cloud threads, for research, writing and self-contained repo work |
-| A plan you approve first | Suggested threads + tasks with owners, dependencies and "done when", started only after your go-ahead |
-| Several projects at once | One folder and one lead per project; a portfolio view across all of them |
-| Recovery after a long session | The board, instructions and memory are re-injected at session start and after compaction |
+> **Screenshot placeholder:** the lead's status reply next to `.teamwork/BOARD.md` (threads grouped as Waiting on
+> you / Ready for review / Working).
 
-See [`references/projects-parity.md`](references/projects-parity.md) for a feature-by-feature comparison with Projects beta.
+## 30-second start
+
+You need Claude Code with Remote Control running on the computer whose folders the threads should use, signed in to
+the account you use on claude.ai. Open a session in that Remote Control environment and ask it to run these three
+commands. Replace `<served folder>` with the folder your Remote Control server serves and `<project>` with your
+project folder inside it.
+
+**1. Get the skill**
+
+```bash
+git clone https://github.com/DerekXuHQ/teamwork-for-claude-code <served folder>/teamwork-for-claude-code
+```
+
+**2. See what the installer would change (a dry run, nothing is written)**
+
+```bash
+python3 <served folder>/teamwork-for-claude-code/scripts/install.py --link --project <served folder>/<project> --served <served folder>
+```
+
+**3. Install**
+
+```bash
+python3 <served folder>/teamwork-for-claude-code/scripts/install.py --link --project <served folder>/<project> --served <served folder> --apply
+```
+
+Then start a **new** session in the same environment (skills load when a session starts) and type:
+
+```
+/teamwork new <project>
+```
+
+The lead asks for the goal, proposes threads and tasks, and starts them after you say go.
+
+**Check the config dir first.** The installer writes to `$CLAUDE_CONFIG_DIR` if it is set, otherwise `~/.claude`, and
+`--help` and every dry run print the one they found. If your Remote Control server runs with a
+different one (for example `CLAUDE_CONFIG_DIR=~/.claude-work`), add `--config-dir ~/.claude-work`. Otherwise `/teamwork`
+will not be found.
+
+## What the installer does
+
+It never removes anything. It merges into existing settings and writes a `.bak` copy before it changes a settings
+file.
+
+1. Links the skill into `<config dir>/skills/teamwork`. With `--link` (recommended) that is a symlink to your clone,
+   so `git pull` upgrades it. Without `--link` it is a frozen copy. An existing `skills/teamwork` is never overwritten.
+2. Adds permission rules to `<config dir>/settings.json`: allow rules so threads can report without stopping at a
+   permission prompt, the scratch folders as `additionalDirectories`, and ask rules for big decisions (a safety net
+matched on command text, not a security boundary). `--no-allow` skips the allow rules.
+3. With `--project` and `--served`: adds a SessionStart hook to both folders, so every session there sees the
+   board, and writes the folder rule set to their `.claude/settings.local.json` (and the project's worktrees').
+
+Other options: `--pre-push` adds a git pre-push hook that blocks pushes containing words or paths listed in
+`.teamwork/PRIVATE.md`. `--default-mode {auto,acceptEdits,default}` sets the mode every new session on this computer
+starts in. Teamwork works best in `auto`, but this affects every session on the computer, so the choice is yours.
+`python3 scripts/install.py --help` lists every option.
+
+## Upgrade and roll back
+
+With `--link`, every merge into the checked-out branch is live in every new session at once. To let changes reach your sessions only when
+you decide, use release snapshots:
+
+```bash
+python3 <served folder>/teamwork-for-claude-code/scripts/release.py status
+python3 <served folder>/teamwork-for-claude-code/scripts/release.py publish --ref main
+python3 <served folder>/teamwork-for-claude-code/scripts/release.py publish --ref main --apply
+python3 <served folder>/teamwork-for-claude-code/scripts/release.py rollback --apply
+python3 <served folder>/teamwork-for-claude-code/scripts/release.py edge --apply
+```
+
+`status` shows where each config dir points. `publish` snapshots a ref and switches every config dir that links the skill to it (a dry
+run until `--apply`). `rollback` goes back to the previous release; after only one publish it refuses and changes nothing. `edge` runs
+the clone live again. Old snapshots are never deleted. Details: [`references/setup.md`](references/setup.md).
+
+## Teamwork and Projects beta
+
+| | Claude Code Projects beta | Teamwork |
+|---|---|---|
+| Coordinator | A project conversation | A lead session running `/teamwork` |
+| A thread is for | One task | One ownership area; follow-ups go to it, so its history carries over |
+| Where threads run | Cloud by default, local via Remote Control | Remote Control in your folders (own git worktree each) or cloud, chosen per thread |
+| Threads talking to each other | Not documented | Every thread has the roster; out-of-scope work is handed to the owner, with the lead copied |
+| Plan before work | Suggested threads | A task list with owners, dependencies and "done when", started only after you approve |
+| Memory | `MEMORY.md` for cloud threads | `.teamwork/MEMORY.md` pasted into every thread, Remote Control threads included |
+| Recovery | From recent messages and memory | From the ledger on disk, re-injected at session start and after compaction |
+| UI | A sidebar overview | A board file and the lead's status reply; no sidebar |
+| Isolation | Project threads hidden from the normal list | By convention: folder, titles `[project] thread · focus`, tags |
+| Access | Beta | Any account with Claude Code and Remote Control |
+
+Feature-by-feature comparison: [`references/projects-parity.md`](references/projects-parity.md).
 
 ## How it works
 
@@ -39,51 +120,25 @@ lead  ── Remote Control session, runs /teamwork, owns .teamwork/ for one pro
    └── cloud thread "research" ── cloud session, reports through its transcript and git
 ```
 
-- **Board**: `.teamwork/BOARD.md`, regenerated from `state.json` on every change: threads grouped like the Projects
-  overview (Waiting on you, Ready for review, Working, Landing, Idle, Resolved), open questions, roster, plan.
-- **Messages**: one-line headers such as `[tw:shop] TASK lead -> ui T3`; types TASK, FOLLOWUP, RECALL, ROSTER,
-  ANSWER from the lead, and ACK, DONE, BLOCKED, QUESTION, HANDOFF, MEMORY from threads.
-- **Status**: every thread ends every turn with a `<tw-status>` block (did, result, verified, assumed,
-  couldn't reach, waiting on, handed off, next).
+- **Every request is tracked until you close it.** The lead stores your words, routes them, checks what comes back,
+  reports it, and keeps listing it until you say it is done or dropped.
+- **Board**: `.teamwork/BOARD.md`, regenerated from `state.json` on every change. Threads are grouped like the Projects
+  overview (Waiting on you, Ready for review, Working, Landing, Idle, Resolved), with open questions, the roster and
+  the plan.
+- **Messages**: one-line headers such as `[tw:shop] TASK lead -> ui T3`. The lead sends TASK, FOLLOWUP, RECALL, ROSTER
+  and ANSWER; threads send ACK, DONE, BLOCKED, QUESTION, HANDOFF and MEMORY.
+- **Status**: every thread ends every turn with a `<tw-status>` block (did, result, verified, assumed, couldn't reach,
+  waiting on, handed off, next).
+
+**The mechanism in full**: [`docs/framework.md`](docs/framework.md) ([中文](docs/framework-zh.md)) specifies the roles,
+the ledger, the message protocol, the state machines, routing, consent and recovery, and what another host needs to
+run the same framework. Start with its "Overview in 5 minutes".
 
 Which session can message which was tested on a real account; see [`references/transport.md`](references/transport.md).
-The short version: Remote Control ↔ Remote Control works both ways; the lead can create and message cloud threads;
-cloud threads cannot message a Remote Control lead, so the lead reads their transcripts instead.
+In short: Remote Control sessions can message each other in both directions; the lead can create and message
+cloud threads; cloud threads cannot message a Remote Control lead, so the lead reads their transcripts instead.
 
-## Requirements
-
-- Claude Code with Remote Control, signed in to the same account you use on claude.ai.
-- A Remote Control server running on the computer whose folders the threads should use. Everything else is done from claude.ai.
-- Python 3 and git on that computer.
-- For cloud threads that edit code: a GitHub repo your account can reach.
-
-## Install (from claude.ai, no terminal)
-
-Open a session in your Remote Control environment and ask it to run:
-
-```bash
-git clone https://github.com/DerekXuHQ/teamwork-for-claude-code <served folder>/teamwork-for-claude-code
-```
-
-```bash
-python3 <served folder>/teamwork-for-claude-code/scripts/install.py --link --project <served folder>/<project> --served <served folder>
-```
-
-That is a dry run that prints every change. Re-run with `--apply` to write them. The installer:
-
-1. links (or, without `--link`, copies) the skill into `<config dir>/skills/teamwork`. The config dir is
-   `$CLAUDE_CONFIG_DIR` if set, else `~/.claude`. **Check which one your Remote Control server uses**: if it runs with
-   e.g. `CLAUDE_CONFIG_DIR=~/.claude-b`, pass `--config-dir ~/.claude-b`, or `/teamwork` will not be found. An existing
-   `skills/teamwork` is never overwritten;
-2. adds four allow rules to `<config dir>/settings.json` so threads can report without stalling on a permission prompt
-   (`send_message`, `get_session`, `list_events`, `list_sessions` from the `claude-code-remote` tools), after writing a `.bak` copy;
-3. adds a SessionStart hook to the project folder and the served folder so sessions see the board.
-
-Then start a **new** session in the Remote Control environment (skills load at session start) and type:
-
-```
-/teamwork new <project>
-```
+> **Screenshot placeholder:** a thread's `DONE` message and the lead's report to the user.
 
 ## Commands
 
@@ -99,15 +154,25 @@ Then start a **new** session in the Remote Control environment (skills load at s
 | `/teamwork recall <thread>` | stop a thread and get its work back |
 | `/teamwork close` | wrap up the project |
 
-Or just talk to the lead: "give this to the UI thread", "status of all threads", "run at most two at a time".
+Or just talk to the lead: "give this to the UI thread", "status of all threads", "run at most two at a time". The lead
+also checks results before reporting them, hands itself over to a new session when needed, and keeps private words out
+of pushes; [`SKILL.md`](SKILL.md) has the full playbook.
+
+## Requirements
+
+- Claude Code with Remote Control, signed in to the same account you use on claude.ai.
+- A Remote Control server running on the computer whose folders the threads should use. Everything else is done from
+  claude.ai.
+- Python 3 and git on that computer.
+- For cloud threads that edit code: a GitHub repo your account can reach.
 
 ## Limits
 
-- A Remote Control server holds 32 sessions by default, shared by every project and lead on it. Cloud threads don't count.
-  There is no limit on threads otherwise; usage limits of your plan apply, and every thread is a full session.
-- There is no sidebar pane: the board is a file and a status reply from the lead.
-- Isolation is by convention (folder, titles `[project] thread · focus`, tags), not enforced by the platform.
-  Threads appear in your normal session list.
+- A Remote Control server holds 32 sessions by default, shared by every project and lead on it. Cloud threads don't
+  count. There is no other limit on threads, but your plan's usage limits apply and every thread is a full session.
+- There is no sidebar pane: the board is a file plus a status reply from the lead.
+- Isolation is by convention (folder, titles, tags), not enforced by the platform. Threads appear in your normal
+  session list.
 - Cloud threads are pulled, not pushed: their status is as fresh as the lead's last sweep.
 
 ## Layout
@@ -117,6 +182,8 @@ SKILL.md                     lead playbook (what /teamwork does)
 templates/worker-protocol.md protocol given to every thread via append_system_prompt
 scripts/tw.py                the ledger: board, roster, plan, routing hints, hook output
 scripts/install.py           installer (dry run by default)
+scripts/release.py           release snapshots: publish, roll back, status
+docs/framework.md            the mechanism as a reusable framework (中文: docs/framework-zh.md)
 references/                  transport matrix, setup, message formats, Projects comparison
 ```
 

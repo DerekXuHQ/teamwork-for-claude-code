@@ -151,6 +151,262 @@ class OpeningAndSelfcheck(TwCase):
         self.assertEqual(self.tw("selfcheck", "--mode", "default").returncode, 0)
 
 
+class LeadOpening(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.keys = self.dir.parent / (self.dir.name + "-keys")
+        self.keys.mkdir()
+        self.env["TW_KEYS_DIR"] = str(self.keys)
+
+    def test_opening_creates_one_strict_lead_screen_and_respects_missing_off(self):
+        missing = json.loads(self.tw("opening", "--json").stdout)
+        self.assertEqual(missing["lead_screen"]["status"], "no_session")
+        self.assertEqual(self.state()["screens"], {})
+        self.tw("lead", "--session", "lead-1")
+        first = json.loads(self.tw("opening", "--json").stdout)
+        self.assertEqual(first["lead_screen"]["screen"], "SC1")
+        self.assertEqual(first["lead_screen"]["status"], "asked")
+        self.assertEqual(first["lead_screen"]["attempt"], 1)
+        self.assertEqual(self.state()["screens"]["SC1"]["level"], "strict")
+        self.assertEqual(len(self.state()["screens"]["SC1"]["items"]), 7)
+        again = json.loads(self.tw("opening", "--json").stdout)
+        self.assertEqual(again["lead_screen"]["screen"], "SC1")
+        self.assertEqual(len(self.state()["screens"]), 1)
+        self.tw("prefs", "--set", "screen_mode=off")
+        self.tw("lead", "--session", "lead-2", "--force")
+        off = json.loads(self.tw("opening", "--json").stdout)
+        self.assertEqual(off["lead_screen"]["status"], "off")
+        self.assertEqual(len(self.state()["screens"]), 1)
+
+    def test_opening_defaults_and_selfcheck(self):
+        self.tw("prefs", "--set", "language=zh")
+        result = json.loads(self.tw("opening", "--json").stdout)
+        rows = {r["key"]: r for r in result["questions"]}
+        self.assertEqual(rows["perm_policy"]["default"], "managed")
+        self.assertEqual(rows["gpt_policy"]["default"], "yes")
+        for key in ("perm_policy", "gpt_policy"):
+            self.assertEqual(rows[key]["recommended"], 2)
+            self.assertIn("prefs --set " + key, rows[key]["change"])
+        self.assertEqual(result["defaults_in_effect"], {"perm_policy": "managed", "gpt_policy": "yes"})
+        self.assertFalse(rows["perm_policy"]["never_default"])
+        self.assertFalse(rows["gpt_policy"]["never_default"])
+        check = json.loads(self.tw("selfcheck", "--json").stdout)
+        opening = next(x for x in check["items"] if x["item"] == "opening")
+        self.assertTrue(opening["ok"])
+        self.assertIn("按默认", opening["detail"])
+        self.assertEqual(opening["fix"], "")
+        text = self.tw("opening").stdout
+        self.assertIn("（推荐）", text)
+        self.assertIn("以后想改", text)
+        for key, value in (("perm_policy", "ask"), ("gpt_policy", "no")):
+            self.assertNotEqual(self.tw("prefs", "--set", f"{key}={value}", ok=False).returncode, 0)
+            self.tw("prefs", "--set", f"{key}={value}", "--user-said", "请按这个设置")
+            self.assertEqual(self.state()["prefs"]["policy_said"][key]["text"], "请按这个设置")
+
+    def test_opening_after_dispatched_task_is_not_new_and_does_not_write(self):
+        self.tw("lead", "--session", "lead-1")
+        self.tw("thread", "add", "ui")
+        self.tw("task", "add", "T1", "--owner", "ui", "--title", "already started")
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        self.tw("lead", "--session", "lead-2", "--force")
+        before = self.state()
+        out = json.loads(self.tw("opening", "--json").stdout)
+        self.assertEqual(out["lead_screen"], {"status": "not_new"})
+        self.assertEqual([q["key"] for q in out["questions"]], ["spawn_policy", "perm_policy", "gpt_policy"])  # the questions still show
+        self.assertEqual(self.state(), before)
+        self.tw("screen", "ask", "lead", "--session", "lead-2")
+        before = self.state()
+        existing = json.loads(self.tw("opening", "--json").stdout)
+        self.assertEqual(existing["lead_screen"], {"screen": "SC1", "status": "asked"})
+        self.assertEqual(self.state(), before)
+
+    def test_round2_relead_chain_lock_escape_and_force(self):
+        fail = ",".join(f"P{i}={0 if i == 5 else 1}" for i in range(1, 8))
+        self.tw("lead", "--session", "A")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC1", "--scores", fail)
+        self.tw("screen", "relead", "SC1", "--said", "x")
+        self.assertIn("--relead", self.tw("req", "add", "y", ok=False).stderr)  # every write names the way out
+        self.assertNotEqual(self.tw("screen", "relead", "SC1", "--cancel", ok=False).returncode, 0)  # the user's call
+        self.tw("screen", "relead", "SC1", "--cancel", "--user-said", "no seat left, keep this one")
+        self.assertIsNone(self.state().get("write_lock"))
+        self.tw("req", "add", "y")
+        self.tw("thread", "add", "ui"); self.tw("task", "add", "T1", "--owner", "ui", "--title", "t")
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        self.tw("lead", "--session", "B", "--force")
+        out = json.loads(self.tw("opening", "--json").stdout)  # started project, but a relead chain is open: B is screened
+        self.assertEqual(out["lead_screen"]["status"], "asked")
+        self.assertNotEqual(self.tw("lead", "--session", "A", "--force", ok=False).returncode, 0)  # A already tried
+
+    def test_round2_no_relead_during_lead_handover_and_no_freeze_over_relead(self):
+        fail = ",".join(f"P{i}={0 if i == 5 else 1}" for i in range(1, 8))
+        self.tw("lead", "--session", "A"); self.tw("opening", "--json")
+        self.tw("screen", "record", "SC1", "--scores", fail)
+        self.tw("succ", "start", "lead", "--reason", "x")
+        self.assertNotEqual(self.tw("screen", "relead", "SC1", "--said", "x", ok=False).returncode, 0)
+
+    def test_candidate_screen_does_not_relead_or_clear_current_lead_trials(self):
+        self.tw("lead", "--session", "lead-1")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}={0 if i == 5 else 1}" for i in range(1, 8)))
+        self.tw("screen", "relead", "SC1", "--said", "原始请求")
+        self.tw("lead", "--session", "lead-2", "--relead")
+        self.tw("opening", "--json")
+        self.tw("screen", "ask", "lead", "--session", "candidate")
+        candidate_pass = self.tw("screen", "record", "SC3", "--scores", ",".join(f"P{i}=2" for i in range(1, 8)))
+        self.assertEqual(len(self.state()["lead_trials"]), 1)
+        self.assertNotIn("screen relead", candidate_pass.stderr)
+        self.tw("screen", "record", "SC2", "--scores", ",".join(f"P{i}=2" for i in range(1, 8)))
+        self.assertEqual(self.state()["lead_trials"], [])
+        self.assertIsNone(self.state().get("lead_first_message"))
+        self.tw("screen", "ask", "lead", "--session", "candidate-bad")
+        failed = self.tw("screen", "record", "SC4", "--scores", ",".join(f"P{i}={0 if i == 5 else 1}" for i in range(1, 8)))
+        self.assertIn("whether to replace it is your call", failed.stderr)
+        denied = self.tw("screen", "relead", "SC4", "--said", "原始请求", ok=False)
+        self.assertIn("current lead's opening screen", denied.stderr)
+        self.tw("task", "add", "T2", "--title", "current lead still writes")
+
+    def test_relead_prompt_permission_and_trial_reuse_are_guarded(self):
+        self.tw("lead", "--session", "L1", "--mode", "default")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}={0 if i == 5 else 2}" for i in range(1, 8)))
+        prompt = json.loads(self.tw("screen", "relead", "SC1", "--said", "原始请求", "--json").stdout)
+        self.assertIn("--relead", prompt["create_session"]["prompt"])
+        self.assertEqual(prompt["create_session"]["permission_mode"], "default")
+        self.assertIn("P5=0 veto", prompt["user_line"])
+        seated = self.tw("lead", "--session", "L2", "--relead")
+        self.assertIn("previous lead's permission mode", seated.stderr)
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC2", "--scores", ",".join(f"P{i}=1" for i in range(1, 8)))
+        self.tw("screen", "relead", "SC2", "--said", "原始请求")
+        self.assertIn("--relead", self.tw("lead", "--session", "Lx", ok=False).stderr)
+        self.assertIn("--relead", self.tw("lead", "--session", "Lx", "--force", ok=False).stderr)
+        self.assertIn("--relead", self.tw("succ", "start", "lead", "--reason", "handoff", ok=False).stderr)
+        reused = self.tw("lead", "--session", "L1", "--relead", ok=False)
+        self.assertIn("not the one that did not pass", reused.stderr)
+        self.tw("lead", "--session", "L3", "--relead")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC3", "--scores", ",".join(f"P{i}=0" if i == 5 else f"P{i}=2" for i in range(1, 8)))
+        stop = self.tw("screen", "relead", "SC3", "--said", "原始请求")
+        self.assertIn("P5=0 veto (an error worked around without saying so)", stop.stdout)
+
+    def test_screen_policy_and_selfcheck_use_policy_function_defaults(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("prefs", "--set", "perm_policy=ask", "--user-said", "ask me")
+        self.tw("prefs", "--set", "gpt_policy=no", "--user-said", "no gpt")
+        result = json.loads(self.tw("opening", "--json").stdout)
+        self.assertEqual(result["defaults_in_effect"], {})
+        check = json.loads(self.tw("selfcheck", "--json").stdout)
+        opening = next(x for x in check["items"] if x["item"] == "opening")
+        self.assertEqual(opening["detail"], "answered")
+
+    def test_screen_ask_keeps_task_identifier_in_record(self):
+        self.tw("lead", "--session", "lead-1")
+        self.tw("task", "add", "T1", "--title", "one; two")
+        self.tw("screen", "ask", "lead", "--session", "lead-1", "--task", "T1")
+        self.assertEqual(self.state()["screens"]["SC1"]["task"], "T1")
+
+    def test_failed_lead_screen_relead_locks_old_lead_and_seats_new_one(self):
+        self.tw("lead", "--session", "lead-old")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}={0 if i == 5 else 1}" for i in range(1, 8)))
+        result = json.loads(self.tw("screen", "relead", "SC1", "--said", "做个网站", "--json").stdout)
+        self.assertEqual(result["attempt"], 2)
+        self.assertIn("做个网站", result["create_session"]["prompt"])
+        self.assertTrue(self.state()["write_lock"]["relead"])
+        self.assertNotEqual(self.tw("task", "add", "T1", "--title", "blocked", ok=False).returncode, 0)
+        seated = json.loads(self.tw("lead", "--session", "lead-new", "--relead").stdout)
+        self.assertEqual(seated["lead"]["session_id"], "lead-new")
+        self.assertFalse(self.state().get("write_lock"))
+        history = seated["lead"]["sessions"]
+        self.assertEqual(history[-1]["session_id"], "lead-new")
+        self.assertEqual(history[-1]["reason"], "relead after failed opening screen")
+        self.assertNotEqual(self.tw("lead", "--relead", ok=False).returncode, 0)
+
+    def test_three_failed_screens_stop_without_lock_and_show_each_score(self):
+        self.tw("lead", "--session", "lead-1")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}=0" for i in range(1, 8)))
+        first_message = self.dir / "first-message.txt"
+        first_message.write_text("原始请求来自文件", encoding="utf-8")
+        first = json.loads(self.tw("screen", "relead", "SC1", "--first-message", str(first_message), "--json").stdout)
+        self.assertEqual(first["attempt"], 2)
+        self.assertIn("原始请求来自文件", first["create_session"]["prompt"])
+        self.assertIn("P5=0 veto", first["user_line"])
+        self.tw("lead", "--session", "lead-2", "--relead")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC2", "--scores", ",".join(f"P{i}=0" for i in range(1, 8)))
+        second = json.loads(self.tw("screen", "relead", "SC2", "--json").stdout)
+        self.assertEqual(second["attempt"], 3)
+        self.assertIn("原始请求来自文件", second["create_session"]["prompt"])
+        self.tw("lead", "--session", "lead-3", "--relead")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC3", "--scores", ",".join(f"P{i}=0" for i in range(1, 8)))
+        third = self.tw("screen", "relead", "SC3")
+        self.assertIn("SC1", third.stdout)
+        self.assertIn("SC2", third.stdout)
+        self.assertIn("SC3", third.stdout)
+        self.assertIn("0/14", third.stdout)
+        self.assertIn("user decides", third.stdout)
+        self.assertIn("P5=0 veto", third.stdout)
+        self.assertNotIn("write_lock", self.state())
+
+    def test_pass_clears_trials_unavailable_and_unscored_relead_is_rejected(self):
+        self.tw("lead", "--session", "lead-1")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}=0" for i in range(1, 8)))
+        self.tw("screen", "relead", "SC1", "--said", "原始请求")
+        self.tw("lead", "--session", "lead-2", "--relead")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC2", "--scores", ",".join(f"P{i}=2" for i in range(1, 8)))
+        self.assertEqual(self.state()["lead_trials"], [])
+        self.assertIsNone(self.state().get("lead_first_message"))
+        self.tw("rebuild")
+        rebuilt = json.loads((self.dir / ".teamwork" / "state.json.rebuilt").read_text(encoding="utf-8"))
+        self.assertEqual(rebuilt["lead_trials"], [])
+        self.assertNotIn("lead_first_message", rebuilt)
+        self.tw("lead", "--session", "lead-3", "--force")
+        self.tw("opening", "--json")
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("screen", "unavailable", "SC3", "--why", "grader unavailable")
+        denied = self.tw("screen", "relead", "SC3", ok=False)
+        self.assertIn("未体检", denied.stderr)
+
+    def test_rebuild_restores_relead_trial_and_lock(self):
+        self.tw("lead", "--session", "lead-1")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}=0" for i in range(1, 8)))
+        self.tw("screen", "relead", "SC1", "--said", "恢复信息")
+        self.tw("rebuild")
+        rebuilt = json.loads((self.dir / ".teamwork" / "state.json.rebuilt").read_text(encoding="utf-8"))
+        self.assertEqual(len(rebuilt["lead_trials"]), 1)
+        self.assertTrue(rebuilt["write_lock"]["relead"])
+
+    def test_new_user_text_follows_language(self):
+        self.tw("prefs", "--set", "language=en")
+        self.tw("lead", "--session", "lead-en")
+        opening = json.loads(self.tw("opening", "--json").stdout)
+        outputs = [opening["lead_screen"]["message"], opening["rule"]]
+        outputs.extend(row["change"] for row in opening["questions"])
+        self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}=0" for i in range(1, 8)))
+        en_relead = json.loads(self.tw("screen", "relead", "SC1", "--said", "original request", "--json").stdout)
+        outputs.append(en_relead["create_session"]["prompt"])
+        self.assertIn("--relead", en_relead["create_session"]["prompt"])
+        for output in outputs:
+            self.assertIsNone(re.search(r"[\u4e00-\u9fff]", output), output)
+        self.tw("lead", "--session", "lead-mid", "--relead")
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC2", "--scores", ",".join(f"P{i}=0" for i in range(1, 8)))
+        zh_relead = json.loads(self.tw("screen", "relead", "SC2", "--said", "用户原话", "--json").stdout)
+        self.assertIn("--relead", zh_relead["create_session"]["prompt"])
+        self.assertIn("第一步跑", zh_relead["create_session"]["prompt"])
+        self.tw("lead", "--session", "lead-zh", "--relead")
+        output = self.tw("opening").stdout
+        self.assertIn("这一轮就答", output)
+        self.assertIn("推荐", output)
+
+
 class Releases(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -2454,6 +2710,28 @@ class Rebuild(LeasesGit):
         self.tw("task", "set", "T1", "--status", "working")
         self.tw("req", "add", "make it blue", "--tasks", "T1")
         self.tw("prefs", "--set", "stuck_minutes=15")
+
+    def test_rebuild_leads_contains_relead_seat_event_session(self):
+        keys = self.proj.parent / "keys"
+        keys.mkdir()
+        env_before = os.environ.get("TW_KEYS_DIR")
+        os.environ["TW_KEYS_DIR"] = str(keys)
+        try:
+            self.tw("lead", "--session", "old-lead")
+            self.tw("opening", "--json")
+            self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}=0" for i in range(1, 8)))
+            self.tw("screen", "relead", "SC1", "--said", "source request")
+            self.tw("lead", "--session", "new-lead", "--relead")
+            self.tw("lead", "--session", "later-lead", "--force")
+            sessions = self.proj / "sessions.json"
+            sessions.write_text(json.dumps([{"id": "api-session", "parent_session_id": "new-lead",
+            "tags": ["teamwork:proj", "teamwork-thread:api"], "created_at": "2026-01-01T00:00:00Z"}]))
+            self.tw("rebuild", "--sessions", str(sessions))
+            rebuilt = json.loads((self.proj / ".teamwork" / "state.json.rebuilt").read_text())
+            self.assertEqual(rebuilt["threads"]["api"]["session_id"], "api-session")
+        finally:
+            if env_before is None: os.environ.pop("TW_KEYS_DIR", None)
+            else: os.environ["TW_KEYS_DIR"] = env_before
 
     def test_delete_and_rebuild(self):
         self.populate()
@@ -6498,6 +6776,21 @@ class LeadSwap(TwCase):
         self.assertNotIn("write_lock", self.state())
         self.tw("rebuild")
         self.assertEqual(self.state()["handovers"]["HO1"]["phase"], "aborted")
+
+    def test_relead_lock_blocks_succ_and_abort_preserves_other_lock(self):
+        self.tw("thread", "add", "api")
+        self.tw("opening", "--json")
+        self.tw("screen", "record", "SC1", "--scores", ",".join(f"P{i}=0" for i in range(1, 8)))
+        self.tw("screen", "relead", "SC1", "--said", "原始请求")
+        locked = self.tw("succ", "start", "lead", "--reason", "attempt bypass", ok=False)
+        self.assertIn("先跑", locked.stderr)
+        self.assertTrue(self.state()["write_lock"]["relead"])
+        self.assertNotEqual(self.tw("task", "add", "T-lock", "--title", "must stay locked", ok=False).returncode, 0)
+        self.tw("succ", "start", "api", "--reason", "unrelated seat")
+        self.tw("succ", "abort", "HO1", "--reason", "not its lock")
+        self.assertTrue(self.state()["write_lock"]["relead"])
+        self.tw("lead", "--session", "lead-2", "--relead")
+        self.assertFalse(self.state().get("write_lock"))
 
     def test_lead_handover_rejects_thread_swap_while_open(self):
         self.tw("succ", "start", "lead", "--reason", "交给继任")

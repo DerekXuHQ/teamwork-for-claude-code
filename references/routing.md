@@ -101,4 +101,5 @@ to the deny list.
 - Use GPT from a thread through the codex plugin (the `codex:codex-rescue` agent, or its companion script with
   `task` and, for background jobs, `status` / `result`), in the thread's own worktree, with a self-contained
   brief: GPT does not see the thread's context.
+- When Codex returns `model_not_found`, that model cannot be used under the authentication this computer's Codex already has. Switch to a model this computer's Codex actually runs (see the model of the latest successful run in `~/.codex/sessions`) and retry; do not mark GPT unavailable for that alone, and do not change any login or authentication. The pref `gpt_model` records the model in use (`TW prefs --set gpt_model=<model>`); a brief for GPT names no other model.
 - Claude subagents default to `model: "fable"`; use `opus` only for Opus-only work or after a switch up.

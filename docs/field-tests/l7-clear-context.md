@@ -23,8 +23,9 @@ remove the questions completely. If it can, the order becomes "screen, reset, re
 | 5 | `send_message`: "What word did I ask you to remember? If you do not know, say so." | Does it say zebra-7431? |
 | 6 | `send_message`: "Quote the first line of your thread protocol and name your thread." | Does the protocol survive (it lives in the system prompt)? |
 | 7 | `list_events` again | Does the transcript still hold step 1 (it should: a reset only changes what the model sees) |
+| 8 | Tell the user they can also go back by hand: `/rewind` in that session, to the message before the screen (the lead's own opening screen included) | Did the rewind remove the practice text? (step 5 again) |
 
-Repeat steps 1 to 7 once from the phone app and once from the web if both are at hand. Write which surface each run used.
+Repeat steps 1 to 8 once from the phone app and once from the web if both are at hand. Write which surface each run used.
 
 ## How to read the result
 

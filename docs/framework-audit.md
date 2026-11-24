@@ -52,7 +52,7 @@ Checked against `main` at `3640ebe`; the status of each finding was updated in T
 | `TW threads`, `thread set --waiting-for / --stuck-on / --disconnected`, `notice add/list/done`, `nudge`, `task --urgent` (T57: E1, E4, E5, E8) | SKILL §5.14–16 | - |
 | `TW archive candidates/verify/done/check/list` (T57: E3 ②④; ① listed only) | SKILL §6 | - |
 | `deliverable add --dispatch-v` stale, `task set --dispatch-v`, `handover --prompt`, `spawn-refused`, selfcheck surfaces (T57: E9, J8, E10, E12) | SKILL §3, §6 | - |
-| `card` GPT detail and grant uses, `quota --due`, `ready` route_hint / quota_due, `decided`, `package-check`, `perm_policy=managed-sensitive` (T57: D1, D3, D5, D10–D12, J1, G1, G5) | SKILL §0.6, §4, §5, Keep the user in one chat | - |
+| `card` GPT detail and grant uses, `quota --due`, `ready` route_hint / quota_due, `decided`, `package-check`, `perm_policy=managed-sensitive` (T57: D1, D3, D5, D10–D12, J1, G1, G5) | SKILL §0.7, §4, §5, Keep the user in one chat | - |
 | Protocol: before you start (F9), roster as address book (J3), the user talking to a thread (J5), deliver first (E8), GPT brief rules (D7) | worker-protocol, routing.md §3a | - |
 
 ### Overnight-run lessons (IL-1 to IL-39)

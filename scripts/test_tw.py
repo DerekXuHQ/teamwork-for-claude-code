@@ -4116,6 +4116,37 @@ class BashGuard(unittest.TestCase):
         tw.big_decision("echo " + "a" * 2_000_000)
         self.assertLess(time.time() - t, 3)
 
+    def run_corpus(self, **env):
+        here = Path(__file__).resolve().parent
+        r = subprocess.run([sys.executable, str(here / "guard_corpus_run.py"), "--tw", str(TW), "--json"],
+                           capture_output=True, text=True, env={**os.environ, **env})
+        return r.returncode, json.loads(r.stdout)
+
+    def test_adversarial_corpus(self):
+        """T51: every bypass spelling found in review rounds, fed to the real hook; guard changes regress against it."""
+        corpus = json.loads((Path(__file__).resolve().parent / "guard_corpus.json").read_text(encoding="utf-8"))
+        cases = corpus["cases"]
+        ids = [case["id"] for case in cases]
+        self.assertEqual(len(ids), len(set(ids)))
+        pinned = {f"bg-{i:03d}" for i in range(1, 143)} | {f"sens-{i:03d}" for i in range(1, 20)}
+        self.assertLessEqual(pinned, set(ids))  # ids only grow; none is dropped or reused
+        self.assertTrue(all(case["expect"] in {"ask", "deny", "allow"} for case in cases))
+        self.assertTrue(all(case.get("policy") in {None, *corpus["policies"]} for case in cases))
+        self.assertEqual(len({c["cmd"] for c in cases if not c.get("policy")}), len([c for c in cases if not c.get("policy")]))
+        rc, out = self.run_corpus()
+        self.assertEqual(out["cases"], len(cases))
+        for item in out["results"]:
+            with self.subTest(id=item["id"]):
+                self.assertTrue(item["pass"], item)
+        self.assertEqual((rc, out["failed"]), (0, 0))
+
+    def test_corpus_runner_fails_when_the_guard_crashes(self):
+        """A crash prints nothing, like "allow": the runner reads the guard's error log so allow cases fail too."""
+        rc, out = self.run_corpus(TW_TEST_GUARD_FAULT="boom", TW_CORPUS_KEEP_FAULT="1")
+        self.assertEqual((rc, out["failed"]), (1, out["cases"]))
+        rc, out = self.run_corpus(TW_TEST_GUARD_FAULT="boom")  # a stray fault in the caller's env is scrubbed
+        self.assertEqual((rc, out["failed"]), (0, 0))
+
     def test_other_tools_and_bad_input_pass(self):
         for raw in ("[]", '"x"', '{"tool_input": "x"}', '{"tool_input": {"command": ["a"]}}', "", "null",
                     '{"tool_input": {"command": null}}'):

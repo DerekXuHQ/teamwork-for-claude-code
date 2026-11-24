@@ -1,0 +1,1155 @@
+{
+ "version": 1,
+ "cases": [
+  {
+   "id": "bg-001",
+   "cmd": "git status",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-002",
+   "cmd": "git -C /tmp/q commit -m x",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-003",
+   "cmd": "git push -u origin tw/q/ui",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-004",
+   "cmd": "git push --force-with-lease origin tw/q/ui",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-005",
+   "cmd": "git push --force-with-lease=tw/q/ui:abc origin x",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-006",
+   "cmd": "git -C /tmp/q push origin x",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-007",
+   "cmd": "git branch -d tw/q/ui",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-008",
+   "cmd": "git switch -C tw/q/ui origin/main",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-009",
+   "cmd": "git restore --staged quix.py",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-010",
+   "cmd": "git clean -n",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-011",
+   "cmd": "rm zorb.txt",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-012",
+   "cmd": "rm -f zorb.txt",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-013",
+   "cmd": "ls /tmp",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-014",
+   "cmd": "python3 scripts/tw.py ready",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-015",
+   "cmd": "launchctl list",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-016",
+   "cmd": "brew install quixbar",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-017",
+   "cmd": "git checkout main",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-018",
+   "cmd": "git stash list",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-019",
+   "cmd": "git worktree list",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-020",
+   "cmd": "mkdir -p /tmp/z && cd /tmp/z && git init -q",
+   "expect": "allow",
+   "why": "Ordinary work and harmless flag spellings must pass silently.",
+   "from": "test_ordinary_work_passes"
+  },
+  {
+   "id": "bg-021",
+   "cmd": "(( x = 1 << 2 ))\ngit reset --har\u0064\n2",
+   "expect": "ask",
+   "why": "Shell arithmetic and nested expansions must not hide later destructive commands.",
+   "from": "test_t42_no_heredoc_inside_arithmetic_or_expansions"
+  },
+  {
+   "id": "bg-022",
+   "cmd": "for (( i=1<<2; i<9; i++ )); do :; done\ngit reset --har\u0064\n2",
+   "expect": "ask",
+   "why": "Shell arithmetic and nested expansions must not hide later destructive commands.",
+   "from": "test_t42_no_heredoc_inside_arithmetic_or_expansions"
+  },
+  {
+   "id": "bg-023",
+   "cmd": "echo ${x:-<<EOF}\ngit reset --har\u0064\nEOF}",
+   "expect": "ask",
+   "why": "Shell arithmetic and nested expansions must not hide later destructive commands.",
+   "from": "test_t42_no_heredoc_inside_arithmetic_or_expansions"
+  },
+  {
+   "id": "bg-024",
+   "cmd": "echo $[ 1 <<2 ]\ngit reset --har\u0064\n2",
+   "expect": "ask",
+   "why": "Shell arithmetic and nested expansions must not hide later destructive commands.",
+   "from": "test_t42_no_heredoc_inside_arithmetic_or_expansions"
+  },
+  {
+   "id": "bg-025",
+   "cmd": "echo \"$((1<<2))\"\ngit reset --har\u0064\n2",
+   "expect": "ask",
+   "why": "Shell arithmetic and nested expansions must not hide later destructive commands.",
+   "from": "test_t42_no_heredoc_inside_arithmetic_or_expansions"
+  },
+  {
+   "id": "bg-026",
+   "cmd": "echo $(echo ')' ; git reset --har\u0064)",
+   "expect": "ask",
+   "why": "Shell arithmetic and nested expansions must not hide later destructive commands.",
+   "from": "test_t42_no_heredoc_inside_arithmetic_or_expansions"
+  },
+  {
+   "id": "bg-027",
+   "cmd": "echo $(echo \")\" ; git reset --har\u0064)",
+   "expect": "ask",
+   "why": "Shell arithmetic and nested expansions must not hide later destructive commands.",
+   "from": "test_t42_no_heredoc_inside_arithmetic_or_expansions"
+  },
+  {
+   "id": "bg-028",
+   "cmd": "echo ${x:-$(git reset --har\u0064)}",
+   "expect": "ask",
+   "why": "Shell arithmetic and nested expansions must not hide later destructive commands.",
+   "from": "test_t42_no_heredoc_inside_arithmetic_or_expansions"
+  },
+  {
+   "id": "bg-029",
+   "cmd": "echo $(cat <<EOF\ngit reset --har\u0064\nEOF\n)\nls",
+   "expect": "allow",
+   "why": "Shell arithmetic and nested expansions must not hide later destructive commands.",
+   "from": "test_t42_no_heredoc_inside_arithmetic_or_expansions"
+  },
+  {
+   "id": "bg-030",
+   "cmd": "cat <<E\"O\"F\nbody\nEOF\ngit reset --har\u0064",
+   "expect": "ask",
+   "why": "Quoted and expanded heredoc delimiters must preserve command boundaries.",
+   "from": "test_t42_heredoc_delimiters_read_as_the_shell_does"
+  },
+  {
+   "id": "bg-031",
+   "cmd": "cat <<\"EO F\"\nx\nEO F\ngit reset --har\u0064",
+   "expect": "ask",
+   "why": "Quoted and expanded heredoc delimiters must preserve command boundaries.",
+   "from": "test_t42_heredoc_delimiters_read_as_the_shell_does"
+  },
+  {
+   "id": "bg-032",
+   "cmd": "cat << EOF\ngit reset --har\u0064",
+   "expect": "ask",
+   "why": "Quoted and expanded heredoc delimiters must preserve command boundaries.",
+   "from": "test_t42_heredoc_delimiters_read_as_the_shell_does"
+  },
+  {
+   "id": "bg-033",
+   "cmd": "cat <<A <<B\na\nA\nb\nB\ngit reset --har\u0064",
+   "expect": "ask",
+   "why": "Quoted and expanded heredoc delimiters must preserve command boundaries.",
+   "from": "test_t42_heredoc_delimiters_read_as_the_shell_does"
+  },
+  {
+   "id": "bg-034",
+   "cmd": "cat <<$'EOF'\nbody\nEOF\ngit reset --har\u0064\n$EOF",
+   "expect": "ask",
+   "why": "Quoted and expanded heredoc delimiters must preserve command boundaries.",
+   "from": "test_t42_heredoc_delimiters_read_as_the_shell_does"
+  },
+  {
+   "id": "bg-035",
+   "cmd": "cat <<$\"EOF\"\nb\nEOF\ngit reset --har\u0064",
+   "expect": "ask",
+   "why": "Quoted and expanded heredoc delimiters must preserve command boundaries.",
+   "from": "test_t42_heredoc_delimiters_read_as_the_shell_does"
+  },
+  {
+   "id": "bg-036",
+   "cmd": "cat <<$'E\\x4fF'\nhi\nEOF\ngit reset --har\u0064\nE\\x4fF",
+   "expect": "ask",
+   "why": "Quoted and expanded heredoc delimiters must preserve command boundaries.",
+   "from": "test_t42_heredoc_delimiters_read_as_the_shell_does"
+  },
+  {
+   "id": "bg-037",
+   "cmd": "cat <<\"E\\$F\"\nhi\nE$F\ngit reset --har\u0064\nE\\$F",
+   "expect": "ask",
+   "why": "Quoted and expanded heredoc delimiters must preserve command boundaries.",
+   "from": "test_t42_heredoc_delimiters_read_as_the_shell_does"
+  },
+  {
+   "id": "bg-038",
+   "cmd": "cat <<'EOF'\ngit reset --har\u0064\nEOF\nls",
+   "expect": "allow",
+   "why": "Quoted and expanded heredoc delimiters must preserve command boundaries.",
+   "from": "test_t42_heredoc_delimiters_read_as_the_shell_does"
+  },
+  {
+   "id": "bg-039",
+   "cmd": "cat <<-EOF\n\tgit reset --har\u0064\n\tEOF\nls",
+   "expect": "allow",
+   "why": "Quoted and expanded heredoc delimiters must preserve command boundaries.",
+   "from": "test_t42_heredoc_delimiters_read_as_the_shell_does"
+  },
+  {
+   "id": "bg-040",
+   "cmd": "git commit -m \"T36: launchctl and DROP TABLE, sudo, shutdown, reboot, pkill, rm -r\u0066 /, git pus\u0068 --\u0066\u006f\u0072\u0063\u0065, \u0070\u0075\u0073\u0068 -\u0066\u0075, +\u006dain, :old, reset --hard, clean -\u0066, worktree remove, stash drop, branch -D, checkout -- ., restore ., brew uninstall\"",
+   "expect": "allow",
+   "why": "Dangerous words in messages, heredocs, and search arguments must remain harmless.",
+   "from": "test_words_in_messages_heredocs_and_greps_pass"
+  },
+  {
+   "id": "bg-041",
+   "cmd": "git -C /tmp/zorblax commit -m \"fix checkout flow -- handle cart\"",
+   "expect": "allow",
+   "why": "Dangerous words in messages, heredocs, and search arguments must remain harmless.",
+   "from": "test_words_in_messages_heredocs_and_greps_pass"
+  },
+  {
+   "id": "bg-042",
+   "cmd": "git -C /tmp/zorblax commit -m \"docs: worktree remove step; stash drop; restore .env; push -fail\"",
+   "expect": "allow",
+   "why": "Dangerous words in messages, heredocs, and search arguments must remain harmless.",
+   "from": "test_words_in_messages_heredocs_and_greps_pass"
+  },
+  {
+   "id": "bg-043",
+   "cmd": "git -C /tmp/zorblax commit -m \"retry push with + backoff; reset with --hard; clean -fx\"",
+   "expect": "allow",
+   "why": "Dangerous words in messages, heredocs, and search arguments must remain harmless.",
+   "from": "test_words_in_messages_heredocs_and_greps_pass"
+  },
+  {
+   "id": "bg-044",
+   "cmd": "git -C /tmp/zorblax log --grep \"use branch -\" + \"D sparingly\"",
+   "expect": "allow",
+   "why": "Dangerous words in messages, heredocs, and search arguments must remain harmless.",
+   "from": "test_words_in_messages_heredocs_and_greps_pass"
+  },
+  {
+   "id": "bg-045",
+   "cmd": "grep -n 'launchctl and DROP TABLE, sudo, shutdown, reboot, pkill, rm -r\u0066 /, git pus\u0068 --\u0066\u006f\u0072\u0063\u0065, \u0070\u0075\u0073\u0068 -\u0066\u0075, +\u006dain, :old, reset --hard, clean -\u0066, worktree remove, stash drop, branch -D, checkout -- ., restore ., brew uninstall' notes.md",
+   "expect": "allow",
+   "why": "Dangerous words in messages, heredocs, and search arguments must remain harmless.",
+   "from": "test_words_in_messages_heredocs_and_greps_pass"
+  },
+  {
+   "id": "bg-046",
+   "cmd": "cat > /tmp/zorblax.md <<'EOF'\nlaunchctl and DROP TABLE, sudo, shutdown, reboot, pkill, rm -r\u0066 /, git pus\u0068 --\u0066\u006f\u0072\u0063\u0065, \u0070\u0075\u0073\u0068 -\u0066\u0075, +\u006dain, :old, reset --hard, clean -\u0066, worktree remove, stash drop, branch -D, checkout -- ., restore ., brew uninstall\nrm -rf ~\nEOF\necho done",
+   "expect": "allow",
+   "why": "Dangerous words in messages, heredocs, and search arguments must remain harmless.",
+   "from": "test_words_in_messages_heredocs_and_greps_pass"
+  },
+  {
+   "id": "bg-047",
+   "cmd": "python3 scripts/tw.py ask \"launchctl and DROP TABLE, sudo, shutdown, reboot, pkill, rm -r\u0066 /, git pus\u0068 --\u0066\u006f\u0072\u0063\u0065, \u0070\u0075\u0073\u0068 -\u0066\u0075, +\u006dain, :old, reset --hard, clean -\u0066, worktree remove, stash drop, branch -D, checkout -- ., restore ., brew uninstall\"",
+   "expect": "allow",
+   "why": "Dangerous words in messages, heredocs, and search arguments must remain harmless.",
+   "from": "test_words_in_messages_heredocs_and_greps_pass"
+  },
+  {
+   "id": "bg-048",
+   "cmd": "echo 'git push --forc\u0065' | wc -c",
+   "expect": "allow",
+   "why": "Dangerous words in messages, heredocs, and search arguments must remain harmless.",
+   "from": "test_words_in_messages_heredocs_and_greps_pass"
+  },
+  {
+   "id": "bg-049",
+   "cmd": "git push --forc\u0065 origin main",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-050",
+   "cmd": "git push origin main --forc\u0065",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-051",
+   "cmd": "git push -\u0066 origin x",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-052",
+   "cmd": "git push -\u0066\u0075 origin x",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-053",
+   "cmd": "git pus\u0068 \u006f\u0072\u0069\u0067\u0069\u006e +\u006dain",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-054",
+   "cmd": "git push origin :old",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-055",
+   "cmd": "git push origin --delete old",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-056",
+   "cmd": "git push --mirror",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-057",
+   "cmd": "git -C /tmp/q push -\u0066 origin x",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-058",
+   "cmd": "git -c core.x=y -C /tmp/q push origin x --force",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-059",
+   "cmd": "git reset --har\u0064 HEAD~1",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-060",
+   "cmd": "git reset HEAD~1 --har\u0064",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-061",
+   "cmd": "git -c a=b reset --har\u0064",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-062",
+   "cmd": "git clean -xd\u0066",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-063",
+   "cmd": "git clean -d -\u0066",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-064",
+   "cmd": "git branch -\u0044 x",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-065",
+   "cmd": "git branch --delete --force x",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-066",
+   "cmd": "git branch -f main HEAD~3",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-067",
+   "cmd": "git checkout .",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-068",
+   "cmd": "git checkout -- quix.py",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-069",
+   "cmd": "git checkout -f main",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-070",
+   "cmd": "git switch --discard-changes main",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-071",
+   "cmd": "git restore quix.py",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-072",
+   "cmd": "git restore .",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-073",
+   "cmd": "git stash drop",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-074",
+   "cmd": "git -C /tmp/q stash clear",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-075",
+   "cmd": "git worktree remove /tmp/w",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-076",
+   "cmd": "rm -r /tmp/z",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-077",
+   "cmd": "rm -r\u0066 /tmp/z",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-078",
+   "cmd": "rm -R /tmp/z",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-079",
+   "cmd": "rm -vr\u0066 /tmp/z",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-080",
+   "cmd": "/bin/rm -r /tmp/z",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-081",
+   "cmd": "rm --recursive --forc\u0065 /tmp/z",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-082",
+   "cmd": "find /tmp/z -delete",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-083",
+   "cmd": "sudo ls",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-084",
+   "cmd": "shutdown -h now",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-085",
+   "cmd": "launchctl unload x.plist",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-086",
+   "cmd": "launchctl kickstart -k system/x",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-087",
+   "cmd": "killall quixbar",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-088",
+   "cmd": "pkill zorb",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-089",
+   "cmd": "diskutil eraseDisk x",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-090",
+   "cmd": "brew uninstall quixbar",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-091",
+   "cmd": "brew services restart quixbar",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-092",
+   "cmd": "npm uninstall -g quixbar",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-093",
+   "cmd": "psql -c 'DROP TABLE zorb'",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-094",
+   "cmd": "gh repo delete quixbar/zorblax",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-095",
+   "cmd": "gh repo edit q/z --visibility public",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-096",
+   "cmd": "gh api -X DELETE repos/q/z",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-097",
+   "cmd": "cd /tmp/q && git push origin x --forc\u0065",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-098",
+   "cmd": "git status; git reset --har\u0064",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-099",
+   "cmd": "X=1 git push --forc\u0065",
+   "expect": "ask",
+   "why": "Irreversible repository, system, and remote actions must ask in every spelling.",
+   "from": "test_big_decisions_ask_in_every_spelling"
+  },
+  {
+   "id": "bg-100",
+   "cmd": "rm -r\u0066 /",
+   "expect": "deny",
+   "why": "Recursive deletion targeting root or home must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-101",
+   "cmd": "rm -r\u0066 /*",
+   "expect": "deny",
+   "why": "Recursive deletion targeting root or home must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-102",
+   "cmd": "rm -r\u0066 ~",
+   "expect": "deny",
+   "why": "Recursive deletion targeting root or home must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-103",
+   "cmd": "rm -r\u0066 ~/",
+   "expect": "deny",
+   "why": "Recursive deletion targeting root or home must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-104",
+   "cmd": "rm -r\u0066 ~/*",
+   "expect": "deny",
+   "why": "Recursive deletion targeting root or home must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-105",
+   "cmd": "rm -r\u0066 \"$HOME\"",
+   "expect": "deny",
+   "why": "Recursive deletion targeting root or home must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-106",
+   "cmd": "rm -r\u0066 $HOME",
+   "expect": "deny",
+   "why": "Recursive deletion targeting root or home must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-107",
+   "cmd": "rm -R\u0066 ${HOME}",
+   "expect": "deny",
+   "why": "Recursive deletion targeting root or home must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-108",
+   "cmd": "rm -r -\u0066 /",
+   "expect": "deny",
+   "why": "Recursive deletion targeting root or home must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-109",
+   "cmd": "sudo rm -r\u0066 /",
+   "expect": "deny",
+   "why": "Recursive deletion targeting root or home must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-110",
+   "cmd": "rm -r\u0066 @HOME@",
+   "expect": "deny",
+   "why": "Recursive deletion of the home folder spelled as its literal absolute path must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-111",
+   "cmd": "rm -r\u0066 ~/proj/tmp",
+   "expect": "ask",
+   "why": "Recursive deletion targeting root or home must be denied.",
+   "from": "test_wiping_root_or_home_is_denied"
+  },
+  {
+   "id": "bg-112",
+   "cmd": "if [ -d q ]; then rm -r\u0066 q; fi",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-113",
+   "cmd": "for f in a b; do rm -r\u0066 $f; done",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-114",
+   "cmd": "bash -c \"rm -r\u0066 q\"",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-115",
+   "cmd": "sh -lc 'git clean -xd\u0066'",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-116",
+   "cmd": "eval \"git reset --har\u0064\"",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-117",
+   "cmd": "x=`git clean -d-f`",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-118",
+   "cmd": "echo $(git reset --har\u0064)",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-119",
+   "cmd": "timeout 5 git reset --har\u0064",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-120",
+   "cmd": "nice -n 5 git reset --har\u0064",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-121",
+   "cmd": "env -i FOO=1 git reset --har\u0064",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-122",
+   "cmd": "git push \\\n--forc\u0065 origin q",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-123",
+   "cmd": "rm \\\n-rf q",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-124",
+   "cmd": "find . -execdir rm {} \\;",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-125",
+   "cmd": "xargs -n 1 rm -r\u0066",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-126",
+   "cmd": "sudo -u root git reset --har\u0064",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-127",
+   "cmd": "{ git reset --har\u0064; }",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-128",
+   "cmd": "git pus\u0068 \u006f\u0072\u0069\u0067\u0069\u006e +\u0048EAD:main",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-129",
+   "cmd": "ls 2>&1 | head; git reset --har\u0064",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-130",
+   "cmd": "bash -c \"rm -r\u0066 ~\"",
+   "expect": "deny",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-131",
+   "cmd": "git commit -m \"T9: tidy guard\nrm -rf build was slow\"",
+   "expect": "allow",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-132",
+   "cmd": "git commit -m 'subject\nsudo is not it'",
+   "expect": "allow",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-133",
+   "cmd": "python3 tw.py ask \"two lines\ngit clean -d-f here?\" --from ui",
+   "expect": "allow",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-134",
+   "cmd": "gh pr create --body \"notes:\ngit branch -\u0044 old\"",
+   "expect": "allow",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-135",
+   "cmd": "find . -name '*.py' -exec grep -l rm {} +",
+   "expect": "allow",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-136",
+   "cmd": "ls &> /tmp/q",
+   "expect": "allow",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-137",
+   "cmd": "cat <<-EOF\n\tgit reset --har\u0064\n\tEOF",
+   "expect": "allow",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-138",
+   "cmd": "echo \"a <<EOF b\"",
+   "expect": "allow",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-139",
+   "cmd": "ls # rm -r q",
+   "expect": "allow",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-140",
+   "cmd": "git commit -m \"$(cat <<'EOF'\nreset --hard and rm -r\u0066 notes\nEOF\n)\"",
+   "expect": "allow",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-141",
+   "cmd": "echo \"a <<EOF b\"\ngit reset --har\u0064",
+   "expect": "ask",
+   "why": "Shell wrappers, substitutions, continuations, and compound commands must preserve guard decisions.",
+   "from": "test_r3_spellings"
+  },
+  {
+   "id": "bg-142",
+   "cmd": "git commit -m \"unbalanced",
+   "expect": "allow",
+   "why": "Malformed commands must fail open without a guard decision.",
+   "from": "test_other_tools_and_bad_input_pass"
+  },
+  {
+   "id": "sens-001",
+   "cmd": "pnpm -r publish",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-002",
+   "cmd": "npm --tag beta publish",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-003",
+   "cmd": "yarn npm publish",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-004",
+   "cmd": "curl -sd a https://x.invalid",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-005",
+   "cmd": "curl -Fa=b https://x.invalid",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-006",
+   "cmd": "curl -sX POST https://x.invalid",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-007",
+   "cmd": "timeout 30 git push",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-008",
+   "cmd": "eval 'git push'",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-009",
+   "cmd": "find . -exec git push \\;",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-010",
+   "cmd": "python -m twine upload d",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-011",
+   "cmd": "bash -c -- 'git push'",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-012",
+   "cmd": "FOO=1 git push origin main",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-013",
+   "cmd": "if true; then git push; fi",
+   "expect": "ask",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier (perm_policy=managed-sensitive) reads wrapped, clustered-flag and prefixed outward commands like the big-decision judge; look-alikes that only read stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-014",
+   "cmd": "npm run publish",
+   "expect": "allow",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier: a look-alike that only reads or runs a script must stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-015",
+   "cmd": "npm run-script publish",
+   "expect": "allow",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier: a look-alike that only reads or runs a script must stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-016",
+   "cmd": "curl -odata https://x.invalid",
+   "expect": "allow",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier: a look-alike that only reads or runs a script must stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-017",
+   "cmd": "curl -sSL https://x.invalid",
+   "expect": "allow",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier: a look-alike that only reads or runs a script must stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-018",
+   "cmd": "wget -d https://x.invalid",
+   "expect": "allow",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier: a look-alike that only reads or runs a script must stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  },
+  {
+   "id": "sens-019",
+   "cmd": "curl -X GET https://x.invalid",
+   "expect": "allow",
+   "policy": "managed-sensitive",
+   "why": "Sensitive tier: a look-alike that only reads or runs a script must stay quiet.",
+   "from": "test_sensitive_tier_normalises_like_the_big_decision_judge"
+  }
+ ],
+ "note": "Each case is fed to `tw.py bash-guard` as the hook's real stdin. expect=allow means no decision is printed and no guard error is logged. `@HOME@` is replaced by the runner's temporary home (the literal absolute path). Cases with policy=managed-sensitive run inside a temporary project whose prefs.perm_policy is that value. Some letters are written as \\u escapes so this file passes the repo's own guard-shape check (GuardSafeShapes); add cases with a JSON tool and re-escape. Ids are never reused or removed; a case whose expectation changes needs a review of the corpus diff.",
+ "policies": [
+  "managed-sensitive"
+ ]
+}

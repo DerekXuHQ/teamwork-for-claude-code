@@ -8926,7 +8926,8 @@ def _sensitive_policy():
 
 def cmd_bash_guard(a):
     """PreToolUse hook: read the tool call on stdin, print a decision only for big decisions. Never fails: odd input
-    or an internal error prints nothing, so ordinary work is never blocked by the guard itself."""
+    or an internal error prints nothing, so ordinary work is never blocked by the guard itself. Guard changes must
+    run scripts/guard_corpus_run.py and BashGuard tests; add newly found bypasses to the corpus first."""
     try:
         if a.command is not None:
             cmd = a.command

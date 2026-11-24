@@ -3520,6 +3520,64 @@ class FewerPrompts(TwCase):
         r = subprocess.run(["sh", "-c", broken], input="{}", capture_output=True, text=True, cwd="/")
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 
+    def test_hooks_use_an_absolute_python_and_old_bare_hooks_are_updated_in_place(self):
+        """T66: a bare `python3` is looked up on the hook's PATH, which may find a Python too old for tw.py."""
+        (self.dir / "tmpd").mkdir()
+        served, proj = self.dir / "served", self.dir / "proj"
+        served.mkdir(); proj.mkdir()
+        cfg = (self.dir / "cfg3").resolve()
+        tw_py = cfg / "skills" / "teamwork" / "scripts" / "tw.py"
+        (proj / ".claude").mkdir()
+        (proj / ".claude" / "settings.json").write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": f'python3 "{tw_py}" context'}]}]}}))
+        (served / ".claude").mkdir()
+        (served / ".claude" / "settings.local.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": f'python3 "{tw_py}" bash-guard || true'}]}]}}))
+        r = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "install.py"), "--link", "--apply",
+                            "--config-dir", str(cfg), "--project", str(proj), "--served", str(served)], capture_output=True, text=True,
+                           cwd=self.dir, env={**os.environ, "TMPDIR": str(self.dir / "tmpd")})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        starts = [h["command"] for f in (proj / ".claude" / "settings.json", proj / ".claude" / "settings.local.json") if f.exists()
+                  for g in json.loads(f.read_text()).get("hooks", {}).get("SessionStart", []) for h in g["hooks"]]
+        guards = [h["command"] for g in json.loads((served / ".claude" / "settings.local.json").read_text())["hooks"]["PreToolUse"]
+                  for h in g["hooks"]]
+        self.assertEqual(len([c for c in starts if "tw.py" in c]), 1, starts)  # updated, not added twice
+        self.assertEqual(len([c for c in guards if "bash-guard" in c]), 1, guards)
+        for c in [x for x in starts if "tw.py" in x] + guards:
+            self.assertFalse(c.startswith("python3 "), c)
+            self.assertTrue(Path(c.split('"')[1]).is_absolute(), c)
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(self.dir)}  # a short PATH like a launchd-started server
+        g = subprocess.run(["sh", "-c", guards[0]], input=json.dumps({"tool_input": {"command": "ls"}}),
+                           capture_output=True, text=True, cwd=str(proj), env=env)
+        self.assertEqual(g.returncode, 0); self.assertNotIn("SyntaxError", g.stderr)
+        self.assertIn("PreToolUse hook: updating to an absolute python path", r.stdout)
+        r2 = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "install.py"), "--link", "--apply",
+                             "--config-dir", str(cfg), "--project", str(proj), "--served", str(served)], capture_output=True,
+                            text=True, cwd=self.dir, env={**os.environ, "TMPDIR": str(self.dir / "tmpd")})
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("PreToolUse hook: already present", r2.stdout)
+        self.assertNotIn("updating to an absolute python path", r2.stdout)
+
+    def test_hook_match_needs_exactly_one_quoted_interpreter(self):
+        """T66 review: a user's wrapper around our hook is theirs; only `python3 ` or one quoted word counts as ours."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import install
+        tw_py = f'"{install.DEST / "scripts" / "tw.py"}"'
+        self.assertTrue(install._tw_hook(f"python3 {tw_py} context", "context"))
+        self.assertTrue(install._tw_hook(f'"/opt/py/bin/python3" {tw_py} context', "context"))
+        self.assertFalse(install._tw_hook(f'"/x/wrap" --flag "y" {tw_py} context', "context"))
+        self.assertFalse(install._tw_hook(f'"" {tw_py} context', "context"))
+        self.assertFalse(install._tw_hook(f"python3 {tw_py} bash-guard", "context"))
+
+    def test_hook_python_can_run_tw(self):
+        """T66 review: the interpreter written into hooks must be able to run tw.py, and not a venv's."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import install
+        py = install.hook_python()
+        self.assertTrue(Path(py).is_absolute(), py)
+        r = subprocess.run([py, str(install.SRC / "scripts" / "tw.py"), "--help"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     @staticmethod
     def rule_hits(rules, cmd):
         """Rough model of Claude Code's Bash rules: `X:*` is a prefix match, otherwise `*` matches anything."""

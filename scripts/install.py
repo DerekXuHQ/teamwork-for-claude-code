@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -48,7 +49,43 @@ ALLOW = [
     "mcp__claude-code-remote__list_events",
     "mcp__claude-code-remote__list_sessions",
 ]
-HOOK_CMD = f'python3 "{DEST / "scripts" / "tw.py"}" context'
+def hook_python():
+    """The interpreter hooks run with, as an absolute path (T66). A bare `python3`, or `/usr/bin/env python3`, is looked
+    up on the PATH the hook gets, which can be a short one (a Remote Control server started by launchd) where it finds
+    an older system Python that cannot read tw.py; the bash-guard hook then fails silently. Candidates: the stable
+    `python3` link when it is the running interpreter, the running one (outside a venv: its base interpreter, so a
+    deleted venv cannot break the hooks), then `python3` on the PATH. The first that can run tw.py wins."""
+    exe = sys.executable or ""
+    if exe and sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        exe = getattr(sys, "_base_executable", "") or exe
+    link = shutil.which("python3") or ""
+    cands = []
+    if link and exe and os.path.realpath(link) == os.path.realpath(exe):
+        cands.append(link)
+    cands += [c for c in (exe, link) if c and c not in cands]
+    tw = SRC / "scripts" / "tw.py"
+    for c in cands:
+        try:
+            if subprocess.run([c, str(tw), "--help"], capture_output=True, timeout=30).returncode == 0:
+                return c
+        except (OSError, subprocess.SubprocessError):
+            pass
+    print(f"  warning: no python3 found that can run tw.py (tried {', '.join(cands) or 'none'}); hooks may fail",
+          file=sys.stderr)
+    return cands[0] if cands else "python3"
+
+
+PY = hook_python()
+HOOK_CMD = f'"{PY}" "{DEST / "scripts" / "tw.py"}" context'
+
+
+def _tw_hook(cmd, word):
+    """Our hook command, written by any install.py version: `python3 ...` (bare, older) or `"<abs python>" ...`."""
+    if not isinstance(cmd, str): return False
+    tail = f'"{DEST / "scripts" / "tw.py"}" {word}'
+    head = cmd.split(tail, 1)[0] if tail in cmd else None
+    return head is not None and (head == "python3 " or
+                                 (len(head) > 3 and head[0] == '"' and head.endswith('" ') and '"' not in head[1:-2]))
 
 
 def temp_dirs(notes=None):
@@ -131,11 +168,11 @@ FOLDER_DENY = [f"Bash(rm {x} {t})" for x in (_RF, _FR, "-R" + "f", "-f" + "R", "
 def guard_hook():
     """`|| true`: exit code 2 from a PreToolUse hook blocks the call, and python exits 2 when the file is missing or
     the clone is too old to know `bash-guard`; the guard must never block ordinary work. Its decision is on stdout."""
-    return f'python3 "{DEST / "scripts" / "tw.py"}" bash-guard || true'
+    return f'"{PY}" "{DEST / "scripts" / "tw.py"}" bash-guard || true'
 
 
 def _is_guard(cmd):
-    return isinstance(cmd, str) and cmd.startswith(f'python3 "{DEST / "scripts" / "tw.py"}" bash-guard')
+    return _tw_hook(cmd, "bash-guard")
 
 
 def superseded(asks):
@@ -194,9 +231,10 @@ def folder_rules(pl, sl, a, dirs):
         pre.append({"matcher": "Bash", "hooks": [{"type": "command", "command": guard_hook()}]})
         print(f"  {pl.name} PreToolUse hook: adding tw.py bash-guard (asks before big decisions)")
     else:
-        for h in mine:
+        stale = [h for h in mine if h.get("command") != guard_hook()]
+        for h in stale:
             h["command"] = guard_hook()
-        print(f"  {pl.name} PreToolUse hook: already present")
+        print(f"  {pl.name} PreToolUse hook: " + ("updating to an absolute python path" if stale else "already present"))
     if not a.no_allow:
         if perms.get("defaultMode") in (None, "", "auto"):
             perms["defaultMode"] = "auto"  # R45: every session there, the lead included, runs in auto
@@ -359,7 +397,7 @@ def main():
         CONFIG_DIR = Path(os.path.abspath(Path(a.config_dir).expanduser()))  # hooks run from any folder
         DEST = CONFIG_DIR / "skills" / "teamwork"
         USER_SETTINGS = CONFIG_DIR / "settings.json"
-        HOOK_CMD = f'python3 "{DEST / "scripts" / "tw.py"}" context'
+        HOOK_CMD = f'"{PY}" "{DEST / "scripts" / "tw.py"}" context'
     print(f"Claude Code config dir: {CONFIG_DIR}"
           + ("" if os.environ.get("CLAUDE_CONFIG_DIR") or a.config_dir else "  (CLAUDE_CONFIG_DIR not set; check it matches the one your Remote Control server uses)"))
 
@@ -454,7 +492,7 @@ def main():
         if exposed:
             # The hook command holds absolute paths (home folder, user name): keep it out of anything committable.
             top, common = exposed
-            if any(h.get("command") == HOOK_CMD for g in load(ps).get("hooks", {}).get("SessionStart", [])
+            if any(_tw_hook(h.get("command"), "context") for g in load(ps).get("hooks", {}).get("SessionStart", [])
                    for h in g.get("hooks", [])):
                 print(f"  ! {ps} is in a git repo, not ignored, and already holds the hook (absolute paths): move "
                       "that hook to .claude/settings.local.json before committing")
@@ -464,12 +502,13 @@ def main():
             print(f"  {folder} is in a git repo: using {ps.name} (kept out of commits)")
         s = load(ps)
         groups = s.setdefault("hooks", {}).setdefault("SessionStart", [])
-        present = any(
-            h.get("command") == HOOK_CMD for g in groups for h in g.get("hooks", [])
-        )
-        if not present:
+        ours = [h for g in groups for h in g.get("hooks", []) if _tw_hook(h.get("command"), "context")]
+        present = any(h.get("command") == HOOK_CMD for h in ours)
+        for h in ours:
+            h["command"] = HOOK_CMD  # an older bare `python3` hook is updated in place, never added twice
+        if not ours:
             groups.append({"hooks": [{"type": "command", "command": HOOK_CMD}]})
-        print(f"  SessionStart hook: {'already present' if present else 'adding'}")
+        print(f"  SessionStart hook: {'already present' if present else 'updating to an absolute python path' if ours else 'adding'}")
         if a.no_auto_memory and folder == a.project:
             s["autoMemoryEnabled"] = False
             print("  autoMemoryEnabled: false")
@@ -520,7 +559,7 @@ def main():
             else:
                 marker = "# teamwork privacy guard (installed by install.py --pre-push)"
                 body = (f"#!/bin/sh\n{marker}\n"
-                        f'exec python3 "{DEST / "scripts" / "tw.py"}" -C "{proj}" guard --repo "$PWD" --pre-push '
+                        f'exec "{PY}" "{DEST / "scripts" / "tw.py"}" -C "{proj}" guard --repo "$PWD" --pre-push '
                         '--remote "$1" --stdin-owned\n')
                 old = hook.read_text(encoding="utf-8", errors="replace") if hook.exists() else None
                 ours = old is not None and old.splitlines()[:2] == ["#!/bin/sh", marker] and len(old.splitlines()) == 3

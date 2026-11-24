@@ -1,6 +1,6 @@
 # Field test plan: can a screened session forget its screen? (L7)
 
-Status: not run yet. This page lists the steps and what to record. It promises nothing about the outcome.
+Status: steps 1–7 run 2026-11-24 (T73). `/clear` and `/compact` sent as messages arrive as text and are refused; the session still knew the word. A lead cannot reset a thread remotely; keep the clear-out message. Step 8 (the user types `/clear` or `/rewind` in that session) is on the user walkthrough. Results: `2026-11-24-t73-field-tests.md`.
 
 The opening screen (`TW screen ask`) puts practice questions into a new session's context. Today the lead removes
 their effect with a clear-out message (`TW screen clear-msg`). This test checks whether a real context reset can

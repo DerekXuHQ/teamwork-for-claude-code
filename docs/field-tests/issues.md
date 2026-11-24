@@ -1,6 +1,6 @@
 # Open issues from field tests
 
-Collected from `2026-11-15.md`. Each item has a repro and the thread that owns the fix.
+Collected from `2026-11-15.md`. Later runs: `2026-11-18-overnight-run-lessons.md`, `2026-11-24-t73-field-tests.md` (L7 reset, child-failure event, cloud→cloud, turn-end latency, peer requests held). Each item has a repro and the thread that owns the fix.
 Status: `open` = not yet assigned, `assigned: <thread> <task>` = on that thread's board, `fixed` = merged to main.
 Assignments per the lead, 2026-11-16.
 
@@ -14,6 +14,8 @@ Assignments per the lead, 2026-11-16.
 | I6 | low | Header task ids drift to probe ids or ids not on the board | core | assigned: core T9 |
 | I8 | high | User requests have no ledger; nobody reports back after delivery | core | assigned: core T14 |
 | I7 | low | `install.py --help` does not say which config dir it found | core | fixed (main c95f9b8 / fa13016) |
+| I9 | medium | No child-session failure event seen yet; interrupt and invalid model do not count as failures (T73) | core | open |
+| I10 | medium | A peer cannot run slash commands or new outward actions in another session (`/clear`, relaying a message); only protocol replies go through (T73) | core | open |
 
 ## I1. Every tool call in an rc thread needs a manual "allow" (L5)
 
@@ -246,3 +248,23 @@ core.
 - R26-4 I31's decision (do / propose / drop) has no place in the ledger.
 - R26-5 `framework.md:299` names the data-model field `kind_reason`; the code calls it `cloud_reason`.
 - R26-6 SKILL.md step 3.1 sets a new thread straight to `working`, which contradicts the definition of `starting` ("created, first turn not finished").
+
+## I9. No child-session failure event seen yet (T73)
+
+**Repro.** Interrupt a child rc session mid-turn (`interrupt_session`), or create it with an
+invalid model. The interrupted turn ends `error_during_execution` with `status_bucket` REVIEW_READY.
+The invalid model silently falls back (`system/model_fallback`). In neither case had a child-session
+event reached the parent by 18:05 UTC (re-check pending).
+
+**Effect.** Nothing in teamwork may rely on the failure event. The sweep is the backstop. The sweep
+should flag `configured_model` ≠ `last_served_model` as a silent model fallback.
+
+## I10. A peer cannot reset or relay through another session (T73)
+
+**Repro.** `send_message` the text `/clear` to a thread: it is refused as text. Ask a cloud session
+in its first prompt to `send_message` a third session: it does not send, and asks the user
+to confirm; whether it can send after the go-ahead is unverified.
+
+**Effect.** The L7 plan "self-check, reset, real work" cannot run by remote control. Keep the
+clear-out message. Any outward step a thread must take goes in the worker protocol, not in an ad hoc
+peer request. Details: `2026-11-24-t73-field-tests.md`.

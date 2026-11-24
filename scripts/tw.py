@@ -18,6 +18,7 @@ import contextlib
 import hashlib
 import datetime as dt
 import functools
+import fnmatch
 import io
 import json
 try:
@@ -85,10 +86,27 @@ def now():
     t = dt.datetime.fromisoformat(fake) if fake else dt.datetime.now()
     return t.astimezone().isoformat(timespec="seconds")
 
+def _later_than(stamp, previous):
+    if stamp > (previous or ""): return stamp
+    try: return (dt.datetime.fromisoformat(previous) + dt.timedelta(microseconds=1)).isoformat()
+    except (TypeError, ValueError): return stamp
+
 
 # Board / status labels follow prefs.language (en fallback).
 LABELS = {
     "en": {
+        "root_heading": "Root cause", "root_pending": "pending root review", "root_reviewing": "reviewing",
+        "root_asked": "asked", "root_rooting": "root fix in progress", "root_patched": "patch debt",
+        "root_implicit": "(unregistered)", "root_gate": "{task}: root review for {area} is {state}; next: `tw.py {next}`",
+        "root_question": "{area} has had {n} related failures; the shared root is {root}. A: fix the cause ({cost}); B: patch now and record debt; C: patch first, then fix the cause. Recommended: {rec}, because {why}. Reply A, B or C.",
+        "root_suggest": "Unregistered area candidate: `tw.py area add {topic} --paths {paths}`",
+        "root_patch_tag": "[patch] ", "root_fix_tag": "[root fix] ", "root_default_note": " (defaulted; root cause waiting for user)",
+        "root_check_msg": "warning root {area}: status {state}; root review is still pending",
+        "root_area_col": "Area", "root_state_col": "State",
+        "root_symptoms_col": "Symptoms", "root_rework_col": "Rework", "root_debt_col": "Debt", "root_review_col": "Review", "root_next_col": "Next",
+        "s_symptoms": "symptoms", "s_rework": "rework",
+        "root_task_line": "Root review for {area}: {state}", "rc_unassigned_area": "Unassigned area",
+        "root_fresh_hint": "suggested clean session: tw.py root fresh {thread}",
         "planned": "Suggested (no session yet)", "starting": "Created, first turn not finished",
         "working": "Working", "waiting": "Waiting on you (question, permission prompt, or failure)",
         "review": "Ready for review", "landing": "Landing (approved, being merged)",
@@ -285,6 +303,18 @@ LABELS = {
         "succ_abort_user": "Handover {id} did not complete ({reason}); I will continue here.", "succ_abort_threads": "Continue sending messages to me as before.", "succ_abort_candidate": "Candidate: stop work; this handover was cancelled.",
     },
     "zh": {
+        "root_heading": "根因", "root_pending": "待根因", "root_reviewing": "复盘中",
+        "root_asked": "已问", "root_rooting": "根治中", "root_patched": "补丁债",
+        "root_implicit": "（未登记）", "root_gate": "{task}：区域 {area} 正在{state}；下一步运行 `tw.py {next}`",
+        "root_question": "{area} 已出现 {n} 次相关问题，共同根因是 {root}。A：根治（约 {cost}）；B：先补丁并记债；C：先补丁后根治。推荐 {rec}，因为 {why}。回复 A、B 或 C。",
+        "root_suggest": "未登记区域建议：`tw.py area add {topic} --paths {paths}`",
+        "root_patch_tag": "【补丁】", "root_fix_tag": "【根治】", "root_default_note": "（按默认，根因待用户）",
+        "root_check_msg": "警告：区域 {area} 状态为{state}，根因复盘仍待处理",
+        "root_area_col": "区域", "root_state_col": "状态",
+        "root_symptoms_col": "症状", "root_rework_col": "返工", "root_debt_col": "债", "root_review_col": "复盘", "root_next_col": "下一步",
+        "s_symptoms": "症状", "s_rework": "返工",
+        "root_task_line": "根因复盘：区域 {area} 状态为{state}", "rc_unassigned_area": "未分配区域",
+        "root_fresh_hint": "建议换干净会话：tw.py root fresh {thread}",
         "planned": "建议中（还没有会话）", "starting": "已创建，第一轮还没结束",
         "working": "进行中", "waiting": "等你处理（问题、权限弹窗或失败）",
         "review": "待审", "landing": "合并中（已批准）",
@@ -795,6 +825,9 @@ def _save_locked(d, st, event=None):
         sys.exit(lab(st, "ledger_changed"))
     if lock and not (event or {}).get("ev", "").startswith("succ-"):
         sys.exit(lab(st, "lead_relead_locked") if lock.get("relead") else lab(st, "lead_write_locked", ho=lock.get("ho")))
+    _radar_update(st)
+    root_pending = st.pop("_root_pending", [])
+    root_reraised = st.pop("_root_reraised", [])
     touched = st.pop("_touched", [])
     moved_reqs = st.pop("_moved_reqs", [])
     loaded_rev = st.pop("_rev_loaded", 0)
@@ -812,11 +845,19 @@ def _save_locked(d, st, event=None):
             snap["snap_reqs"] = {**snap.get("snap_reqs", {}),
                                  **{r: st["requests"][r] for r in moved_reqs if r in st.get("requests", {})}}
         log(d, {**event, **snap, **({"snap_more_threads": more} if more else {})})
+    for area in root_pending:
+        log(d, {"ev": "root-pending", "area": area})
+    for area in root_reraised:
+        log(d, {"ev": "root-reraise", "area": area})
 
 
 def snapshots(st, ev):
     """Copies of what this event changed, so `rebuild` can restore state.json from log.jsonl alone."""
     snap = {}
+    if ev.get("ev", "").startswith(("root-", "area-")):
+        snap["snap_areas"] = st.get("areas", {})
+    if ev.get("ev", "").startswith("root-"):
+        snap["snap_questions"] = st.get("questions", [])
     if ev.get("task") in st.get("tasks", {}):
         snap["snap_task"] = st["tasks"][ev["task"]]
         linked = {r: q for r, q in st.get("requests", {}).items() if ev["task"] in (q.get("tasks") or [])}
@@ -1029,9 +1070,10 @@ def render_roster(st, for_thread=None, board=False, all_threads=False):
             continue
         me = "   <- YOU" if name == for_thread else ""
         owns = ", ".join(t.get("owns", [])) or "-"
-        lines.append(
-            f"- {name} | {t['kind']} | session_id={t.get('session_id') or '(pending)'} | owns: {owns}{me}"
-        )
+        line=f"- {name} | {t['kind']} | session_id={t.get('session_id') or '(pending)'} | owns: {owns}{me}"
+        if thread_corrections(st,name) >= st.get("prefs",{}).get("root_fresh_at",3):
+            line += " | " + lab(st,"root_fresh_hint",thread=name)
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -1049,7 +1091,7 @@ def render_tasks(st, only_owner=None):
                          for r, q in st.get("requests", {}).items() if tid in (q.get("tasks") or [])]
                         + [f"({r})" for r in k.get("from_requests") or []]) or "-"  # (R1): follow-up, not holding it
         rows.append(
-            f"| {tid} | {k['title']}" + (f" ({k['route']})" if k.get("route") else "") + f" | {k.get('owner') or '-'} | {deps} | {k['status']} | {k.get('accept') or '-'} "
+            f"| {tid} | {(lab(st,'root_patch_tag') if k.get('fix_kind')=='patch' else lab(st,'root_fix_tag') if k.get('fix_kind')=='root' else '')}{k['title']}" + (f" ({k['route']})" if k.get("route") else "") + f" | {k.get('owner') or '-'} | {deps} | {k['status']} | {k.get('accept') or '-'} "
             f"| {review} | {reqs} |"
         )
     if not rows:
@@ -1208,6 +1250,15 @@ def render_board(st, all_threads=False):
         out += ["## " + lab(st, "s_issues"), ""]
         out += ["- " + lab(st, "archive_failed_row", sid=sid, seat=rec.get("seat", "?"))
                 for sid, rec in failed_archives] + [""]
+    roots = [(n,v) for n,v in radar(st).items() if v["state"] != "ok"]
+    if roots:
+        out += [f"## {lab(st,'root_heading')}", "", f"| {lab(st,'root_area_col')} | {lab(st,'root_state_col')} | {lab(st,'root_symptoms_col')} | {lab(st,'root_rework_col')} | {lab(st,'root_debt_col')} | {lab(st,'root_review_col')} | {lab(st,'root_next_col')} |", "|---|---|---:|---:|---:|---|---|"]
+        for area,v in roots:
+            rec=st.get("areas",{}).get(area,{})
+            state=lab(st,"root_"+v["state"])
+            if rec.get("root_pending"): state += lab(st,"root_default_note")
+            out.append(f"| {area} | {state} | {len(v['symptoms'])} | {v['rework']} | {len(rec.get('debt',[]))} | {rec.get('rc',0) or '-'} | {root_next(v['state'],area)} |")
+        out.append("")
     reqs = render_requests(st, chain=True)
     if reqs:
         out += [f"## {lab(st, 'requests')}", "", reqs, ""]
@@ -1347,6 +1398,8 @@ def render_share(st):
                                                  + (f" ({L('s_missing')}: {_md(x['missing'])})" if x.get("missing")
                                                     else "")
                                                  for i, x in enumerate(dl)] or [L("s_none_yet")]) + [""]
+    roots=[(n,v) for n,v in radar(st).items() if v["state"]!="ok"]
+    if roots: out += [f"## {L('root_heading')}", ""] + [f"- {n}: {L('root_'+v['state'])} ({len(v['symptoms'])} {L('s_symptoms')}, {v['rework']} {L('s_rework')})" for n,v in roots] + [""]
     reqs = st.get("requests", {})
     live = [(r, q) for r, q in reqs.items() if q["status"] not in REQ_END]
     out += [f"## {L('s_requests')}", ""] + ([f"- {r} — {L('req_' + q['status'])}: {_md(q['text'])}"
@@ -1456,6 +1509,7 @@ def cmd_init(a):
             "default_after_minutes": 30,  # IL-1: an unanswered non-gated question takes its stated default after this
             "ledger_line_every": "wrapup",
             "screen_mode": "shadow", "signals_red_at": 3, "relay_max_per_day": 2, "succ_watchdog_minutes": 45,
+            "root_mode": "on", "root_symptoms_at": 2, "root_rework_at": 2, "root_full_at": 4, "root_debt_at": 2, "root_fresh_at": 3,
             "archive_idle_days": 3,
             "reconcile_every": "wrapup", "selfcheck_every": "wrapup", "quota_every_minutes": 60,
             "quota_trigger_id": "", "quota_trigger_on": "",  # R66: the lead's hourly quota timer and whether it is enabled
@@ -1934,6 +1988,434 @@ def cmd_thread(a):
         print(lab(st, "handover_prompt_hint"), file=sys.stderr)
 
 
+PATCHY_RE = re.compile(r"又(?:坏|错|出(?:问题|错|bug))|还是没(?:好|修好|解决|用)|补丁|治标|没解决根本|根本没解决|still (?:broken|wrong|failing|not working)", re.I)
+URGENT_RE = re.compile(r"先修一下|先修好|先修复|紧急|很急|急修|赶紧修|立刻修|马上修|urgent|asap", re.I)
+
+def urgent_words(text):
+    clean=re.sub(r"(?:不太急|不怎么急|不是很急|不急|别急|不用急|不着急|not urgent)", "", text or "", flags=re.I)
+    return bool(URGENT_RE.search(clean))
+
+def patchy_text(text):
+    value=text or ""
+    if PATCHY_RE.search(value): return True
+    return any(re.search(r"\bagain\b",part,re.I) and re.search(r"\b(?:broken|fail(?:ed|ing)?|wrong|bug)\b",part,re.I)
+               for part in re.split(r"[.!?。！？\n]+",value))
+
+def _norm_category(value):
+    if not value: return value
+    key=value.strip().lower()
+    return {"纠正":"correction","修正":"correction","问题":"bug","缺陷":"bug","bug":"bug"}.get(key,key)
+
+def area_of_task(st, task):
+    areas = st.get("areas", {})
+    names = {str(x).lower(): x for x in areas}
+    for name, rec in areas.items():
+        for aka in rec.get("aka", []): names[str(aka).lower()] = name
+    for topic in task.get("topics", []):
+        if topic.lower() in names: return names[topic.lower()]
+    for name, rec in areas.items():
+        if any(fnmatch.fnmatch(path, pat) for path in task.get("touches", []) for pat in rec.get("paths", [])):
+            return name
+    return (task.get("topics") or [None])[0]
+
+def _area_records(st, task_areas=None):
+    areas = st.get("areas", {})
+    out = dict(areas)
+    for k, task in st.get("tasks", {}).items():
+        name = (task_areas or {}).get(k) if task_areas is not None else area_of_task(st, task)
+        if name and name not in out:
+            out[name] = {"paths": [], "aka": [], "state": "ok", "baseline": "", "rc": 0,
+                         "debt": [], "asked": None, "question": None, "dismissed": [], "history": [], "implicit": True}
+    for rid, q in st.get("requests", {}).items():
+        name = q.get("area")
+        if name and name not in out:
+            out[name] = {"paths": [], "aka": [], "state": "ok", "baseline": "", "rc": 0,
+                         "debt": [], "asked": None, "question": None, "dismissed": [], "history": [], "implicit": True}
+    return out
+
+def _area_reqs(st, area, rec):
+    aliases = {area, *rec.get("aka", [])}
+    return [(rid, q) for rid, q in st.get("requests", {}).items()
+            if (q.get("area") == area if q.get("area") else
+                any(x and x.lower() == (q.get("where") or "").lower() for x in aliases))]
+
+def radar(st):
+    prefs = st.get("prefs", {})
+    if prefs.get("root_mode", "on") == "off": return {}
+    result = {}
+    task_areas={tid:area_of_task(st,task) for tid,task in st.get("tasks",{}).items()}
+    tasks_by_area={}
+    for tid,task in st.get("tasks",{}).items():
+        if task_areas[tid]: tasks_by_area.setdefault(task_areas[tid],[]).append(task)
+    records = _area_records(st,task_areas)
+    if records:
+        areas = st.setdefault("areas", {})
+        if not st.get("root_since"):
+            st["root_since"] = now()
+        for area, rec in records.items():
+            if area not in areas:
+                rec = dict(rec); rec["baseline"] = now(); rec["implicit"] = True
+                areas[area] = rec
+        records = areas
+    for area, rec in records.items():
+        baseline = rec.get("baseline") or ""
+        dismissed = set(rec.get("dismissed", []))
+        symptoms = [rid for rid, q in _area_reqs(st, area, rec)
+                    if rid not in dismissed and q.get("status") not in REQ_END + ("wont",)
+                    and (q.get("created") or "") >= baseline
+                    and (q.get("category") in ("bug", "correction") or q.get("patchy"))]
+        tasks = tasks_by_area.get(area, [])
+        rework = sum(sum((x or "") >= baseline for x in t.get("rework_at", [])) for t in tasks)
+        patchy = any(st.get("requests", {}).get(r, {}).get("patchy") for r in symptoms)
+        pending = rec.get("state", "ok") in ("ok", "pending") and (len(symptoms) >= prefs.get("root_symptoms_at", 2)
+                   or rework >= prefs.get("root_rework_at", 2) or patchy)
+        debt_since = rec.get("answered_at") or rec.get("asked") or ""
+        patched_debt = sum(x.get("kind") in ("hotfix", "patch") and x.get("at", "") > debt_since for x in rec.get("debt", []))
+        reraised = rec.get("reraised") or (rec.get("state") == "patched" and rec.get("asked") and patched_debt >= prefs.get("root_debt_at", 2))
+        pending = pending or reraised
+        result[area] = {"symptoms": symptoms, "rework": rework, "patchy": patchy,
+                        "state": "pending" if pending else ("ok" if rec.get("state") == "pending" else rec.get("state", "ok")),
+                        "level": "full" if rec.get("level") == "full" or len(symptoms) >= prefs.get("root_full_at", 4) else "light"}
+    return result
+
+def _radar_update(st):
+    if st.get("prefs", {}).get("root_mode", "on") == "off": return
+    entered=[]
+    for area, data in radar(st).items():
+        old = st.get("areas", {}).get(area, {}).get("state", "ok")
+        if data["state"] == "pending" and old in ("ok", "patched"):
+            st.setdefault("areas", {}).setdefault(area, {"paths": [], "aka": [], "state": "ok", "baseline": now(),
+                "rc": 0, "debt": [], "asked": None, "question": None, "dismissed": [], "history": [], "implicit": area not in st.get("areas", {})})["state"] = "pending"
+            entered.append(area)
+            if old == "patched":
+                st["areas"][area]["reraised"] = True
+                st.setdefault("_root_reraised", []).append(area)
+        elif old == "pending" and data["state"] != "pending" and not st.get("areas", {}).get(area, {}).get("reraised"):
+            st["areas"][area]["state"] = "ok"
+    if entered: st.setdefault("_root_pending", []).extend(entered)
+
+def cmd_area(a):
+    d = need(find_dir()); st = load(d); areas = st.setdefault("areas", {})
+    if a.action == "list":
+        print(json.dumps(areas, ensure_ascii=False, indent=2)); return
+    name = norm_topics(a.name)
+    if not name: sys.exit("area name required")
+    name = name[0]
+    if a.action == "merge":
+        src, dst = a.name, a.to
+        if src not in areas or dst not in areas: sys.exit("unknown area")
+        for rid, q in st.get("requests", {}).items():
+            if q.get("area") == src: q["area"] = dst
+            if (q.get("where") or "").lower() == src.lower(): q["area"] = dst
+        areas[dst]["paths"] = list(dict.fromkeys((areas[dst].get("paths") or []) + (areas[src].get("paths") or [])))
+        areas[dst]["aka"] = list(dict.fromkeys((areas[dst].get("aka") or []) + [src] + (areas[src].get("aka") or [])))
+        areas[dst].setdefault("history", []).append({"kind":"merge", "from":src, "at":now(), "debt":areas[src].get("debt",[])})
+        areas[dst].setdefault("debt", []).extend(areas[src].get("debt", []))
+        areas.pop(src); save(d, st, {"ev":"area-merge", "from":src, "to":dst}); return
+    rec = areas.setdefault(name, {"paths": [], "aka": [], "state":"ok", "baseline": now(), "rc":0,
+                                  "debt":[], "asked":None, "question":None, "dismissed":[], "history":[]})
+    rec.pop("implicit",None)
+    st.setdefault("root_since", now())
+    if a.paths is not None: rec["paths"] = csv(a.paths)
+    if a.aka is not None: rec["aka"] = csv(a.aka)
+    save(d, st, {"ev":"area-"+a.action, "area":name})
+
+def _root_path(d, area, rc): return d / "roots" / f"{area}-RC{rc}.md"
+
+ROOT_ROUND_FIELDS = ("asked", "question", "checked_at", "answer", "user_said", "level", "spec_checked_at",
+                     "root_pending", "defaulted_at", "patch_first", "reraised", "answered_at")
+
+def _archive_root_round(rec, kind):
+    old = {k: rec.pop(k) for k in ROOT_ROUND_FIELDS if k in rec}
+    if old:
+        rec.setdefault("history", []).append({"kind": kind, "at": now(), **old})
+
+def _withdraw_root_questions(st, area):
+    for q in st.get("questions", []):
+        if q.get("kind") != "root" or q.get("answered"): continue
+        qareas = q.get("areas") or [q.get("area")]
+        if area not in qareas: continue
+        answers = q.setdefault("area_answers", {})
+        answers.setdefault(area, "withdrawn")
+        if all(x in answers for x in qareas if x):
+            q.update(withdrawn=True, answered=True, answer="withdrawn")
+
+def _root_corrections(st, area, rec):
+    corr=[]
+    baseline=rec.get("baseline") or ""
+    for rid,q in _area_reqs(st,area,rec):
+        if (q.get("created") or "") < baseline: continue
+        corr.append((rid,q.get("text","")))
+        said=q.get("user_said",[])
+        if isinstance(said,list): corr.extend((rid,x.get("text","") if isinstance(x,dict) else str(x)) for x in said if x)
+    return [(rid,str(original).replace("|",r"\|").replace("\r"," ").replace("\n"," ")) for rid,original in corr]
+
+def _unmapped_root_corrections(text, st, area, rec):
+    mapped=set()
+    for line in text.splitlines():
+        cols=_md_table_cols(line)
+        if len(cols)>=5 and re.fullmatch(r"C\d+",cols[0]): mapped.add((cols[1],cols[2]))
+    return [(rid,original) for rid,original in _root_corrections(st,area,rec)
+            if (rid,original.replace(r"\|","|")) not in mapped]
+
+def _area_key(st, value):
+    norm = norm_topics(value)
+    key = norm[0] if norm else ""
+    for name, rec in st.get("areas", {}).items():
+        if key == name.lower() or key in {str(x).lower() for x in rec.get("aka", [])}:
+            return name
+    return key
+
+def _root_scenario_check(body, ids):
+    if "## 故障场景" not in body: return "故障场景 section missing"
+    scenarios = body.split("## 故障场景", 1)[1].split("\n## ", 1)[0]
+    data = []
+    for line in scenarios.splitlines():
+        if not line.strip().startswith("|"): continue
+        cols = [x.strip() for x in line.strip().strip("|").split("|")]
+        if len(cols) > 1 and re.fullmatch(r"S\d+", cols[1]): data.append(cols)
+    if not data: return "scenario table has no rows"
+    for i in range(1, len(ids) + 1):
+        if not any(row[1] == f"S{i}" for row in data): return f"S{i} missing from scenarios"
+    invalid = {"", "-", "无", "x", "<填>", "todo"}
+    for row in data:
+        if len(row) < 4: return "scenario row has fewer than four columns"
+        if row[3].strip().lower() in invalid: return "scenario test name is empty or placeholder"
+    return None
+
+def _md_table_cols(line):
+    return [x.replace(r"\|", "|").strip() for x in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+
+def cmd_root(a):
+    d = need(find_dir()); st = load(d); areas = st.setdefault("areas", {})
+    view = radar(st)
+    if a.action == "scan":
+        print("\n".join(f"{x}: {len(v['symptoms'])} symptoms" for x,v in view.items() if v["state"] == "pending") or "-" ); return
+    if a.action in ("list", "show"):
+        names = [a.area] if a.action == "show" else [x for x,v in view.items() if a.all_areas or v["state"] != "ok"]
+        for area in names:
+            rec = areas.get(area, {"state":"ok", "debt":[]}); v=view.get(area, {"state":rec.get("state","ok"),"symptoms":[],"rework":0})
+            print(f"{area}{' '+lab(st,'root_implicit') if rec.get('implicit') else ''}: {v['state']}; symptoms={len(v['symptoms'])}; rework={v['rework']}; debt={len(rec.get('debt',[]))}; next={root_next(v['state'], area)}")
+            if a.action == "show":
+                for rid in v["symptoms"]: print(f"  {rid} [{st['requests'][rid].get('category','')}] {st['requests'][rid].get('text','')}")
+                for tid,task in st.get("tasks",{}).items():
+                    if area_of_task(st,task)==area and task.get("rework_at"): print(f"  {tid} rework={len(task['rework_at'])}")
+                for issue in st.get("issues",[]):
+                    text=" ".join(str(issue.get(k,"")) for k in ("title","text","note"))
+                    if any(alias.lower() in text.lower() for alias in [area,*rec.get("aka",[])]): print(f"  issue {issue.get('id','')}: {text}")
+                for rid,q in _area_reqs(st,area,rec):
+                    for said in q.get("user_said",[]) if isinstance(q.get("user_said"),list) else []:
+                        print(f"  {rid} user: {said.get('text','') if isinstance(said,dict) else said}")
+        return
+    if a.action == "ask" and getattr(a,"all_areas",False):
+        if not all((a.recommend,a.why,a.cost,a.root)): sys.exit("root ask requires --recommend, --why, --cost and --root")
+        eligible=[]
+        for n,r in areas.items():
+            path=_root_path(d,n,r.get("rc",0)); body=path.read_text(encoding="utf-8") if path.exists() else ""
+            debt=sum(x.get("kind") in ("hotfix","patch") and x.get("at","") > (r.get("answered_at") or r.get("asked") or "") for x in r.get("debt",[]))
+            if r.get("state") not in ("reviewing","patched","pending") or not r.get("checked_at") or "<填>" in body or (r.get("asked") and debt < st.get("prefs",{}).get("root_debt_at",2)):
+                print(f"skip {n}: root check/state/debt prerequisites not met",file=sys.stderr); continue
+            eligible.append(n)
+        if not eligible: sys.exit("no checked, unasked root reviews")
+        texts=[]
+        for n in eligible:
+            texts.append(lab(st,"root_question",area=n,n=len(view.get(n,{}).get("symptoms",[])),root=a.root or "<fill>",
+                             cost=a.cost or "<fill>",rec=a.recommend or "A",why=a.why or "<fill>"))
+            areas[n].update(asked=now(),question=len(st.get("questions",[]))+1,state="asked")
+        body="\n".join(texts)
+        st.setdefault("questions",[]).append({"from":"lead","text":body,"t":now(),"answered":False,"kind":"root","areas":eligible})
+        save(d,st,{"ev":"root-ask-all","areas":eligible}); print(body); return
+    area = _area_key(st, a.area) if a.action not in ("move",) else a.area
+    if a.action not in ("move","fresh") and area not in areas:
+        if area not in view: sys.exit("unknown area; register it with area add")
+        areas[area] = {"paths": [], "aka": [], "state": "ok", "baseline": st.get("created") or "", "rc": 0,
+                       "debt": [], "asked": None, "question": None, "dismissed": [], "history": [], "implicit": True}
+    rec = areas.get(area,{})
+    if a.action == "start":
+        if rec.get("state") == "reviewing" and rec.get("rc",0) and _root_path(d,area,rec["rc"]).exists():
+            sys.exit("root review already started")
+        if rec.get("state") not in ("ok", "pending"):
+            nxt={"reviewing":"root check","asked":"wait for user answer","rooting":"root spec","patched":"review patch debt"}.get(rec.get("state"),"review the current state")
+            sys.exit(f"root start refused: current state is {rec.get('state')}; next step: {nxt} {area}" if nxt.startswith("root ") else f"root start refused: current state is {rec.get('state')}; next step: {nxt}")
+        rc=rec.get("rc",0)+1; path=_root_path(d,area,rc); path.parent.mkdir(parents=True,exist_ok=True)
+        if path.exists(): sys.exit("root review already started")
+        _archive_root_round(rec, "next-round")
+        _withdraw_root_questions(st, area)
+        rec["rc"]=rc; rec["state"]="reviewing"; rec["checked_at"]=None; rec["reraised"]=False
+        v=view.get(area,{}); ids=v.get("symptoms",[]); level=v.get("level","light")
+        rec["level"]=level
+        rows="\n".join(f"| S{i} | {rid} | {st['requests'][rid].get('text','').replace('|',r'\\|').replace(chr(10),' ')} |" for i,rid in enumerate(ids,1)) or "| S1 | - | <填> |"
+        fields=["症状", "共同根", "要保证什么（不变量）", "故障场景与测试", "方案"] if level=="light" else ["症状", "共同根", "相关现有代码（文件:行）", "成熟方案参考", "要保证什么", "故障场景全表", "每场景现状（文件:行）", "整体方案+验收/测试", "兼容旧数据/旧版本"]
+        body=f"# {area} RC{rec['rc']}\n\n级别: {level}\n\n## 症状\n编号 | 来源 | 原话\n---|---|---\n{rows}\n"
+        for field in fields[1:]:
+            if field in ("故障场景与测试","故障场景全表"):
+                body += f"\n## {field}\n\n| 场景 | 对应症状 | 现状 文件:行 | 测试名 |\n|---|---|---|---|\n"
+                body += "\n".join(f"| <填> | S{i} | <填> | <填> |" for i in range(1,len(ids)+1)) or "| <填> | 补 | <填> | <填> |"
+            else:
+                body += f"\n## {field}\n\n<填>\n"
+        path.write_text(body,encoding="utf-8"); save(d,st,{"ev":"root-start","area":area}); print(path); return
+    if a.action == "check":
+        path=_root_path(d,area,rec.get("rc",0)); body=path.read_text(encoding="utf-8") if path.exists() else ""
+        if rec.get("rc",0) < 1 or not path.exists() or not (rec.get("state") == "reviewing" or (rec.get("state")=="rooting" and rec.get("level")=="full")): sys.exit("root check requires an active reviewing RC")
+        if "<填>" in body: sys.exit("root review still has <填>")
+        ids=view.get(area,{}).get("symptoms",[])
+        error=_root_scenario_check(body,ids)
+        if error: sys.exit(error)
+        rec["checked_at"]=now(); save(d,st,{"ev":"root-check","area":area}); return
+    if a.action == "ask":
+        path=_root_path(d,area,rec.get("rc",0)); body=path.read_text(encoding="utf-8") if path.exists() else ""
+        if not all((a.recommend,a.why,a.cost,a.root)): sys.exit("root ask requires --recommend, --why, --cost and --root")
+        if rec.get("state") not in ("reviewing", "patched", "pending"): sys.exit("root ask requires reviewing, patched, or pending state")
+        if not rec.get("checked_at") or "<填>" in body: sys.exit("root check must pass before ask")
+        if rec.get("asked") and sum(x.get("kind") in ("hotfix", "patch") and x.get("at","") > (rec.get("answered_at") or rec["asked"]) for x in rec.get("debt",[])) < st.get("prefs",{}).get("root_debt_at",2): sys.exit("already asked")
+        n=len(view.get(area,{}).get("symptoms",[])); text=lab(st,"root_question",area=area,n=n,root=a.root,cost=a.cost,rec=a.recommend,why=a.why)
+        if rec.get("question") and isinstance(rec["question"],int) and 1 <= rec["question"] <= len(st.get("questions",[])):
+            previous=st["questions"][rec["question"]-1]
+            if not previous.get("answered"):
+                previous.update(answered=True,answer="superseded",superseded_by=len(st["questions"])+1,by_default=True)
+        st.setdefault("questions",[]).append({"from":"lead","text":text,"t":now(),"answered":False,"kind":"root","area":area})
+        rec.update(state="asked",asked=now(),question=len(st["questions"]),reraised=False); save(d,st,{"ev":"root-ask","area":area}); print(text); return
+    if a.action == "answer":
+        if a.choice not in ("A", "B", "C"): sys.exit("root answer choice must be A, B, or C")
+        if not (a.user_said or "").strip(): sys.exit("root answer requires --user-said")
+        if not rec.get("question"): sys.exit("root answer requires an existing root question")
+        if rec.get("state") not in ("asked", "patched", "pending") and not rec.get("root_pending"):
+            sys.exit("root answer requires asked or pending patch state")
+        qn=rec["question"]
+        if not isinstance(qn,int) or not 1 <= qn <= len(st.get("questions",[])): sys.exit("root answer question is missing")
+        q=st["questions"][qn-1]
+        qareas=q.get("areas") or [q.get("area")]
+        answers=q.setdefault("area_answers",{})
+        if q.get("kind")!="root" or area not in qareas or area in answers: sys.exit("root answer question does not match this area")
+        answers[area]=a.user_said
+        if set(answers) >= set(x for x in qareas if x): q.update(answered=True,answer=a.user_said)
+        for older in st.get("questions",[]):
+            if older is q: continue
+            if older.get("kind")=="root" and area in (older.get("areas") or [older.get("area")]) and not older.get("answered"):
+                older.update(answered=True,answer="superseded",superseded_by=qn,by_default=True)
+        rec.update(answer=a.choice,user_said=a.user_said,answered_at=now())
+        rec.pop("root_pending",None)
+        rec["state"]="patched" if a.choice=="B" else "rooting"
+        if a.choice=="A":
+            rec["level"]="full"
+            rcpath=_root_path(d,area,rec.get("rc",0)); oldbody=rcpath.read_text(encoding="utf-8") if rcpath.exists() else ""
+            if "级别: light" in oldbody:
+                existing={line[3:] for line in oldbody.splitlines() if line.startswith("## ")}
+                extras=["相关现有代码（文件:行）","成熟方案参考","每场景现状（文件:行）","兼容旧数据/旧版本"]
+                for heading in extras:
+                    if heading not in existing: oldbody += f"\n## {heading}\n\n<填>\n"
+                rcpath.write_text(oldbody.replace("级别: light","级别: full",1),encoding="utf-8")
+                rec["checked_at"]=None
+        if a.choice=="C": rec["patch_first"]=True
+        if a.choice=="B": rec.setdefault("debt",[]).append({"kind":"choice-B","at":now()})
+        save(d,st,{"ev":"root-answer","area":area,"choice":a.choice}); return
+    if a.action == "dismiss":
+        if not (a.why or "").strip(): sys.exit("root dismiss requires --why")
+        if a.req:
+            rec.setdefault("dismissed",[]).append(a.req)
+        else:
+            _withdraw_root_questions(st, area)
+            _archive_root_round(rec,"dismissed")
+            rec.update(state="ok",baseline=now(),reraised=False); rec.setdefault("history",[]).append({"kind":"dismissed","why":a.why,"at":now()})
+        save(d,st,{"ev":"root-dismiss","area":area}); return
+    if a.action == "move":
+        rid=area
+        if rid not in st.get("requests",{}) or not a.move_area: sys.exit("root move Rn --area AREA")
+        st["requests"][rid]["area"]=_area_key(st,a.move_area); save(d,st,{"ev":"root-move","req":rid,"area":st["requests"][rid]["area"]}); return
+    if a.action == "done":
+        task=st.get("tasks",{}).get(a.task)
+        if rec.get("state")!="rooting" or not task or area_of_task(st,task)!=area or task.get("fix_kind")!="root" or task.get("status")!="done" or not (task.get("merged_sha") or task.get("merged_at")): sys.exit("root done requires its merged done root task while rooting")
+        _withdraw_root_questions(st, area); _archive_root_round(rec,"done")
+        rec.setdefault("history",[]).append({"kind":"done","debt":rec.get("debt",[]),"rc":rec.get("rc"),"at":now()}); rec.update(state="ok",baseline=now(),debt=[],reraised=False)
+        save(d,st,{"ev":"root-done","area":area,"task":a.task}); return
+    if a.action == "handoff":
+        task=st.get("tasks",{}).get(a.task or "")
+        if rec.get("state")!="rooting" or not rec.get("spec_checked_at") or rec.get("root_pending"):
+            sys.exit("rooting and checked spec are required; default is not approval")
+        specpath=_root_path(d,area,rec.get("rc",0)); specpath=specpath.with_name(specpath.stem+"-spec.md")
+        specbody=specpath.read_text(encoding="utf-8") if specpath.exists() else ""
+        missing=_unmapped_root_corrections(specbody,st,area,rec)
+        if missing: sys.exit("unmapped: "+", ".join(f"{rid}: {original}" for rid,original in missing))
+        if not task or area_of_task(st,task)!=area or not a.to or a.to not in st.get("threads",{}): sys.exit("handoff requires an area task and --to thread --task Tn")
+        task["fix_kind"]="root"; task["root_spec"]=str(_root_path(d,area,rec.get("rc",0)).with_name(_root_path(d,area,rec.get("rc",0)).stem+"-spec.md"))
+        save(d,st,{"ev":"root-handoff","area":area,"task":a.task})
+        ns=argparse.Namespace(thread=a.to,prompt=True,leaving=None,reason=None); capture=io.StringIO()
+        with contextlib.redirect_stdout(capture): cmd_handover(ns)
+        spec_body=Path(task["root_spec"]).read_text(encoding="utf-8")
+        print(capture.getvalue().rstrip()+f"\n\nRoot specification: {task['root_spec']}\n\n{spec_body}")
+        return
+    if a.action == "fresh":
+        thread=a.area
+        linked=[(tid,t) for tid,t in st.get("tasks",{}).items() if t.get("owner")==thread and t.get("status") not in ("done","dropped")]
+        specs=[]
+        for tid,t in linked:
+            ar=area_of_task(st,t)
+            arec=st.get("areas",{}).get(ar,{})
+            if ar and arec.get("state")=="rooting":
+                if not arec.get("spec_checked_at"): sys.exit(f"root spec {ar} must pass root spec --check before fresh")
+                path=_root_path(d,ar,arec.get("rc",0)).with_name(_root_path(d,ar,arec.get("rc",0)).stem+"-spec.md")
+                if not path.exists(): sys.exit(f"run root spec {ar} first")
+                specs.append((str(path),path.read_text(encoding="utf-8")))
+        capture=io.StringIO()
+        with contextlib.redirect_stdout(capture): cmd_handover(argparse.Namespace(thread=thread,prompt=True,leaving=None,reason=None))
+        print(capture.getvalue().rstrip()+("\n\nSpecifications:\n"+"\n\n".join(f"{path}\n{body}" for path,body in specs) if specs else "")); return
+    if a.action == "spec":
+        path=_root_path(d,area,rec.get("rc",0)); spec=path.with_name(path.stem+"-spec.md")
+        if a.check:
+            text=spec.read_text(encoding="utf-8") if spec.exists() else ""; bad=[]
+            if not spec.exists() or "## 规格" not in text or "## 用户纠正映射" not in text: sys.exit("spec requires 规格 and 用户纠正映射 sections")
+            specbody=text.split("## 规格",1)[1].split("## 用户纠正映射",1)[0]
+            if "<填>" in specbody: sys.exit("spec still has <填> in 规格")
+            spec_lines=set(re.findall(r"(?m)^\s*(L\d+)\s*[.:]\s*(\S.*)$",specbody))
+            if not spec_lines: sys.exit("spec needs at least one nonempty L line")
+            found=set(); mapped_corrections=set()
+            for line in text.splitlines():
+                cols=_md_table_cols(line)
+                if cols and re.fullmatch(r"C\d+",cols[0]) and len(cols)<5:
+                    bad.append(cols[0]); continue
+                if len(cols)>=5 and re.fullmatch(r"C\d+",cols[0]):
+                    found.add(cols[0])
+                    mapped_corrections.add((cols[1],cols[2]))
+                    mapped=re.search(r"\b(L\d+)\b",cols[3])
+                    reason=re.match(r"^用户[:：]\s*(\S.*)$",cols[4])
+                    if not (mapped and any(x[0]==mapped.group(1) for x in spec_lines)) and not reason: bad.append(cols[0])
+            missing=set(rec.get("spec_rows",[]))-found
+            bad.extend(sorted(missing))
+            unmapped=_unmapped_root_corrections(text,st,area,rec)
+            if bad or unmapped:
+                detail=[f"{rid}: {original}" for rid,original in unmapped]
+                sys.exit("unmapped: "+", ".join(bad+detail))
+            rec["spec_checked_at"]=now(); save(d,st,{"ev":"root-spec-check","area":area}); return
+        if a.append:
+            if not spec.exists(): sys.exit("root spec --append requires an existing spec")
+            text=spec.read_text(encoding="utf-8"); known=set()
+            for line in text.splitlines():
+                cols=_md_table_cols(line)
+                if len(cols)>=5 and re.fullmatch(r"C\d+",cols[0]): known.add((cols[1],cols[2]))
+            additions=[(rid,original) for rid,original in _root_corrections(st,area,rec) if (rid,original) not in known]
+            if not additions: sys.exit("no new root corrections to append")
+            nums=[int(m.group(1)) for m in re.finditer(r"(?m)^\|\s*C(\d+)\s*\|",text)]
+            start=max(nums,default=0)+1
+            rows="\n".join(f"| C{i} | {rid} | {original} | <填> | <填> |" for i,(rid,original) in enumerate(additions,start))
+            marker="|---|---|---|---|---|"
+            if marker not in text: sys.exit("spec has no correction mapping table")
+            text=text.replace(marker,marker+"\n"+rows,1); spec.write_text(text,encoding="utf-8")
+            rec["spec_rows"]=[f"C{i}" for i in range(1,max(nums,default=0)+len(additions)+1)]
+            rec.pop("spec_checked_at",None); save(d,st,{"ev":"root-spec-append","area":area}); print(spec); return
+        if not rec.get("checked_at"): sys.exit("root check must pass after the last root answer before spec")
+        if spec.exists(): sys.exit("spec already exists")
+        rc=path.read_text(encoding="utf-8") if path.exists() else ""
+        corr=_root_corrections(st,area,rec)
+        rec["spec_rows"]=[f"C{i}" for i in range(1,len(corr)+1)]
+        rows="\n".join(f"| C{i} | {rid} | {original} | <填> | <填> |" for i,(rid,original) in enumerate(corr,1))
+        if not rec.get("checked_at"): sys.exit("root check must pass after the last root answer before spec")
+        spec.write_text("## 复盘结论\n\n"+"\n".join(x for x in rc.splitlines() if x.startswith("## ") or (x.strip() and x!="<填>"))+"\n\n## 规格\n\nL1. <填>\n\n## 用户纠正映射\n\n| C号 | 来源 R号 | 原话 | 规格行 | 不采纳原因 |\n|---|---|---|---|---|\n"+rows+"\n",encoding="utf-8")
+        save(d,st,{"ev":"root-spec","area":area}); print(spec); return
+
+def root_next(state, area):
+    return {"pending":f"root start {area}","reviewing":f"root check {area}","asked":"wait for user",
+            "rooting":f"root spec {area}","patched":"review debt"}.get(state,"-")
+
 def cmd_task(a):
     d = need(find_dir())
     st = load(d)
@@ -1983,6 +2465,7 @@ def cmd_task(a):
             **({"urgent": True, "urgent_minutes": a.urgent_minutes if a.urgent_minutes is not None else st.get("prefs", {}).get("urgent_ack_minutes", 5)}
                if getattr(a, "urgent", False) or getattr(a, "urgent_minutes", None) is not None else {}),
         }
+        area = area_of_task(st, st["tasks"][a.id])
         task_dir = d / "tasks"; task_dir.mkdir(exist_ok=True)
         (task_dir / f"{a.id}.md").write_text(f"# {a.id}\n\nGoal: {a.title or a.id}\n" + (f"Brief: {a.brief}\n" if getattr(a, "brief", None) else "") + f"Done when: {a.accept or '-'}\n" + (f"\n{lab(st, 'original_words')}: {said}\n" if said else ""), encoding="utf-8")
         save(d, st, {"ev": "task-add", "task": a.id, "owner": a.owner})
@@ -1992,6 +2475,15 @@ def cmd_task(a):
         warn = topic_mismatch(st, a.owner, a.title)  # no --title: nothing to compare yet
         if warn:
             print(warn, file=sys.stderr)
+        task = st.get("tasks", {}).get(a.id)
+        if task and task.get("topics"):
+            area = area_of_task(st, task)
+            related = any(q.get("category") in ("bug", "correction") and q.get("status") not in REQ_END + ("wont",)
+                          and q.get("area") == area for q in st.get("requests", {}).values()) or any(
+                              area_of_task(st, other) == area and other.get("rework_at")
+                              for other in st.get("tasks", {}).values())
+            if related and (area not in st.get("areas", {}) or st.get("areas",{}).get(area,{}).get("implicit")):
+                print(lab(st,"root_suggest",topic=task["topics"][0],paths=",".join(task.get("touches",[])) or "<paths>"),file=sys.stderr)
     else:
         if a.id not in st["tasks"]:
             sys.exit(f"unknown task {a.id}")
@@ -2030,6 +2522,24 @@ def cmd_task(a):
             if a.status not in allowed:
                 sys.exit(f"{a.id} is {cur}: it can move to {', '.join(sorted(allowed)) or 'nothing (it has ended)'}"
                          + (" (done only from review)" if a.status == "done" else ""))
+            if a.status == "dispatched" and st.get("prefs", {}).get("root_mode", "on") == "on":
+                proposed = dict(k)
+                if a.topics is not None: proposed["topics"] = norm_topics(a.topics)
+                if a.touches is not None: proposed["touches"] = check_touches(a.touches)
+                area = area_of_task(st, proposed); state = radar(st).get(area, {}).get("state", "ok")
+                if state in ("pending", "reviewing", "asked"):
+                    said=(getattr(a,"user_said",None) or "").strip()
+                    urgent=urgent_words(said)
+                    if not getattr(a,"hotfix",None) and not urgent: sys.exit(lab(st,"root_gate",task=a.id,area=area,state=lab(st,"root_"+state),next=root_next(state,area)))
+                    why=said if urgent else a.hotfix
+                    if not urgent: print("hotfix dispatched; debt recorded",file=sys.stderr)
+                    st.setdefault("areas",{}).setdefault(area,{"paths":[],"aka":[],"state":state,"baseline":now(),"rc":0,"debt":[],"dismissed":[],"history":[]}).setdefault("debt",[]).append({"task":a.id,"why":why,"at":now(),"user_said":said or None,"kind":"hotfix"})
+                    k["fix_kind"]="patch"
+                elif state == "patched":
+                    k["fix_kind"]="patch"
+                    rec=st.setdefault("areas", {}).setdefault(area, {"paths":[],"aka":[],"state":"patched","baseline":"","rc":0,"debt":[]})
+                    rec.setdefault("debt", []).append({"task":a.id,"at":_later_than(now(),rec.get("answered_at") or rec.get("asked")),"kind":"patch"})
+                elif state == "rooting" and k.get("fix_kind") != "root": k["fix_kind"]="patch"
         if cur in ("done", "dropped") and any(x is not None for x in (a.owner, a.accept, a.deps)):
             sys.exit(f"{a.id} has ended ({cur}): its owner, 'done when' and deps are final")
         # 1. field edits first, so every check below sees the task as it will be stored
@@ -2226,6 +2736,8 @@ def cmd_task(a):
                 sys.exit(f"{a.id} has no 'done when': set --accept first (a review needs something to check against)")
             if k["status"] == "review" and a.status == "working":
                 void("rework after review")  # the old verdict no longer counts
+                k["rework"] = k.get("rework", 0) + 1
+                k.setdefault("rework_at", []).append(now())
                 if k.get("checks") == "pass" and a.checks is None:
                     k["checks"] = "none"  # green checks were for the old code
             if a.status == "working" and cur in ("review", "done"):  # rework: the earlier merge mark is stale
@@ -3127,6 +3639,9 @@ def cmd_ask(a):
         if not 1 <= n <= len(st["questions"]):
             sys.exit(f"no question {n}; questions are numbered 1..{len(st['questions'])} (see the board)")
         q = st["questions"][n - 1]
+        if q.get("kind") == "root":
+            area = q.get("area") or (q.get("areas") or [None])[0]
+            sys.exit(f"root question must be answered with `tw.py root answer {area} A|B|C --user-said \"<their words>\"`")
         if q.get("answered"):
             sys.exit(f"question {n} is already answered" + (f": {q['answer']}" if q.get("answer") else "")
                      + "; ask a new question if the user changed their mind")
@@ -3165,6 +3680,13 @@ def cmd_ask(a):
         if not what: sys.exit("default needs a description")
         q["defaulted"] = {"what": what, "at": now()}
         st.setdefault("decisions", []).append({"kind": "default", "question": n, "what": what, "at": now()})
+        if q.get("kind") == "root":
+            for area in q.get("areas", [q.get("area")]):
+                if not area: continue
+                ar=st.setdefault("areas",{}).setdefault(area,{"paths":[],"aka":[],"state":"asked","baseline":"","rc":0,"debt":[],"dismissed":[],"history":[]})
+                if area in q.get("area_answers", {}) or q.get("withdrawn") or ar.get("state") == "ok": continue
+                ar.update(state="patched",root_pending=True,defaulted_at=now())
+                ar.setdefault("debt",[]).append({"kind":"default-C","by_default":True,"at":now()})
         save(d, st, {"ev": "default", "n": n})
     else:
         a.text = (a.text or "").strip()
@@ -3357,6 +3879,16 @@ def _when(text):
         return None
     return t if t.tzinfo else t.astimezone()
 
+def thread_corrections(st, th):
+    task_ids={tid for tid,t in st.get("tasks",{}).items() if t.get("owner")==th}
+    corrections=sum(1 for q in st.get("requests",{}).values()
+                    if q.get("category")=="correction" and task_ids.intersection(q.get("tasks") or []))
+    failed=sum(1 for t in st.get("tasks",{}).values() if t.get("owner")==th
+               for r in ([t.get("review")] + (t.get("past_reviews") or []))
+               if isinstance(r,dict) and r.get("result")=="fail")
+    dissatisfaction=st.get("signals",{}).get(th,{}).get("counts",{}).get("dissatisfaction",0)
+    return corrections+failed+dissatisfaction
+
 
 def _later(text, since):
     t = _when(text) if text else None
@@ -3382,6 +3914,11 @@ def cmd_wrapup(a):
     d = need(find_dir()); st = load(d); rows = _run_reconcile(st); save(d, st, {"ev": "reconcile"})
     p = st.get("prefs", {}); limit = p.get("stuck_minutes", STUCK_DEFAULT); cur = dt.datetime.fromisoformat(now())
     original_cover = []
+    root_since=st.get("root_since") or st.get("created") or ""
+    unassigned=[f"{rid}: {req.get('text','')}" for rid,req in st.get("requests",{}).items()
+                if req.get("category") in ("bug","correction") and not req.get("area")
+                and req.get("status") not in REQ_END+("wont",) and (req.get("created") or "") > root_since]
+    if unassigned: original_cover.append(lab(st,"rc_unassigned_area") + ": " + "; ".join(unassigned))
     for rid, req in st.get("requests", {}).items():
         linked = [tid for tid, task in st.get("tasks", {}).items()
                   if task.get("status") == "done" and (tid in (req.get("tasks") or []) or rid in (task.get("requests") or []))]
@@ -3459,7 +3996,7 @@ def cmd_card(a):
     done = [f"{i} {f.get('name', '')}" for i, f in feats.items() if f.get("status") == "landed" and _later(f.get("landed_at"), since)]
     done += [f"{i} {q.get('text', '')}" for i, q in reqs.items() if q.get("status") in ("reported", "landed") and _later(q.get("updated"), since)]
     doing = [f"{i} {f.get('name', '')}" for i, f in feats.items() if f.get("status") == "building"]
-    doing += [f"{i} {t.get('title', '')}" for i, t in tasks.items() if t.get("status") in ("dispatched", "working")]
+    doing += [f"{lab(st, 'root_patch_tag') if t.get('fix_kind') == 'patch' else lab(st, 'root_fix_tag') if t.get('fix_kind') == 'root' else ''}{i} {t.get('title', '')}" for i, t in tasks.items() if t.get("status") in ("dispatched", "working")]
     waiting = [f"{i} {q.get('text', '')}" for i, q in reqs.items() if q.get("status") == "waiting_user"]
     for n, q in enumerate(st.get("questions", []), 1):
         if not q.get("answered"):  # a question that took its default still waits for the user's word
@@ -3761,6 +4298,16 @@ def cmd_check_msg(a):
         prose = re.sub(r"`[^`\n]*`", "", re.sub(r"```.*?(?:```|\Z)", "", body, flags=re.S))  # code is not prose
         d = find_dir()
         st = load(d) if d and (d / "state.json").exists() else None
+        if st:
+            roots = radar(st)
+            warned = set()
+            for tid in re.findall(r"\bT\d+(?:-f\d+)*\b", raw):
+                task = st.get("tasks", {}).get(tid)
+                area = area_of_task(st, task) if task else None
+                state = roots.get(area, {}).get("state", "ok") if area else "ok"
+                if state in ("pending", "reviewing", "asked") and area not in warned:
+                    print(lab(st, "root_check_msg", area=area, state=lab(st, "root_" + state)), file=sys.stderr)
+                    warned.add(area)
         m = re.fullmatch(r"(?i)\[tw:([^\]\s]+)\] ([A-Z-]+) (\S+) -> (\S+) (\S+)", head)
         if not m:
             add("header", "first line must be `[tw:<short>] <TYPE> <from> -> <to> <task id or ->` (one task id); "
@@ -3984,6 +4531,9 @@ def cmd_task_msg(a):
     d = need(find_dir()); st = load(d)
     if a.id not in st["tasks"]: sys.exit(f"unknown task {a.id}")
     k = st["tasks"][a.id]
+    area=area_of_task(st,k); roots=radar(st); root_line=None
+    if area and roots.get(area,{}).get("state") not in (None,"ok"):
+        root_line=lab(st,"root_task_line",area=area,state=lab(st,"root_"+roots[area]["state"]))
     dispatch_model = _task_dispatch_model(st, a.id)
     if dispatch_model and dispatch_model.get("status"):
         print(dispatch_model["status"], file=sys.stderr)
@@ -4002,6 +4552,7 @@ def cmd_task_msg(a):
     owner = k.get("owner") or "?"; v = int(k.get("dispatch_v") or 0)
     lines = [f"[tw:{tag(st)}] TASK lead -> {owner} {a.id}", f"Goal: {k.get('title') or a.id}",
              *([f"Brief: {k['brief']}"] if k.get("brief") and k.get("brief") != k.get("title") else []), f"Done when: {k.get('accept') or '-'}"]
+    if root_line: lines.append(root_line)
     route = (dispatch_model or {}).get("model") or k.get("route") or k.get("model")
     if route: lines.append(f"Route/Model: {route}" + (f" — {dispatch_model['reason']}" if dispatch_model and dispatch_model.get("reason") else ""))
     lines.append(f"Dispatch: v{v}")
@@ -4098,6 +4649,8 @@ def cmd_threads(a):
             if x.get("stuck_on"): line += " — " + lab(st, "stuck_" + x["stuck_on"])
             elif x["thread"] in stuck: line += " — " + lab(st, "no_report", m=stuck[x["thread"]])
             if x.get("screening"): line += " — " + x["screening"]
+            if thread_corrections(st,x["thread"]) >= st.get("prefs",{}).get("root_fresh_at",3):
+                line += " — " + lab(st,"root_fresh_hint",thread=x["thread"])
             out.append(line)
     done = [x for x in rows["other"] if x["status"] in ("idle", "resolved")]
     for x in rows["other"]:
@@ -4609,6 +5162,10 @@ def cmd_prefs(a):
             sys.exit("notice_merge: thread or none")
         if k == "screen_mode" and v not in ("shadow", "off"):
             sys.exit("screen_mode: shadow or off")
+        if k == "root_mode" and v not in ("on", "off"):
+            sys.exit("root_mode: on or off")
+        if k.startswith("root_") and k != "root_mode" and (not v.isdigit() or int(v) < 1):
+            sys.exit(f"{k}: a positive whole number")
         if k in ("signals_red_at", "relay_max_per_day", "succ_watchdog_minutes") and (not v.isdigit() or int(v) < 1):
             sys.exit(f"{k}: a positive whole number")
         if k == "archive_idle_days" and (not v.isdigit() or int(v) < 1):
@@ -4623,7 +5180,7 @@ def cmd_prefs(a):
                 sys.exit("gpt_private: use a comma list or JSON string list")
             st["prefs"][k] = [item.strip() for item in parsed if item.strip()]
             continue
-        if k in ("check_cmd", "language", "short_name", "thread_permission_mode", "skill_edge", "spawn_policy", "perm_policy", "gpt_policy", "screen_mode"):
+        if k in ("check_cmd", "language", "short_name", "thread_permission_mode", "skill_edge", "spawn_policy", "perm_policy", "gpt_policy", "screen_mode", "root_mode"):
             st["prefs"][k] = v  # text, never coerced (check_cmd=true is a command)
         elif isinstance(cur, bool) or v.lower() in ("true", "false", "yes", "no", "on", "off"):
             st["prefs"][k] = v.lower() in ("1", "true", "yes", "on")
@@ -5627,10 +6184,17 @@ def cmd_req(a):
         if kind != "request" and tasks: sys.exit(lab(st, "req_not_request"))
         check_tasks(st, tasks)
         check_never_raise(d, " ".join(a.args), getattr(a, "override", None))
-        q = {"text": " ".join(a.args), "status": "remark" if a.remark or kind != "request" else "open", "kind": kind,
+        text = " ".join(a.args)
+        auto_area = next((n for n, ar in st.get("areas",{}).items() if (a.where or "").lower() in {n.lower(), *(x.lower() for x in ar.get("aka",[]))}), None)
+        if not (getattr(a,"area",None) or auto_area):
+            auto_area=next((area_of_task(st,st["tasks"][tid]) for tid in tasks if area_of_task(st,st["tasks"][tid])),None)
+        category=_norm_category(a.category)
+        q = {"text": text, "status": "remark" if a.remark or kind != "request" else "open", "kind": kind,
              "tasks": [] if (a.remark or a.kind != "request") else tasks, "where": a.where or "",
              "followup": a.followup or "", "created": now(), "updated": now(),
-             **{k: getattr(a, k) for k in ("phase", "category") if getattr(a, k)}}
+             **{k: (category if k=="category" else getattr(a,k)) for k in ("phase", "category") if getattr(a, k)},
+             **({"area": _area_key(st,a.area) if getattr(a,"area",None) else auto_area} if (getattr(a,"area",None) or auto_area) else {}),
+             **({"patchy": True} if patchy_text(text) and (not category or category in ("bug","correction")) else {})}
         reqs[r] = q
         if tasks and not a.remark:
             q["status"] = "dispatched"
@@ -5654,6 +6218,8 @@ def cmd_req(a):
             sys.exit("usage: req link R<n> T1 [T2 ...]")
         check_tasks(st, tasks)
         q["tasks"] = list(dict.fromkeys(q.get("tasks", []) + tasks))
+        if not q.get("area") and tasks:
+            q["area"]=next((area_of_task(st,st["tasks"][tid]) for tid in tasks if area_of_task(st,st["tasks"][tid])),None)
         if q["status"] in REQ_END:
             sys.exit(f"{r} has ended ({q['status']}); register a new request instead")
         if q["status"] in ("reported", "landed"):
@@ -5685,10 +6251,12 @@ def cmd_req(a):
             sys.exit(f"{r} has no tasks: link the work first (`req link {r} T<n>`), which dispatches it")
         if was_held and a.status == "dispatched":
             deliver_ready(st)  # back from held after the work finished meanwhile (rework stays dispatched)
-        for k in ("where", "followup", "text", "phase", "category"):
+        for k in ("where", "followup", "text", "phase", "category", "area"):
             v = getattr(a, k)
             if v is not None:
-                q[k] = v
+                q[k] = _area_key(st,v) if k=="area" else _norm_category(v) if k=="category" else v
+        if patchy_text(q.get("text", "")) and q.get("category") in (None,"bug","correction"): q["patchy"] = True
+        else: q.pop("patchy",None)
     elif a.action in ("close", "drop"):
         drop = a.action == "drop" or a.declined
         a.user_said = (a.user_said or "").strip()
@@ -7463,7 +8031,8 @@ def _blank_state(project, folder):
             "promises": [], "notices": [], "archive": {}, "spawn_refusals": [],
             "prefs": {"max_parallel": 0, "propose_before_start": True, "update_detail": "brief", "checkin_minutes": 10,
                       "require_review": True, "archive_idle_days": 3, "screen_mode": "shadow", "signals_red_at": 3,
-                      "relay_max_per_day": 2}}
+                      "relay_max_per_day": 2, "root_mode": "on", "root_symptoms_at": 2, "root_rework_at": 2,
+                      "root_full_at": 4, "root_debt_at": 2, "root_fresh_at": 3}}
 
 
 def _blank_thread(st, name, kind="rc"):
@@ -7539,6 +8108,7 @@ def _replay(st, e, project, notes, d):
             for k, v in e["snap_meta"].items():
                 if v is not None:
                     st[k] = v
+        if isinstance(e.get("snap_areas"), dict): st["areas"] = e["snap_areas"]
         if isinstance(e.get("snap_screens"), dict): st["screens"] = e["snap_screens"]
         if isinstance(e.get("snap_handovers"), dict): st["handovers"] = e["snap_handovers"]
         if "snap_write_lock" in e:
@@ -8970,6 +9540,19 @@ def main():
                    help="project folder to act on (always pass it: several projects can share one Remote Control folder)")
     s = p.add_subparsers(dest="cmd", required=True)
 
+    x = s.add_parser("area", help="register task areas")
+    x.add_argument("action", choices=["add", "set", "list", "merge"]); x.add_argument("name", nargs="?", default="")
+    x.add_argument("to", nargs="?"); x.add_argument("--paths"); x.add_argument("--aka"); x.set_defaults(f=cmd_area)
+    x = s.add_parser("root", help="root cause review and correction workflow")
+    x.add_argument("action", choices=["list","show","start","check","ask","answer","spec","handoff","fresh","dismiss","move","done","scan"])
+    x.add_argument("area", nargs="?", default=""); x.add_argument("choice", nargs="?"); x.add_argument("area_req", nargs="?")
+    x.add_argument("--recommend", choices=["A","B","C"]); x.add_argument("--why"); x.add_argument("--cost"); x.add_argument("--root")
+    x.add_argument("--user-said"); x.add_argument("--req"); x.add_argument("--check", action="store_true")
+    x.add_argument("--to"); x.add_argument("--task"); x.add_argument("--thread"); x.set_defaults(f=cmd_root)
+    x.add_argument("--all", dest="all_areas", action="store_true"); x.add_argument("--area", dest="move_area")
+    x.add_argument("--backfill", action="store_true")
+    x.add_argument("--append", action="store_true")
+
     x = s.add_parser("feature", help="feature ledger")
     x.add_argument("action", choices=["add", "set", "list"]); x.add_argument("name", nargs="?", default="")
     x.add_argument("--phase"); x.add_argument("--req", action="append", nargs="+"); x.add_argument("--task", action="append", nargs="+")
@@ -9068,6 +9651,7 @@ def main():
     x.add_argument("--no-scripts", action="store_true", help="write this by hand, no generating scripts (IL-31)")
     x.add_argument("--scripts-ok", action="store_true", help="set: clear --no-scripts")
     x.add_argument("--status")
+    x.add_argument("--hotfix", metavar="WHY", help="dispatch once through a root review gate and record debt")
     x.add_argument("--notes")
     x.add_argument("--dispatch-v", type=int, help="set: reject a late review result from an older dispatch")
     x.add_argument("--merged", metavar="SHA", help="set: the commit this task's work was merged as (the board's "
@@ -9292,6 +9876,7 @@ def main():
     x.add_argument("--kind", choices=["request", "example", "remark", "hypothetical"], default="request")
     x.add_argument("--override", metavar="WORDS", help="add: the user's words that allow a never-raise topic")
     x.add_argument("--where"); x.add_argument("--followup"); x.add_argument("--text")
+    x.add_argument("--area")
     x.add_argument("--phase", help="add/set: the phase it belongs to, for the full requirement list (IL-38)")
     x.add_argument("--category", help="add/set: e.g. goal, constraint, feature (IL-38)")
     x.add_argument("--user-said", metavar="WORDS", help="close/drop, and moves that are the user's decision: "

@@ -95,18 +95,55 @@ def _later_than(stamp, previous):
 # Board / status labels follow prefs.language (en fallback).
 LABELS = {
     "en": {
-        "root_heading": "Root cause", "root_pending": "pending root review", "root_reviewing": "reviewing",
+        "root_heading": "Root cause", "root_ok": "ok", "root_pending": "pending root review", "root_reviewing": "reviewing",
         "root_asked": "asked", "root_rooting": "root fix in progress", "root_patched": "patch debt",
-        "root_implicit": "(unregistered)", "root_gate": "{task}: root review for {area} is {state}; next: `tw.py {next}`",
+        "root_implicit": "(unregistered)", "root_gate": "{task}: root review for {area} is {state}; next: {next}",
         "root_question": "{area} has had {n} related failures; the shared root is {root}. A: fix the cause ({cost}); B: patch now and record debt; C: patch first, then fix the cause. Recommended: {rec}, because {why}. Reply A, B or C.",
         "root_suggest": "Unregistered area candidate: `tw.py area add {topic} --paths {paths}`",
         "root_patch_tag": "[patch] ", "root_fix_tag": "[root fix] ", "root_default_note": " (defaulted; root cause waiting for user)",
         "root_check_msg": "warning root {area}: status {state}; root review is still pending",
         "root_area_col": "Area", "root_state_col": "State",
-        "root_symptoms_col": "Symptoms", "root_rework_col": "Rework", "root_debt_col": "Debt", "root_review_col": "Review", "root_next_col": "Next",
+        "root_symptoms_col": "Symptoms", "root_symptom_id_col": "ID", "root_symptom_source_col": "Source", "root_symptom_words_col": "Original words",
+        "root_extra": "extra", "root_rework_col": "Rework", "root_debt_col": "Debt", "root_review_col": "Review", "root_next_col": "Next",
         "s_symptoms": "symptoms", "s_rework": "rework",
         "root_task_line": "Root review for {area}: {state}", "rc_unassigned_area": "Unassigned area",
         "root_fresh_hint": "suggested clean session: tw.py root fresh {thread}",
+        "root_s_symptoms": "symptoms", "root_s_rework": "rework", "root_s_debt": "debt", "root_s_next": "next",
+        "root_start_refused": "root start refused: current state is {state}; next step: {next}",
+        "root_started": "root review already started", "root_unknown_area": "unknown area; register it with area add",
+        "root_scan_line": "{area}: {n} symptoms", "root_list_line": "{area}{implicit}: {state}; symptoms={symptoms}; rework={rework}; debt={debt}; next={next}",
+        "root_ask_args": "root ask requires --why, --cost and --root", "root_ask_skip": "skip {area}: root check/state/debt prerequisites not met",
+        "root_ask_none": "no checked, unasked root reviews", "root_check_active": "root check requires an active reviewing RC",
+        "root_check_fill": "root review still has {fill}", "root_ask_state": "root ask requires reviewing, patched, or pending state",
+        "root_check_before_ask": "root check must pass before ask", "root_already_asked": "already asked",
+        "root_answer_choice": "root answer choice must be A, B, or C", "root_answer_user_said": "root answer requires --user-said",
+        "root_answer_question": "root answer requires an existing root question", "root_answer_state": "root answer requires asked or pending patch state",
+        "root_answer_missing": "root answer question is missing", "root_answer_mismatch": "root answer question does not match this area",
+        "root_dismiss_why": "root dismiss requires --why", "root_move_usage": "root move Rn --area AREA",
+        "root_done_gate": "root done requires its merged done root task while rooting", "root_handoff_gate": "rooting and checked spec are required; default is not approval",
+        "root_unmapped": "unmapped: {items}", "root_handoff_args": "handoff requires an area task and --to thread --task Tn",
+        "root_spec_header": "Root specification: {path}", "root_specs_header": "Specifications:",
+        "root_fresh_check": "root spec {area} must pass root spec --check before fresh", "root_fresh_spec": "run root spec {area} first",
+        "root_spec_sections": "spec requires Specification and User correction mapping sections", "root_spec_fill": "spec still has {fill} in Specification",
+        "root_spec_line": "spec needs at least one nonempty L line", "root_spec_append": "root spec --append requires an existing spec",
+        "root_spec_no_new": "no new root corrections to append", "root_spec_no_table": "spec has no correction mapping table",
+        "root_spec_check_first": "root check must pass after the last root answer before spec",
+        "root_root_heading": "Shared root", "root_invariant_heading": "Invariant", "root_scenario_heading": "Failure scenarios and tests",
+        "root_solution_heading": "Approach", "root_code_heading": "Related existing code (file:line)",
+        "root_reference_heading": "Mature solution references", "root_guarantee_heading": "What must hold",
+        "root_full_scenario_heading": "All failure scenarios", "root_scenario_state_heading": "Current state per scenario (file:line)",
+        "root_plan_heading": "Overall approach and acceptance tests", "root_compat_heading": "Backward compatibility",
+        "root_spec_heading": "Specification", "root_correction_heading": "User correction mapping", "root_retro_heading": "Review summary",
+        "root_spec_col_no": "C#", "root_spec_col_req": "Source R#", "root_spec_col_original": "Original words",
+        "root_spec_col_line": "Spec line", "root_spec_col_reason": "Reason not to adopt",
+        "root_scenario_col": "Scenario", "root_scenario_symptom": "Related symptom", "root_scenario_current": "Current state (file:line)", "root_scenario_test": "Test name",
+        "root_spec_unmapped": "unmapped: {items}", "root_answer_prompt": "root question must be answered with `tw.py root answer {area} A|B|C --user-said \"<their words>\"`",
+        "root_next_pending": "tw.py root start {area}", "root_next_reviewing": "tw.py root check {area}", "root_next_asked": "wait for user",
+        "root_next_rooting": "tw.py root spec {area}", "root_next_patched": "review debt", "root_next_unknown": "-", "root_spec_exists": "spec already exists",
+        "root_mode_error": "root_mode: on or off", "root_area_required": "area name required", "root_area_unknown": "unknown area",
+        "root_level": "Level", "root_blank": "<fill>", "root_scenario_missing": "Failure scenarios section is missing", "root_scenario_empty": "Scenario table has no rows",
+        "root_scenario_symptom_missing": "Symptom {symptom} is missing from scenarios", "root_scenario_columns": "Scenario row has fewer than four columns",
+        "root_scenario_test_missing": "Scenario test name is empty or a placeholder",
         "planned": "Suggested (no session yet)", "starting": "Created, first turn not finished",
         "working": "Working", "waiting": "Waiting on you (question, permission prompt, or failure)",
         "review": "Ready for review", "landing": "Landing (approved, being merged)",
@@ -310,18 +347,55 @@ LABELS = {
         "succ_abort_user": "Handover {id} did not complete ({reason}); I will continue here.", "succ_abort_threads": "Continue sending messages to me as before.", "succ_abort_candidate": "Candidate: stop work; this handover was cancelled.",
     },
     "zh": {
-        "root_heading": "根因", "root_pending": "待根因", "root_reviewing": "复盘中",
+        "root_heading": "根因", "root_ok": "正常", "root_pending": "待根因", "root_reviewing": "复盘中",
         "root_asked": "已问", "root_rooting": "根治中", "root_patched": "补丁债",
-        "root_implicit": "（未登记）", "root_gate": "{task}：区域 {area} 正在{state}；下一步运行 `tw.py {next}`",
+        "root_implicit": "（未登记）", "root_gate": "{task}：区域 {area} 处于「{state}」，先别派发；下一步：{next}",
         "root_question": "{area} 已出现 {n} 次相关问题，共同根因是 {root}。A：根治（约 {cost}）；B：先补丁并记债；C：先补丁后根治。推荐 {rec}，因为 {why}。回复 A、B 或 C。",
         "root_suggest": "未登记区域建议：`tw.py area add {topic} --paths {paths}`",
         "root_patch_tag": "【补丁】", "root_fix_tag": "【根治】", "root_default_note": "（按默认，根因待用户）",
         "root_check_msg": "警告：区域 {area} 状态为{state}，根因复盘仍待处理",
         "root_area_col": "区域", "root_state_col": "状态",
-        "root_symptoms_col": "症状", "root_rework_col": "返工", "root_debt_col": "债", "root_review_col": "复盘", "root_next_col": "下一步",
+        "root_symptoms_col": "症状", "root_symptom_id_col": "编号", "root_symptom_source_col": "来源", "root_symptom_words_col": "原话",
+        "root_extra": "补", "root_rework_col": "返工", "root_debt_col": "债", "root_review_col": "复盘", "root_next_col": "下一步",
         "s_symptoms": "症状", "s_rework": "返工",
         "root_task_line": "根因复盘：区域 {area} 状态为{state}", "rc_unassigned_area": "未分配区域",
         "root_fresh_hint": "建议换干净会话：tw.py root fresh {thread}",
+        "root_s_symptoms": "症状", "root_s_rework": "返工", "root_s_debt": "债", "root_s_next": "下一步",
+        "root_start_refused": "根因复盘无法开始：当前状态是{state}；下一步：{next}",
+        "root_started": "根因复盘已开始", "root_unknown_area": "未知区域；请先用 area add 登记",
+        "root_scan_line": "{area}：{n} 个症状", "root_list_line": "{area}{implicit}：{state}；症状 {symptoms}；返工 {rework}；债 {debt}；下一步 {next}",
+        "root_ask_args": "请补齐 --why、--cost 和 --root", "root_ask_skip": "跳过 {area}：根因复盘或债务条件未满足",
+        "root_ask_none": "没有可提问的已检查根因复盘", "root_check_active": "当前没有进行中的根因复盘可检查",
+        "root_check_fill": "根因复盘还没填完：{fill}", "root_ask_state": "只有复盘中、有补丁债或待复盘时才能提问",
+        "root_check_before_ask": "根因检查通过后才能提问", "root_already_asked": "这个根因问题已经问过",
+        "root_answer_choice": "选项只能是 A、B 或 C", "root_answer_user_said": "请用 --user-said 记录用户原话",
+        "root_answer_question": "没有待回答的根因问题", "root_answer_state": "当前状态不能回答这个根因问题",
+        "root_answer_missing": "找不到对应的根因问题", "root_answer_mismatch": "这个问题不属于该区域，或已回答",
+        "root_dismiss_why": "请用 --why 说明为何结束根因复盘", "root_move_usage": "用法：root move Rn --area AREA",
+        "root_done_gate": "只有根治中的已合并根因任务才能结束复盘", "root_handoff_gate": "根因复盘和规格检查都要通过，默认操作不算批准",
+        "root_unmapped": "以下用户纠正尚未映射：{items}", "root_handoff_args": "交接需要该区域的任务，并提供 --to 线程名 和 --task 任务号",
+        "root_spec_header": "根因规格：{path}", "root_specs_header": "根因规格：",
+        "root_fresh_check": "先通过 {area} 的 root spec --check，再换会话", "root_fresh_spec": "请先运行 root spec {area}",
+        "root_spec_sections": "规格文件缺少“规格”或“用户纠正映射”章节", "root_spec_fill": "规格章节还有待填写项：{fill}",
+        "root_spec_line": "规格至少要有一条非空的 L 行", "root_spec_append": "追加前请先生成根因规格",
+        "root_spec_no_new": "没有新的用户纠正需要追加", "root_spec_no_table": "规格里没有用户纠正映射表",
+        "root_spec_check_first": "最后一次根因回答后，请重新通过 root check 才能生成规格",
+        "root_root_heading": "共同根因", "root_invariant_heading": "必须保证", "root_scenario_heading": "故障场景与测试",
+        "root_solution_heading": "方案", "root_code_heading": "相关现有代码（文件:行）",
+        "root_reference_heading": "成熟方案参考", "root_guarantee_heading": "要保证什么",
+        "root_full_scenario_heading": "故障场景全表", "root_scenario_state_heading": "每场景现状（文件:行）",
+        "root_plan_heading": "整体方案与验收测试", "root_compat_heading": "兼容旧数据和旧版本",
+        "root_spec_heading": "规格", "root_correction_heading": "用户纠正映射", "root_retro_heading": "复盘结论",
+        "root_spec_col_no": "编号", "root_spec_col_req": "来源请求", "root_spec_col_original": "用户原话",
+        "root_spec_col_line": "对应规格行", "root_spec_col_reason": "不采纳原因",
+        "root_scenario_col": "场景", "root_scenario_symptom": "对应症状", "root_scenario_current": "现状（文件:行）", "root_scenario_test": "测试名",
+        "root_spec_unmapped": "以下用户纠正尚未映射：{items}", "root_answer_prompt": "请用 `tw.py root answer {area} A|B|C --user-said \"<用户原话>\"` 回答根因问题",
+        "root_next_pending": "tw.py root start {area}", "root_next_reviewing": "tw.py root check {area}", "root_next_asked": "等用户回答",
+        "root_next_rooting": "tw.py root spec {area}", "root_next_patched": "检查补丁债", "root_next_unknown": "-", "root_spec_exists": "根因规格已存在",
+        "root_mode_error": "root_mode 只能设为 on 或 off", "root_area_required": "请填写区域名称", "root_area_unknown": "未知区域",
+        "root_level": "级别", "root_blank": "<填>", "root_scenario_missing": "缺少故障场景章节", "root_scenario_empty": "故障场景表没有内容",
+        "root_scenario_symptom_missing": "症状 {symptom} 未列入故障场景", "root_scenario_columns": "故障场景表有一行少于四列",
+        "root_scenario_test_missing": "测试名不能为空或占位符",
         "planned": "建议中（还没有会话）", "starting": "已创建，第一轮还没结束",
         "working": "进行中", "waiting": "等你处理（问题、权限弹窗或失败）",
         "review": "待审", "landing": "合并中（已批准）",
@@ -1275,7 +1349,7 @@ def render_board(st, all_threads=False):
             rec=st.get("areas",{}).get(area,{})
             state=lab(st,"root_"+v["state"])
             if rec.get("root_pending"): state += lab(st,"root_default_note")
-            out.append(f"| {area} | {state} | {len(v['symptoms'])} | {v['rework']} | {len(rec.get('debt',[]))} | {rec.get('rc',0) or '-'} | {root_next(v['state'],area)} |")
+            out.append(f"| {area} | {state} | {len(v['symptoms'])} | {v['rework']} | {len(rec.get('debt',[]))} | {rec.get('rc',0) or '-'} | {root_next(v['state'],area,st)} |")
         out.append("")
     reqs = render_requests(st, chain=True)
     if reqs:
@@ -2117,11 +2191,11 @@ def cmd_area(a):
     if a.action == "list":
         print(json.dumps(areas, ensure_ascii=False, indent=2)); return
     name = norm_topics(a.name)
-    if not name: sys.exit("area name required")
+    if not name: sys.exit(lab(st,"root_area_required"))
     name = name[0]
     if a.action == "merge":
         src, dst = a.name, a.to
-        if src not in areas or dst not in areas: sys.exit("unknown area")
+        if src not in areas or dst not in areas: sys.exit(lab(st,"root_area_unknown"))
         for rid, q in st.get("requests", {}).items():
             if q.get("area") == src: q["area"] = dst
             if (q.get("where") or "").lower() == src.lower(): q["area"] = dst
@@ -2184,21 +2258,44 @@ def _area_key(st, value):
             return name
     return key
 
+def _root_blank(st):
+    return lab(st, "root_blank")
+
+def _root_placeholder(value):
+    normalized = str(value).strip().lower().translate(str.maketrans({"＜": "<", "＞": ">"}))
+    return normalized in {"", "-", "x", "无", "none", "n/a", "na", "tbd", "待定", "todo", "<填>", "<fill>"}
+
+def _root_found_placeholder(text):
+    match = re.search(r"<填>|<fill>|＜填＞|＜fill＞", text, flags=re.IGNORECASE)
+    return match.group(0) if match else None
+
+def _root_sections(text, headings):
+    matches = list(re.finditer(r"(?m)^##\s+([^\n]+)\s*$", text))
+    found = []
+    for i, match in enumerate(matches):
+        if match.group(1).strip() not in headings: continue
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        found.append(text[match.end():end])
+    return found
+
 def _root_scenario_check(body, ids):
-    if "## 故障场景" not in body: return "故障场景 section missing"
-    scenarios = body.split("## 故障场景", 1)[1].split("\n## ", 1)[0]
+    headings = ("故障场景与测试", "故障场景全表", "Failure scenarios and tests", "All failure scenarios")
+    sections = _root_sections(body, headings)
+    if not sections: return "root_scenario_missing"
     data = []
-    for line in scenarios.splitlines():
-        if not line.strip().startswith("|"): continue
-        cols = [x.strip() for x in line.strip().strip("|").split("|")]
-        if len(cols) > 1 and re.fullmatch(r"S\d+", cols[1]): data.append(cols)
-    if not data: return "scenario table has no rows"
+    for scenarios in sections:
+        section_data = []
+        for line in scenarios.splitlines():
+            if not line.strip().startswith("|"): continue
+            cols = _md_table_cols(line)
+            if len(cols) > 1 and re.fullmatch(r"S\d+", cols[1]): section_data.append(cols)
+        if not section_data: return "root_scenario_empty"
+        data.extend(section_data)
     for i in range(1, len(ids) + 1):
-        if not any(row[1] == f"S{i}" for row in data): return f"S{i} missing from scenarios"
-    invalid = {"", "-", "无", "x", "<填>", "todo"}
+        if not any(row[1] == f"S{i}" for row in data): return ("root_scenario_symptom_missing", f"S{i}")
     for row in data:
-        if len(row) < 4: return "scenario row has fewer than four columns"
-        if row[3].strip().lower() in invalid: return "scenario test name is empty or placeholder"
+        if len(row) < 4: return "root_scenario_columns"
+        if _root_placeholder(row[3]): return "root_scenario_test_missing"
     return None
 
 def _md_table_cols(line):
@@ -2208,16 +2305,16 @@ def cmd_root(a):
     d = need(find_dir()); st = load(d); areas = st.setdefault("areas", {})
     view = radar(st)
     if a.action == "scan":
-        print("\n".join(f"{x}: {len(v['symptoms'])} symptoms" for x,v in view.items() if v["state"] == "pending") or "-" ); return
+        print("\n".join(lab(st,"root_scan_line",area=x,n=len(v['symptoms'])) for x,v in view.items() if v["state"] == "pending") or "-" ); return
     if a.action in ("list", "show"):
         names = [a.area] if a.action == "show" else [x for x,v in view.items() if a.all_areas or v["state"] != "ok"]
         for area in names:
             rec = areas.get(area, {"state":"ok", "debt":[]}); v=view.get(area, {"state":rec.get("state","ok"),"symptoms":[],"rework":0})
-            print(f"{area}{' '+lab(st,'root_implicit') if rec.get('implicit') else ''}: {v['state']}; symptoms={len(v['symptoms'])}; rework={v['rework']}; debt={len(rec.get('debt',[]))}; next={root_next(v['state'], area)}")
+            print(lab(st,"root_list_line",area=area,implicit=' '+lab(st,'root_implicit') if rec.get('implicit') else '',state=lab(st,'root_'+v['state']),symptoms=len(v['symptoms']),rework=v['rework'],debt=len(rec.get('debt',[])),next=root_next(v['state'],area,st)))
             if a.action == "show":
                 for rid in v["symptoms"]: print(f"  {rid} [{st['requests'][rid].get('category','')}] {st['requests'][rid].get('text','')}")
                 for tid,task in st.get("tasks",{}).items():
-                    if area_of_task(st,task)==area and task.get("rework_at"): print(f"  {tid} rework={len(task['rework_at'])}")
+                    if area_of_task(st,task)==area and task.get("rework_at"): print(f"  {tid} {lab(st,'root_s_rework')}={len(task['rework_at'])}")
                 for issue in st.get("issues",[]):
                     text=" ".join(str(issue.get(k,"")) for k in ("title","text","note"))
                     if any(alias.lower() in text.lower() for alias in [area,*rec.get("aka",[])]): print(f"  issue {issue.get('id','')}: {text}")
@@ -2226,15 +2323,15 @@ def cmd_root(a):
                         print(f"  {rid} user: {said.get('text','') if isinstance(said,dict) else said}")
         return
     if a.action == "ask" and getattr(a,"all_areas",False):
-        if not all((a.recommend,a.why,a.cost,a.root)): sys.exit("root ask requires --recommend, --why, --cost and --root")
+        if not all((a.recommend,a.why,a.cost,a.root)): sys.exit(lab(st,"root_ask_args"))
         eligible=[]
         for n,r in areas.items():
             path=_root_path(d,n,r.get("rc",0)); body=path.read_text(encoding="utf-8") if path.exists() else ""
             debt=sum(x.get("kind") in ("hotfix","patch") and x.get("at","") > (r.get("answered_at") or r.get("asked") or "") for x in r.get("debt",[]))
-            if r.get("state") not in ("reviewing","patched","pending") or not r.get("checked_at") or "<填>" in body or (r.get("asked") and debt < st.get("prefs",{}).get("root_debt_at",2)):
-                print(f"skip {n}: root check/state/debt prerequisites not met",file=sys.stderr); continue
+            if r.get("state") not in ("reviewing","patched","pending") or not r.get("checked_at") or "<填>" in body or "<fill>" in body or (r.get("asked") and debt < st.get("prefs",{}).get("root_debt_at",2)):
+                print(lab(st,"root_ask_skip",area=n),file=sys.stderr); continue
             eligible.append(n)
-        if not eligible: sys.exit("no checked, unasked root reviews")
+        if not eligible: sys.exit(lab(st,"root_ask_none"))
         texts=[]
         for n in eligible:
             texts.append(lab(st,"root_question",area=n,n=len(view.get(n,{}).get("symptoms",[])),root=a.root or "<fill>",
@@ -2245,47 +2342,54 @@ def cmd_root(a):
         save(d,st,{"ev":"root-ask-all","areas":eligible}); print(body); return
     area = _area_key(st, a.area) if a.action not in ("move",) else a.area
     if a.action not in ("move","fresh") and area not in areas:
-        if area not in view: sys.exit("unknown area; register it with area add")
+        if area not in view: sys.exit(lab(st,"root_unknown_area"))
         areas[area] = {"paths": [], "aka": [], "state": "ok", "baseline": st.get("created") or "", "rc": 0,
                        "debt": [], "asked": None, "question": None, "dismissed": [], "history": [], "implicit": True}
     rec = areas.get(area,{})
     if a.action == "start":
         if rec.get("state") == "reviewing" and rec.get("rc",0) and _root_path(d,area,rec["rc"]).exists():
-            sys.exit("root review already started")
+            sys.exit(lab(st,"root_started"))
         if rec.get("state") not in ("ok", "pending"):
-            nxt={"reviewing":"root check","asked":"wait for user answer","rooting":"root spec","patched":"review patch debt"}.get(rec.get("state"),"review the current state")
-            sys.exit(f"root start refused: current state is {rec.get('state')}; next step: {nxt} {area}" if nxt.startswith("root ") else f"root start refused: current state is {rec.get('state')}; next step: {nxt}")
+            shown_state=lab(st,"root_"+rec.get('state','ok'))
+            sys.exit(lab(st,"root_start_refused",state=shown_state,next=root_next(rec.get("state"),area,st)))
         rc=rec.get("rc",0)+1; path=_root_path(d,area,rc); path.parent.mkdir(parents=True,exist_ok=True)
-        if path.exists(): sys.exit("root review already started")
+        if path.exists(): sys.exit(lab(st,"root_started"))
         _archive_root_round(rec, "next-round")
         _withdraw_root_questions(st, area)
         rec["rc"]=rc; rec["state"]="reviewing"; rec["checked_at"]=None; rec["reraised"]=False
         v=view.get(area,{}); ids=v.get("symptoms",[]); level=v.get("level","light")
         rec["level"]=level
         rows="\n".join(f"| S{i} | {rid} | {st['requests'][rid].get('text','').replace('|',r'\\|').replace(chr(10),' ')} |" for i,rid in enumerate(ids,1)) or "| S1 | - | <填> |"
-        fields=["症状", "共同根", "要保证什么（不变量）", "故障场景与测试", "方案"] if level=="light" else ["症状", "共同根", "相关现有代码（文件:行）", "成熟方案参考", "要保证什么", "故障场景全表", "每场景现状（文件:行）", "整体方案+验收/测试", "兼容旧数据/旧版本"]
-        body=f"# {area} RC{rec['rc']}\n\n级别: {level}\n\n## 症状\n编号 | 来源 | 原话\n---|---|---\n{rows}\n"
+        fields=["root_symptoms_col", "root_root_heading", "root_invariant_heading", "root_scenario_heading", "root_solution_heading"] if level=="light" else ["root_symptoms_col", "root_root_heading", "root_code_heading", "root_reference_heading", "root_guarantee_heading", "root_full_scenario_heading", "root_scenario_state_heading", "root_plan_heading", "root_compat_heading"]
+        symptom_heading=lab(st,"root_symptoms_col"); scenario_heading=lab(st,"root_scenario_heading" if level=="light" else "root_full_scenario_heading")
+        symptom_header=" | ".join(lab(st,key) for key in ("root_symptom_id_col", "root_symptom_source_col", "root_symptom_words_col"))
+        body=f"# {area} RC{rec['rc']}\n\n{lab(st,'root_level')}: {level}\n\n## {symptom_heading}\n{symptom_header}\n---|---|---\n{rows}\n"
         for field in fields[1:]:
-            if field in ("故障场景与测试","故障场景全表"):
-                body += f"\n## {field}\n\n| 场景 | 对应症状 | 现状 文件:行 | 测试名 |\n|---|---|---|---|\n"
-                body += "\n".join(f"| <填> | S{i} | <填> | <填> |" for i in range(1,len(ids)+1)) or "| <填> | 补 | <填> | <填> |"
+            heading=lab(st,field)
+            if field in ("root_scenario_heading","root_full_scenario_heading"):
+                blank=_root_blank(st)
+                body += f"\n## {heading}\n\n| {lab(st,'root_scenario_col')} | {lab(st,'root_scenario_symptom')} | {lab(st,'root_scenario_current')} | {lab(st,'root_scenario_test')} |\n|---|---|---|---|\n"
+                body += "\n".join(f"| {blank} | S{i} | {blank} | {blank} |" for i in range(1,len(ids)+1)) or f"| {blank} | {lab(st,'root_extra')} | {blank} | {blank} |"
             else:
-                body += f"\n## {field}\n\n<填>\n"
+                body += f"\n## {heading}\n\n" + _root_blank(st) + "\n"
         path.write_text(body,encoding="utf-8"); save(d,st,{"ev":"root-start","area":area}); print(path); return
     if a.action == "check":
         path=_root_path(d,area,rec.get("rc",0)); body=path.read_text(encoding="utf-8") if path.exists() else ""
-        if rec.get("rc",0) < 1 or not path.exists() or not (rec.get("state") == "reviewing" or (rec.get("state")=="rooting" and rec.get("level")=="full")): sys.exit("root check requires an active reviewing RC")
-        if "<填>" in body: sys.exit("root review still has <填>")
+        if rec.get("rc",0) < 1 or not path.exists() or not (rec.get("state") == "reviewing" or (rec.get("state")=="rooting" and rec.get("level")=="full")): sys.exit(lab(st,"root_check_active"))
+        fill = _root_found_placeholder(body)
+        if fill: sys.exit(lab(st,"root_check_fill",fill=fill))
         ids=view.get(area,{}).get("symptoms",[])
         error=_root_scenario_check(body,ids)
-        if error: sys.exit(error)
+        if error:
+            if isinstance(error,tuple): sys.exit(lab(st,error[0],symptom=error[1]))
+            sys.exit(lab(st,error))
         rec["checked_at"]=now(); save(d,st,{"ev":"root-check","area":area}); return
     if a.action == "ask":
         path=_root_path(d,area,rec.get("rc",0)); body=path.read_text(encoding="utf-8") if path.exists() else ""
-        if not all((a.recommend,a.why,a.cost,a.root)): sys.exit("root ask requires --recommend, --why, --cost and --root")
-        if rec.get("state") not in ("reviewing", "patched", "pending"): sys.exit("root ask requires reviewing, patched, or pending state")
-        if not rec.get("checked_at") or "<填>" in body: sys.exit("root check must pass before ask")
-        if rec.get("asked") and sum(x.get("kind") in ("hotfix", "patch") and x.get("at","") > (rec.get("answered_at") or rec["asked"]) for x in rec.get("debt",[])) < st.get("prefs",{}).get("root_debt_at",2): sys.exit("already asked")
+        if not all((a.recommend,a.why,a.cost,a.root)): sys.exit(lab(st,"root_ask_args"))
+        if rec.get("state") not in ("reviewing", "patched", "pending"): sys.exit(lab(st,"root_ask_state"))
+        if not rec.get("checked_at") or _root_found_placeholder(body): sys.exit(lab(st,"root_check_before_ask"))
+        if rec.get("asked") and sum(x.get("kind") in ("hotfix", "patch") and x.get("at","") > (rec.get("answered_at") or rec["asked"]) for x in rec.get("debt",[])) < st.get("prefs",{}).get("root_debt_at",2): sys.exit(lab(st,"root_already_asked"))
         n=len(view.get(area,{}).get("symptoms",[])); text=lab(st,"root_question",area=area,n=n,root=a.root,cost=a.cost,rec=a.recommend,why=a.why)
         if rec.get("question") and isinstance(rec["question"],int) and 1 <= rec["question"] <= len(st.get("questions",[])):
             previous=st["questions"][rec["question"]-1]
@@ -2294,17 +2398,17 @@ def cmd_root(a):
         st.setdefault("questions",[]).append({"from":"lead","text":text,"t":now(),"answered":False,"kind":"root","area":area})
         rec.update(state="asked",asked=now(),question=len(st["questions"]),reraised=False); save(d,st,{"ev":"root-ask","area":area}); print(text); return
     if a.action == "answer":
-        if a.choice not in ("A", "B", "C"): sys.exit("root answer choice must be A, B, or C")
-        if not (a.user_said or "").strip(): sys.exit("root answer requires --user-said")
-        if not rec.get("question"): sys.exit("root answer requires an existing root question")
+        if a.choice not in ("A", "B", "C"): sys.exit(lab(st,"root_answer_choice"))
+        if not (a.user_said or "").strip(): sys.exit(lab(st,"root_answer_user_said"))
+        if not rec.get("question"): sys.exit(lab(st,"root_answer_question"))
         if rec.get("state") not in ("asked", "patched", "pending") and not rec.get("root_pending"):
-            sys.exit("root answer requires asked or pending patch state")
+            sys.exit(lab(st,"root_answer_state"))
         qn=rec["question"]
-        if not isinstance(qn,int) or not 1 <= qn <= len(st.get("questions",[])): sys.exit("root answer question is missing")
+        if not isinstance(qn,int) or not 1 <= qn <= len(st.get("questions",[])): sys.exit(lab(st,"root_answer_missing"))
         q=st["questions"][qn-1]
         qareas=q.get("areas") or [q.get("area")]
         answers=q.setdefault("area_answers",{})
-        if q.get("kind")!="root" or area not in qareas or area in answers: sys.exit("root answer question does not match this area")
+        if q.get("kind")!="root" or area not in qareas or area in answers: sys.exit(lab(st,"root_answer_mismatch"))
         answers[area]=a.user_said
         if set(answers) >= set(x for x in qareas if x): q.update(answered=True,answer=a.user_said)
         for older in st.get("questions",[]):
@@ -2317,18 +2421,22 @@ def cmd_root(a):
         if a.choice=="A":
             rec["level"]="full"
             rcpath=_root_path(d,area,rec.get("rc",0)); oldbody=rcpath.read_text(encoding="utf-8") if rcpath.exists() else ""
-            if "级别: light" in oldbody:
+            lights=[f"{LABELS[x]['root_level']}: light" for x in ("en","zh")]
+            if any(x in oldbody for x in lights):
                 existing={line[3:] for line in oldbody.splitlines() if line.startswith("## ")}
-                extras=["相关现有代码（文件:行）","成熟方案参考","每场景现状（文件:行）","兼容旧数据/旧版本"]
-                for heading in extras:
-                    if heading not in existing: oldbody += f"\n## {heading}\n\n<填>\n"
-                rcpath.write_text(oldbody.replace("级别: light","级别: full",1),encoding="utf-8")
+                extras=["root_code_heading","root_reference_heading","root_scenario_state_heading","root_compat_heading"]
+                blank=_root_blank(st)
+                for key in extras:
+                    heading=lab(st,key)
+                    if heading not in existing: oldbody += f"\n## {heading}\n\n{blank}\n"
+                for x in lights: oldbody=oldbody.replace(x,f"{lab(st,'root_level')}: full",1)
+                rcpath.write_text(oldbody,encoding="utf-8")
                 rec["checked_at"]=None
         if a.choice=="C": rec["patch_first"]=True
         if a.choice=="B": rec.setdefault("debt",[]).append({"kind":"choice-B","at":now()})
         save(d,st,{"ev":"root-answer","area":area,"choice":a.choice}); return
     if a.action == "dismiss":
-        if not (a.why or "").strip(): sys.exit("root dismiss requires --why")
+        if not (a.why or "").strip(): sys.exit(lab(st,"root_dismiss_why"))
         if a.req:
             rec.setdefault("dismissed",[]).append(a.req)
         else:
@@ -2338,29 +2446,29 @@ def cmd_root(a):
         save(d,st,{"ev":"root-dismiss","area":area}); return
     if a.action == "move":
         rid=area
-        if rid not in st.get("requests",{}) or not a.move_area: sys.exit("root move Rn --area AREA")
+        if rid not in st.get("requests",{}) or not a.move_area: sys.exit(lab(st,"root_move_usage"))
         st["requests"][rid]["area"]=_area_key(st,a.move_area); save(d,st,{"ev":"root-move","req":rid,"area":st["requests"][rid]["area"]}); return
     if a.action == "done":
         task=st.get("tasks",{}).get(a.task)
-        if rec.get("state")!="rooting" or not task or area_of_task(st,task)!=area or task.get("fix_kind")!="root" or task.get("status")!="done" or not (task.get("merged_sha") or task.get("merged_at")): sys.exit("root done requires its merged done root task while rooting")
+        if rec.get("state")!="rooting" or not task or area_of_task(st,task)!=area or task.get("fix_kind")!="root" or task.get("status")!="done" or not (task.get("merged_sha") or task.get("merged_at")): sys.exit(lab(st,"root_done_gate"))
         _withdraw_root_questions(st, area); _archive_root_round(rec,"done")
         rec.setdefault("history",[]).append({"kind":"done","debt":rec.get("debt",[]),"rc":rec.get("rc"),"at":now()}); rec.update(state="ok",baseline=now(),debt=[],reraised=False)
         save(d,st,{"ev":"root-done","area":area,"task":a.task}); return
     if a.action == "handoff":
         task=st.get("tasks",{}).get(a.task or "")
         if rec.get("state")!="rooting" or not rec.get("spec_checked_at") or rec.get("root_pending"):
-            sys.exit("rooting and checked spec are required; default is not approval")
+            sys.exit(lab(st,"root_handoff_gate"))
         specpath=_root_path(d,area,rec.get("rc",0)); specpath=specpath.with_name(specpath.stem+"-spec.md")
         specbody=specpath.read_text(encoding="utf-8") if specpath.exists() else ""
         missing=_unmapped_root_corrections(specbody,st,area,rec)
-        if missing: sys.exit("unmapped: "+", ".join(f"{rid}: {original}" for rid,original in missing))
-        if not task or area_of_task(st,task)!=area or not a.to or a.to not in st.get("threads",{}): sys.exit("handoff requires an area task and --to thread --task Tn")
+        if missing: sys.exit(lab(st,"root_unmapped",items=", ".join(f"{rid}: {original}" for rid,original in missing)))
+        if not task or area_of_task(st,task)!=area or not a.to or a.to not in st.get("threads",{}): sys.exit(lab(st,"root_handoff_args"))
         task["fix_kind"]="root"; task["root_spec"]=str(_root_path(d,area,rec.get("rc",0)).with_name(_root_path(d,area,rec.get("rc",0)).stem+"-spec.md"))
         save(d,st,{"ev":"root-handoff","area":area,"task":a.task})
         ns=argparse.Namespace(thread=a.to,prompt=True,leaving=None,reason=None); capture=io.StringIO()
         with contextlib.redirect_stdout(capture): cmd_handover(ns)
         spec_body=Path(task["root_spec"]).read_text(encoding="utf-8")
-        print(capture.getvalue().rstrip()+f"\n\nRoot specification: {task['root_spec']}\n\n{spec_body}")
+        print(capture.getvalue().rstrip()+f"\n\n{lab(st,'root_spec_header',path=task['root_spec'])}\n\n{spec_body}")
         return
     if a.action == "fresh":
         thread=a.area
@@ -2370,22 +2478,27 @@ def cmd_root(a):
             ar=area_of_task(st,t)
             arec=st.get("areas",{}).get(ar,{})
             if ar and arec.get("state")=="rooting":
-                if not arec.get("spec_checked_at"): sys.exit(f"root spec {ar} must pass root spec --check before fresh")
+                if not arec.get("spec_checked_at"): sys.exit(lab(st,"root_fresh_check",area=ar))
                 path=_root_path(d,ar,arec.get("rc",0)).with_name(_root_path(d,ar,arec.get("rc",0)).stem+"-spec.md")
-                if not path.exists(): sys.exit(f"run root spec {ar} first")
+                if not path.exists(): sys.exit(lab(st,"root_fresh_spec",area=ar))
                 specs.append((str(path),path.read_text(encoding="utf-8")))
         capture=io.StringIO()
         with contextlib.redirect_stdout(capture): cmd_handover(argparse.Namespace(thread=thread,prompt=True,leaving=None,reason=None))
-        print(capture.getvalue().rstrip()+("\n\nSpecifications:\n"+"\n\n".join(f"{path}\n{body}" for path,body in specs) if specs else "")); return
+        print(capture.getvalue().rstrip()+("\n\n"+lab(st,"root_specs_header")+"\n"+"\n\n".join(f"{path}\n{body}" for path,body in specs) if specs else "")); return
     if a.action == "spec":
         path=_root_path(d,area,rec.get("rc",0)); spec=path.with_name(path.stem+"-spec.md")
         if a.check:
             text=spec.read_text(encoding="utf-8") if spec.exists() else ""; bad=[]
-            if not spec.exists() or "## 规格" not in text or "## 用户纠正映射" not in text: sys.exit("spec requires 规格 and 用户纠正映射 sections")
-            specbody=text.split("## 规格",1)[1].split("## 用户纠正映射",1)[0]
-            if "<填>" in specbody: sys.exit("spec still has <填> in 规格")
-            spec_lines=set(re.findall(r"(?m)^\s*(L\d+)\s*[.:]\s*(\S.*)$",specbody))
-            if not spec_lines: sys.exit("spec needs at least one nonempty L line")
+            spec_sections = _root_sections(text, ("规格", "Specification"))
+            correction_sections = _root_sections(text, ("用户纠正映射", "User correction mapping"))
+            if not spec.exists() or not spec_sections or not correction_sections: sys.exit(lab(st,"root_spec_sections"))
+            spec_lines=set()
+            for specbody in spec_sections:
+                marker=_root_found_placeholder(specbody)
+                if marker: sys.exit(lab(st,"root_spec_fill",fill=marker))
+                lines=set(re.findall(r"(?m)^\s*(L\d+)\s*[.:]\s*(\S.*)$",specbody))
+                if not any(not _root_placeholder(value) for _,value in lines): sys.exit(lab(st,"root_spec_line"))
+                spec_lines.update((key,value) for key,value in lines if not _root_placeholder(value))
             found=set(); mapped_corrections=set()
             for line in text.splitlines():
                 cols=_md_table_cols(line)
@@ -2395,44 +2508,53 @@ def cmd_root(a):
                     found.add(cols[0])
                     mapped_corrections.add((cols[1],cols[2]))
                     mapped=re.search(r"\b(L\d+)\b",cols[3])
-                    reason=re.match(r"^用户[:：]\s*(\S.*)$",cols[4])
-                    if not (mapped and any(x[0]==mapped.group(1) for x in spec_lines)) and not reason: bad.append(cols[0])
+                    reason=re.match(r"^(?:用户|User)[:：:]\s*(\S.*)$",cols[4])
+                    has_line=bool(mapped and any(x[0]==mapped.group(1) for x in spec_lines))
+                    has_reason=bool(reason and not _root_placeholder(reason.group(1)))
+                    if not (has_line or has_reason): bad.append(cols[0])
             missing=set(rec.get("spec_rows",[]))-found
             bad.extend(sorted(missing))
             unmapped=_unmapped_root_corrections(text,st,area,rec)
             if bad or unmapped:
                 detail=[f"{rid}: {original}" for rid,original in unmapped]
-                sys.exit("unmapped: "+", ".join(bad+detail))
+                sys.exit(lab(st,"root_spec_unmapped",items=", ".join(bad+detail)))
             rec["spec_checked_at"]=now(); save(d,st,{"ev":"root-spec-check","area":area}); return
         if a.append:
-            if not spec.exists(): sys.exit("root spec --append requires an existing spec")
+            if not spec.exists(): sys.exit(lab(st,"root_spec_append"))
             text=spec.read_text(encoding="utf-8"); known=set()
             for line in text.splitlines():
                 cols=_md_table_cols(line)
                 if len(cols)>=5 and re.fullmatch(r"C\d+",cols[0]): known.add((cols[1],cols[2]))
             additions=[(rid,original) for rid,original in _root_corrections(st,area,rec) if (rid,original) not in known]
-            if not additions: sys.exit("no new root corrections to append")
+            if not additions: sys.exit(lab(st,"root_spec_no_new"))
             nums=[int(m.group(1)) for m in re.finditer(r"(?m)^\|\s*C(\d+)\s*\|",text)]
             start=max(nums,default=0)+1
-            rows="\n".join(f"| C{i} | {rid} | {original} | <填> | <填> |" for i,(rid,original) in enumerate(additions,start))
+            blank=_root_blank(st)
+            rows="\n".join(f"| C{i} | {rid} | {original} | {blank} | {blank} |" for i,(rid,original) in enumerate(additions,start))
             marker="|---|---|---|---|---|"
-            if marker not in text: sys.exit("spec has no correction mapping table")
+            if marker not in text: sys.exit(lab(st,"root_spec_no_table"))
             text=text.replace(marker,marker+"\n"+rows,1); spec.write_text(text,encoding="utf-8")
             rec["spec_rows"]=[f"C{i}" for i in range(1,max(nums,default=0)+len(additions)+1)]
             rec.pop("spec_checked_at",None); save(d,st,{"ev":"root-spec-append","area":area}); print(spec); return
-        if not rec.get("checked_at"): sys.exit("root check must pass after the last root answer before spec")
-        if spec.exists(): sys.exit("spec already exists")
+        if not rec.get("checked_at"): sys.exit(lab(st,"root_spec_check_first"))
+        if spec.exists(): sys.exit(lab(st,"root_spec_exists"))
         rc=path.read_text(encoding="utf-8") if path.exists() else ""
         corr=_root_corrections(st,area,rec)
         rec["spec_rows"]=[f"C{i}" for i in range(1,len(corr)+1)]
-        rows="\n".join(f"| C{i} | {rid} | {original} | <填> | <填> |" for i,(rid,original) in enumerate(corr,1))
-        if not rec.get("checked_at"): sys.exit("root check must pass after the last root answer before spec")
-        spec.write_text("## 复盘结论\n\n"+"\n".join(x for x in rc.splitlines() if x.startswith("## ") or (x.strip() and x!="<填>"))+"\n\n## 规格\n\nL1. <填>\n\n## 用户纠正映射\n\n| C号 | 来源 R号 | 原话 | 规格行 | 不采纳原因 |\n|---|---|---|---|---|\n"+rows+"\n",encoding="utf-8")
+        blank=_root_blank(st)
+        rows="\n".join(f"| C{i} | {rid} | {original} | {blank} | {blank} |" for i,(rid,original) in enumerate(corr,1))
+        if not rec.get("checked_at"): sys.exit(lab(st,"root_spec_check_first"))
+        summary=lab(st,"root_retro_heading"); spec_heading=lab(st,"root_spec_heading"); corr_heading=lab(st,"root_correction_heading")
+        headers=" | ".join(lab(st,k) for k in ("root_spec_col_no","root_spec_col_req","root_spec_col_original","root_spec_col_line","root_spec_col_reason"))
+        spec.write_text(f"## {summary}\n\n"+"\n".join(x for x in rc.splitlines() if x.startswith("## ") or (x.strip() and x not in ("<填>","<fill>")))+f"\n\n## {spec_heading}\n\nL1. {blank}\n\n## {corr_heading}\n\n| {headers} |\n|---|---|---|---|---|\n"+rows+"\n",encoding="utf-8")
         save(d,st,{"ev":"root-spec","area":area}); print(spec); return
 
-def root_next(state, area):
-    return {"pending":f"root start {area}","reviewing":f"root check {area}","asked":"wait for user",
-            "rooting":f"root spec {area}","patched":"review debt"}.get(state,"-")
+def root_next(state, area, st=None):
+    key={"pending":"root_next_pending","reviewing":"root_next_reviewing","asked":"root_next_asked",
+         "rooting":"root_next_rooting","patched":"root_next_patched"}.get(state,"root_next_unknown")
+    if st is None:
+        d=find_dir(); st=load(d) if d else {"prefs":{"language":"en"}}
+    return lab(st,key,area=area)
 
 def cmd_task(a):
     d = need(find_dir())
@@ -3659,7 +3781,7 @@ def cmd_ask(a):
         q = st["questions"][n - 1]
         if q.get("kind") == "root":
             area = q.get("area") or (q.get("areas") or [None])[0]
-            sys.exit(f"root question must be answered with `tw.py root answer {area} A|B|C --user-said \"<their words>\"`")
+            sys.exit(lab(st,"root_answer_prompt",area=area))
         if q.get("answered"):
             sys.exit(f"question {n} is already answered" + (f": {q['answer']}" if q.get("answer") else "")
                      + "; ask a new question if the user changed their mind")
@@ -5445,7 +5567,7 @@ def cmd_prefs(a):
         if k == "screen_mode" and v not in ("shadow", "off"):
             sys.exit("screen_mode: shadow or off")
         if k == "root_mode" and v not in ("on", "off"):
-            sys.exit("root_mode: on or off")
+            sys.exit(lab(st,"root_mode_error"))
         if k.startswith("root_") and k != "root_mode" and (not v.isdigit() or int(v) < 1):
             sys.exit(f"{k}: a positive whole number")
         if k in ("signals_red_at", "relay_max_per_day", "succ_watchdog_minutes") and (not v.isdigit() or int(v) < 1):
@@ -9828,7 +9950,7 @@ def main():
     x = s.add_parser("root", help="root cause review and correction workflow")
     x.add_argument("action", choices=["list","show","start","check","ask","answer","spec","handoff","fresh","dismiss","move","done","scan"])
     x.add_argument("area", nargs="?", default=""); x.add_argument("choice", nargs="?"); x.add_argument("area_req", nargs="?")
-    x.add_argument("--recommend", choices=["A","B","C"]); x.add_argument("--why"); x.add_argument("--cost"); x.add_argument("--root")
+    x.add_argument("--recommend", choices=["A","B","C"], default="A"); x.add_argument("--why"); x.add_argument("--cost"); x.add_argument("--root")
     x.add_argument("--user-said"); x.add_argument("--req"); x.add_argument("--check", action="store_true")
     x.add_argument("--to"); x.add_argument("--task"); x.add_argument("--thread"); x.set_defaults(f=cmd_root)
     x.add_argument("--all", dest="all_areas", action="store_true"); x.add_argument("--area", dest="move_area")

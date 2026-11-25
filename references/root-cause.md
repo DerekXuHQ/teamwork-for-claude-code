@@ -4,13 +4,11 @@
 
 `root start AREA` creates `.teamwork/roots/AREA-RCn.md`. A light review contains symptoms, the shared root, invariants, a scenario/test table and a plan. A full review also records related code locations, mature references, additional unreported failure scenarios, per-scenario current behavior, acceptance checks and compatibility with old data and versions. Fill every `<填>` placeholder. Every symptom S number must appear in the scenario table, and every scenario needs a test name. `root check AREA` enforces those checks.
 
-## Ask once
+## Default to root fix
 
-English: “AREA has had N related failures; the shared root is ROOT. A: fix the cause (COST); B: patch now and record debt; C: patch first, then fix the cause. Recommended: CHOICE, because REASON. Reply A, B or C.”
+At normal cost, use the user's standing rule verified by `TW memory --standing-list` as `root answer AREA A --user-said "能根治的一律根治"`, then proceed to spec and handoff. Ask once with `root ask` only for extreme cost (a full rewrite, multiple threads or clear scope expansion); A is recommended by default. Use B/C only if the user chooses.
 
-中文：「AREA 已出现 N 次相关问题，共同根因是 ROOT。A：根治（约 COST）；B：先补丁并记债；C：先补丁后根治。推荐 CHOICE，因为 REASON。回复 A、B 或 C。」
-
-An unanswered default is not approval. It records a patch debt, leaves the question open and blocks root handoff until the user answers.
+Ask wording: “AREA has had N related failures; the shared root is ROOT. A: fix the cause (COST); B: patch now and record debt; C: patch first, then fix the cause. Recommended: A, because REASON. Reply A, B or C.” 中文同义，推荐默认 A。
 
 ## Specification
 
@@ -48,7 +46,7 @@ The generated specification copies the review conclusion, turns invariant bullet
 
 `root check backend`
 
-`root ask backend --recommend A --why "shared cause" --cost "two days" --root "retries lose ownership"`
+`root ask backend --why "shared cause" --cost "two days" --root "retries lose ownership"`
 
 `root answer backend A --user-said "fix the retry owner"`
 

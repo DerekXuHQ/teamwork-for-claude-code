@@ -442,6 +442,99 @@ class LeadOpening(TwCase):
 
 
 class RootCauseTest(TwCase):
+    def test_zh_project_root_flow_is_chinese(self):
+        evidence = os.environ.get("TW_SMOKE_EVIDENCE")
+        zh_outputs = []
+        forbidden = ("has had", "related failures", "Reply A, B or C", "root review still has",
+                     "unmapped", "Root specification", "Every specification line", "symptoms=",
+                     "rework=", "next=", "already asked", "requires", "Source",
+                     "Original words", "root_ok")
+
+        def run_flow(project, language, save_evidence=False):
+            project.mkdir()
+            env = {k: v for k, v in os.environ.items() if k != "TEAMWORK_DIR"}
+            flow_outputs = []
+
+            def call(*args, ok=True):
+                result = subprocess.run([sys.executable, str(TW), *args], cwd=project, env=env,
+                                        capture_output=True, text=True)
+                record = f"$ tw {' '.join(args)}\nexit={result.returncode}\nstdout:\n{result.stdout}stderr:\n{result.stderr}\n\n"
+                if save_evidence and evidence:
+                    with open(evidence, "a", encoding="utf-8") as f:
+                        f.write(record)
+                if ok:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                flow_outputs.append(record)
+                if save_evidence:
+                    zh_outputs.append(record)
+                return result
+
+            call("init", "demo", "--goal", "root flow")
+            call("prefs", "--set", f"language={language}")
+            call("area", "add", "backend", "--paths", "src/**")
+            call("area", "add", "other", "--paths", "x/**")
+            call("root", "list", "--all")
+            call("root", "show", "other")
+            call("req", "add", "bug one", "--category", "bug", "--area", "backend")
+            call("req", "add", "bug two", "--category", "bug", "--area", "backend")
+            call("thread", "add", "api")
+            call("task", "add", "T1", "--title", "fix root", "--topics", "backend", "--owner", "api")
+            call("root", "list")
+            call("plan", "approve", "--user-said", "go")
+            call("task", "set", "T1", "--status", "dispatched", ok=False)
+            call("root", "start", "backend")
+            rc = project / ".teamwork" / "roots" / "backend-RC1.md"
+            call("root", "check", "backend", ok=False)
+            filled_words = "已核实根因" if language == "zh" else "Verified cause"
+            body = rc.read_text(encoding="utf-8").replace("<填>", filled_words).replace("<fill>", filled_words)
+            body = re.sub(r"(?m)^(\| [^\n]* \| S\d+ \| [^\n]* \|)[^\n]*$", r"\1 test_zh_project_root_flow_is_chinese |", body)
+            rc.write_text(body, encoding="utf-8")
+            call("root", "check", "backend")
+            call("root", "ask", "backend", "--recommend", "C", "--why", "避免重复故障" if language == "zh" else "avoid repeated failure",
+                 "--cost", "低" if language == "zh" else "low", "--root", "共享状态错误" if language == "zh" else "shared state error")
+            call("ask", "--answer", "1", "C", ok=False)
+            call("root", "answer", "backend", "C", "--user-said", "先补再根治" if language == "zh" else "patch first, then fix the cause")
+            call("root", "spec", "backend")
+            spec = project / ".teamwork" / "roots" / "backend-RC1-spec.md"
+            call("root", "spec", "backend", "--check", ok=False)
+            spec_body = spec.read_text(encoding="utf-8").replace("L1. <填>", "L1. 保证共享状态一致").replace("L1. <fill>", "L1. Ensure shared state stays consistent")
+            spec_body = spec_body.replace("<填> | <填> |", "L1 | 用户：按此方案处理 |").replace("<fill> | <fill> |", "L1 | User: covered by this plan |")
+            spec.write_text(spec_body, encoding="utf-8")
+            if language == "zh":
+                self.assertIn("编号 | 来源 | 原话", rc.read_text(encoding="utf-8"))
+                self.assertIn("故障场景与测试", rc.read_text(encoding="utf-8"))
+                self.assertIn("用户纠正映射", spec.read_text(encoding="utf-8"))
+                self.assertNotIn("Source", rc.read_text(encoding="utf-8"))
+                self.assertNotIn("Original words", rc.read_text(encoding="utf-8"))
+                self.assertNotIn("Failure scenarios and tests", rc.read_text(encoding="utf-8"))
+                self.assertNotIn("Specification", spec.read_text(encoding="utf-8"))
+                self.assertNotIn("User correction mapping", spec.read_text(encoding="utf-8"))
+            else:
+                for content in (rc.read_text(encoding="utf-8"), spec.read_text(encoding="utf-8"), "".join(flow_outputs)):
+                    self.assertNotIn("<填>", content)
+                    self.assertNotIn("补", content)
+            call("root", "spec", "backend", "--check")
+            call("root", "handoff", "backend", "--to", "api", "--task", "T1")
+            call("board")
+            call("card", "--kind", "status", "--head", "root flow")
+            return "".join(flow_outputs)
+
+        run_flow(self.dir / "zh", "zh", save_evidence=True)
+        outputs = "".join(zh_outputs)
+        for phrase in forbidden:
+            self.assertNotIn(phrase, outputs, phrase)
+        self.assertIn("症状", outputs)
+        self.assertIn("根因", outputs)
+        self.assertIn("正常", outputs)
+
+        en_dir = self.dir / "en"
+        en_outputs = run_flow(en_dir, "en")
+        en_state = json.loads((en_dir / ".teamwork" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(en_state["prefs"]["language"], "en")
+        self.assertIn("has had", en_outputs)
+        self.assertIn("Symptoms", en_outputs)
+        self.assertIn("ok", en_outputs)
+
     def test_done_starts_clean_second_root_round(self):
         path=self._checked_root()
         self.tw("root","ask","backend","--recommend","A","--why","cause","--cost","one","--root","cause")
@@ -453,14 +546,14 @@ class RootCauseTest(TwCase):
         self.tw("req","add","new one","--category","bug","--area","backend")
         self.tw("req","add","new two","--category","bug","--area","backend")
         self.tw("root","start","backend")
-        path=self.dir/".teamwork"/"roots"/"backend-RC2.md"; path.write_text(path.read_text().replace("<填>","filled"))
+        path=self.dir/".teamwork"/"roots"/"backend-RC2.md"; path.write_text(path.read_text().replace("<填>","filled").replace("<fill>","filled"))
         self.tw("root","check","backend")
         self.tw("root","ask","backend","--recommend","A","--why","new cause","--cost","one","--root","cause")
         self.tw("root","dismiss","backend","--why","second round done")
         self.tw("req","add","third cycle one","--category","bug","--area","backend")
         self.tw("req","add","third cycle two","--category","bug","--area","backend")
         self.tw("root","start","backend")
-        path=self.dir/".teamwork"/"roots"/"backend-RC3.md"; path.write_text(path.read_text().replace("<填>","filled"))
+        path=self.dir/".teamwork"/"roots"/"backend-RC3.md"; path.write_text(path.read_text().replace("<填>","filled").replace("<fill>","filled"))
         self.tw("root","check","backend"); self.tw("root","ask","backend","--recommend","B","--why","cause","--cost","one","--root","cause")
 
     def test_task_msg_keeps_root_hint_in_task_body(self):
@@ -503,24 +596,147 @@ class RootCauseTest(TwCase):
         st=self.state(); st["tasks"]["T1"]["rework_at"]=["2099-01-01T00:00:00"]*2
         (self.dir/".teamwork"/"state.json").write_text(json.dumps(st))
         self.assertNotEqual(self.tw("root","check","backend",ok=False).returncode,0)
+
+    def test_root_ok_label_and_language_normalization(self):
+        for index, (language, expected, rejected) in enumerate((("en-US", "ok", "root fix in progress"), ("zh-CN", "正常", "根治中"), (None, "ok", "root fix in progress"))):
+            with self.subTest(language=language):
+                if language:
+                    self.tw("prefs", "--set", f"language={language}")
+                else:
+                    st=self.state(); st["prefs"].pop("language", None)
+                    (self.dir/".teamwork"/"state.json").write_text(json.dumps(st))
+                area=f"other{index}"
+                self.tw("area", "add", area, "--paths", "x/**")
+                listing = self.tw("root", "list", "--all").stdout
+                showing = self.tw("root", "show", area).stdout
+                self.assertIn(expected, listing + showing)
+                st = self.state(); st["areas"][area]["state"] = "rooting"
+                (self.dir/".teamwork"/"state.json").write_text(json.dumps(st))
+                refused = self.tw("root", "start", area, ok=False).stderr
+                self.assertIn(rejected, refused)
+
+    def test_root_templates_share_language_specific_fill_and_extra_labels(self):
+        for index, (language, placeholder, extra) in enumerate((("en", "<fill>", "extra"), ("zh", "<填>", "补"))):
+            with self.subTest(language=language):
+                self.tw("prefs", "--set", f"language={language}")
+                area=f"empty{index}"
+                self.tw("area", "add", area)
+                self.tw("root", "start", area)
+                body = (self.dir/".teamwork"/"roots"/f"{area}-RC1.md").read_text(encoding="utf-8")
+                self.assertIn(placeholder, body)
+                self.assertIn(f"| {placeholder} | {extra} | {placeholder} | {placeholder} |", body)
+                populated=f"sample{index}"
+                self.tw("area", "add", populated)
+                self.tw("req", "add", "bug", "--category", "bug", "--area", populated)
+                self.tw("root", "start", populated)
+                populated_body=(self.dir/".teamwork"/"roots"/f"{populated}-RC1.md").read_text(encoding="utf-8")
+                self.assertIn(f"| {placeholder} | S1 | {placeholder} | {placeholder} |", populated_body)
+
+    def test_root_start_refused_uses_normalized_language_labels(self):
+        self.tw("area", "add", "backend")
+        for language, expected in (("en-US", "root fix in progress"), ("zh-CN", "根治中")):
+            with self.subTest(language=language):
+                self.tw("prefs", "--set", f"language={language}")
+                st=self.state(); st["areas"]["backend"]["state"]="rooting"
+                (self.dir/".teamwork"/"state.json").write_text(json.dumps(st))
+                self.assertIn(expected, self.tw("root", "start", "backend", ok=False).stderr)
+
+    def test_root_check_reports_placeholder_found_in_file(self):
+        self.tw("prefs", "--set", "language=en")
         path=self._checked_root()
-        body=path.read_text().replace("| filled | S1 | filled | filled |","| issue | S1 | tw.py:1 | - |")
-        path.write_text(body)
-        self.assertNotEqual(self.tw("root","check","backend",ok=False).returncode,0)
+        original=path.read_text()
+        path.write_text(original.replace("filled", "<填>"))
+        self.assertIn("<填>", self.tw("root", "check", "backend", ok=False).stderr)
+        path=self._checked_root("other", symptoms=1)
+        original=path.read_text(); lines=original.splitlines()
+        for line_no,line in enumerate(lines):
+            cols=[part.strip() for part in line.strip().strip("|").split("|")]
+            if len(cols)==4 and cols[1]=="S1": lines[line_no]="| issue | S1 | tw.py:1 | - |"
+        path.write_text("\n".join(lines)+"\n")
+        self.assertNotEqual(self.tw("root","check","other",ok=False).returncode,0)
+
+    def test_root_and_spec_checks_inspect_every_matching_section(self):
+        rc=self._checked_root()
+        original=rc.read_text()
+        rc.write_text(original+"\n## Failure scenarios and tests\n\n| Scenario | Symptom | Current | Test |\n|---|---|---|---|\n| bad | S1 | file:1 | todo |\n| bad | S2 | file:1 | todo |\n")
+        self.assertNotEqual(self.tw("root", "check", "backend", ok=False).returncode, 0)
+        rc.write_text(original)
+        self.tw("root", "check", "backend")
+        self.tw("root", "ask", "backend", "--recommend", "C", "--why", "why", "--cost", "low", "--root", "cause")
+        self.tw("root", "answer", "backend", "A", "--user-said", "fix")
+        self._fill_root_file(rc)
+        self.tw("root", "check", "backend")
+        self.tw("root", "spec", "backend")
+        spec=self.dir/".teamwork"/"roots"/"backend-RC1-spec.md"
+        spec.write_text(spec.read_text()+"\n## Specification\n\nL2. <fill>\n")
+        self.assertNotEqual(self.tw("root", "spec", "backend", "--check", ok=False).returncode, 0)
+
+    def test_root_and_spec_reject_extended_placeholder_values(self):
+        placeholders=("NONE", "N/A", "NA", "TBD", "待定", "TODO", "-", "＜填＞")
+        for index, placeholder in enumerate(placeholders):
+            with self.subTest(placeholder=placeholder):
+                area=f"case{index}"
+                self.tw("area", "add", area)
+                self.tw("req", "add", "correction", "--category", "correction", "--area", area)
+                rc=self._checked_root(area, symptoms=1)
+                original=rc.read_text(); lines=original.splitlines()
+                for line_no, line in enumerate(lines):
+                    cols=[part.strip() for part in line.strip().strip("|").split("|")]
+                    if len(cols) == 4 and cols[1] == "S1":
+                        lines[line_no]=f"| case | S1 | file:1 | {placeholder} |"
+                scenario="\n".join(lines)+"\n"
+                rc.write_text(scenario)
+                self.assertNotEqual(self.tw("root", "check", area, ok=False).returncode, 0)
+                rc.write_text(original)
+                self.tw("root", "check", area)
+                self.tw("root", "ask", area, "--recommend", "C", "--why", "why", "--cost", "low", "--root", "cause")
+                self.tw("root", "answer", area, "A", "--user-said", "fix")
+                self._fill_root_file(rc)
+                self.tw("root", "check", area)
+                self.tw("root", "spec", area)
+                spec=self.dir/".teamwork"/"roots"/f"{area}-RC1-spec.md"
+                text=spec.read_text().replace("L1. <填>", f"L1. {placeholder}").replace("L1. <fill>", f"L1. {placeholder}")
+                spec.write_text(text)
+                self.assertNotEqual(self.tw("root", "spec", area, "--check", ok=False).returncode, 0)
+                text=spec.read_text().replace(f"L1. {placeholder}", "L1. valid specification")
+                updated=[]
+                for line in text.splitlines():
+                    cols=[part.strip() for part in line.strip().strip("|").split("|")]
+                    if len(cols)==5 and cols[0]=="C1":
+                        line=f"| C1 | {cols[1]} | {cols[2]} | L1 | User: {placeholder} |"
+                    updated.append(line)
+                spec.write_text("\n".join(updated)+"\n")
+                self.assertNotEqual(self.tw("root", "spec", area, "--check", ok=False).returncode, 0)
+
+    def test_spec_rejects_placeholder_c_reason_and_empty_l_line(self):
+        self.tw("area", "add", "backend")
+        self.tw("req", "add", "correction", "--category", "correction", "--area", "backend")
+        rc=self._checked_root("backend", symptoms=1)
+        self.tw("root", "ask", "backend", "--recommend", "C", "--why", "why", "--cost", "low", "--root", "cause")
+        self.tw("root", "answer", "backend", "A", "--user-said", "fix")
+        self._fill_root_file(rc)
+        self.tw("root", "check", "backend")
+        self.tw("root", "spec", "backend")
+        spec=self.dir/".teamwork"/"roots"/"backend-RC1-spec.md"
+        spec.write_text(spec.read_text().replace("L1. <fill>", "L1. <填>"))
+        self.assertIn("<填>", self.tw("root", "spec", "backend", "--check", ok=False).stderr)
+        text=spec.read_text().replace("L1. <填>", "L1. -").replace("L1. <fill>", "L1. -").replace("<填> | <填> |", "L1 | <填> | 用户：＜填＞ |").replace("<fill> | <fill> |", "L1 | <填> | 用户：＜填＞ |")
+        spec.write_text(text)
+        self.assertNotEqual(self.tw("root", "spec", "backend", "--check", ok=False).returncode, 0)
 
     def test_spec_check_requires_all_c_rows_and_nonempty_spec_and_accepts_cn_colon(self):
         self.tw("area","add","backend"); self.tw("req","add","原话 | 带\n换行","--category","correction","--area","backend")
         rc=self._checked_root(); self.tw("root","ask","backend","--recommend","A","--why","cause","--cost","one","--root","cause"); self.tw("root","answer","backend","A","--user-said","fix")
-        rc.write_text(rc.read_text().replace("<填>","filled")); self.tw("root","check","backend")
+        rc.write_text(rc.read_text().replace("<填>","filled").replace("<fill>","filled")); self.tw("root","check","backend")
         self.tw("root","spec","backend"); spec=self.dir/".teamwork"/"roots"/"backend-RC1-spec.md"
         text=spec.read_text(); self.assertIn(r"原话 \| 带 换行",text)
-        text=text.replace("L1. <填>","L1. valid").replace("| C1 |", "| C9 |")
+        text=text.replace("L1. <填>","L1. valid").replace("L1. <fill>","L1. valid").replace("| C1 |", "| C9 |")
         spec.write_text(text)
         self.assertNotEqual(self.tw("root","spec","backend","--check",ok=False).returncode,0)
-        text=spec.read_text().replace("| C9 |","| C1 |").replace("L1. valid","L1. <填>")
+        text=spec.read_text().replace("| C9 |","| C1 |").replace("L1. valid","L1. <fill>")
         spec.write_text(text)
         self.assertNotEqual(self.tw("root","spec","backend","--check",ok=False).returncode,0)
-        text=spec.read_text().replace("L1. <填>","L1. valid").replace("<填> | <填> |", "<填> | 用户：暂不采纳 |")
+        text=spec.read_text().replace("L1. <填>","L1. valid").replace("L1. <fill>","L1. valid").replace("<填> | <填> |", "<填> | 用户：暂不采纳 |").replace("<fill> | <fill> |", "<fill> | User: not adopted |")
         spec.write_text(text); self.tw("root","spec","backend","--check")
 
     def test_implicit_area_baseline_excludes_old_and_ended_requests(self):
@@ -562,9 +778,9 @@ class RootCauseTest(TwCase):
     def test_answer_a_expands_light_rc_and_requires_recheck(self):
         path=self._checked_root(); self.tw("root","ask","backend","--recommend","A","--why","cause","--cost","one","--root","cause")
         self.tw("root","answer","backend","A","--user-said","full review")
-        self.assertIn("兼容旧数据/旧版本",path.read_text())
+        self.assertIn("Backward compatibility",path.read_text())
         self.assertNotEqual(self.tw("root","spec","backend",ok=False).returncode,0)
-        body=path.read_text().replace("<填>","filled"); path.write_text(body); self.tw("root","check","backend"); self.tw("root","spec","backend")
+        body=path.read_text().replace("<填>","filled").replace("<fill>","filled"); path.write_text(body); self.tw("root","check","backend"); self.tw("root","spec","backend")
 
     def test_done_and_handoff_enforce_area_and_state(self):
         self.tw("area","add","backend"); self.tw("task","add","T1","--title","fix","--topics","other")
@@ -625,7 +841,7 @@ class RootCauseTest(TwCase):
         self.assertEqual(self.state()["areas"]["backend"]["state"],"pending")
         self.tw("root","start","backend")
         rc=self.dir/".teamwork"/"roots"/"backend-RC2.md"
-        rc.write_text(rc.read_text().replace("| <填> | 补 | <填> | <填> |","| scenario | S1 | tw.py:1 | test_root |").replace("<填>","filled"))
+        rc.write_text(rc.read_text().replace("| <fill> | extra | <fill> | <fill> |","| scenario | S1 | tw.py:1 | test_root |").replace("<填>","filled").replace("<fill>","filled"))
         self.tw("root","check","backend")
         self.tw("root","ask","backend","--recommend","B","--why","again","--cost","one","--root","cause")
         self.tw("root","answer","backend","B","--user-said","patch again")
@@ -663,7 +879,7 @@ class RootCauseTest(TwCase):
         self.assertIn("current state is asked",rejected.stderr)
         self.tw("root","answer","backend","A","--user-said","root cause")
         rejected=self.tw("root","start","backend",ok=False)
-        self.assertIn("current state is rooting",rejected.stderr)
+        self.assertIn("current state is root fix in progress",rejected.stderr)
         self.assertEqual(self.state()["areas"]["backend"]["user_said"],"root cause")
 
     def test_area_assignment_wins_over_where_and_merge_keeps_source_alias(self):
@@ -718,10 +934,10 @@ class RootCauseTest(TwCase):
         self._checked_root()
         self.tw("root","ask","backend","--recommend","A","--why","cause","--cost","one","--root","cause")
         self.tw("root","answer","backend","A","--user-said","cause")
-        rc=self.dir/".teamwork"/"roots"/"backend-RC1.md"; rc.write_text(rc.read_text().replace("<填>","filled"))
+        rc=self.dir/".teamwork"/"roots"/"backend-RC1.md"; rc.write_text(rc.read_text().replace("<填>","filled").replace("<fill>","filled"))
         self.tw("root","check","backend"); self.tw("root","spec","backend")
         spec=self.dir/".teamwork"/"roots"/"backend-RC1-spec.md"
-        spec.write_text(spec.read_text().replace("L1. <填>","L1. maintain behavior"))
+        spec.write_text(spec.read_text().replace("L1. <填>","L1. maintain behavior").replace("L1. <fill>","L1. maintain behavior"))
         self.tw("req","add","new correction","--category","correction","--area","backend")
         result=self.tw("root","spec","backend","--check",ok=False)
         self.assertIn("R3: new correction",result.stderr)
@@ -788,7 +1004,7 @@ class RootCauseTest(TwCase):
         review=rootdir/"backend-RC1.md"
         self.assertIn("R1",review.read_text())
         self.assertNotEqual(self.tw("root","ask","backend","--recommend","A","--why","cause","--cost","one day","--root","cause",ok=False).returncode,0)
-        review.write_text(review.read_text().replace("<填>","filled"))
+        review.write_text(review.read_text().replace("<填>","filled").replace("<fill>","filled"))
         self.tw("root","check","backend")
         self.tw("root","ask","backend","--recommend","A","--why","cause","--cost","one day","--root","cause")
         self.assertEqual(self.state()["questions"][0]["kind"],"root")
@@ -801,13 +1017,13 @@ class RootCauseTest(TwCase):
         self.tw("req","add","user correction","--category","correction","--area","backend")
         self.tw("root","start","backend")
         rc=self.dir/".teamwork"/"roots"/"backend-RC1.md"
-        rc.write_text(rc.read_text().replace("<填>","filled"))
+        rc.write_text(rc.read_text().replace("<填>","filled").replace("<fill>","filled"))
         self.tw("root","check","backend")
         self.tw("root","spec","backend")
         spec=self.dir/".teamwork"/"roots"/"backend-RC1-spec.md"
         self.assertIn("C1",spec.read_text())
         self.assertNotEqual(self.tw("root","spec","backend","--check",ok=False).returncode,0)
-        spec.write_text(spec.read_text().replace("L1. <填>","L1. implementation").replace("| <填> | <填> |","| L1 |  |"))
+        spec.write_text(spec.read_text().replace("L1. <填>","L1. implementation").replace("L1. <fill>","L1. implementation").replace("| <填> | <填> |","| L1 |  |").replace("| <fill> | <fill> |","| L1 |  |"))
         self.tw("root","spec","backend","--check")
 
     def test_dismiss_done_and_legacy_state(self):
@@ -839,10 +1055,23 @@ class RootCauseTest(TwCase):
         for i in range(symptoms): self.tw("req","add",f"bug {i}","--category","bug","--area",area)
         self.tw("root","start",area)
         path=self.dir/".teamwork"/"roots"/f"{area}-RC1.md"
-        body=path.read_text().replace("<填>","filled")
+        body=path.read_text().replace("<填>","filled").replace("<fill>","filled")
         path.write_text(body)
         self.tw("root","check",area)
         return path
+
+    def test_root_ask_defaults_recommendation_to_a_for_one_and_all(self):
+        self._checked_root("single")
+        single = self.tw("root", "ask", "single", "--why", "shared cause", "--cost", "normal", "--root", "cause")
+        self.assertIn("Recommended: A", single.stdout)
+        self._checked_root("group-one")
+        self._checked_root("group-two")
+        all_areas = self.tw("root", "ask", "--all", "--why", "shared cause", "--cost", "normal", "--root", "cause")
+        self.assertEqual(all_areas.stdout.count("Recommended: A"), 2)
+
+    def _fill_root_file(self, path):
+        body=path.read_text(encoding="utf-8").replace("<填>","filled").replace("<fill>","filled")
+        path.write_text(body,encoding="utf-8")
 
     def test_task_add_status_is_ignored_and_root_list_next_is_interpolated(self):
         self.tw("area","add","backend")
@@ -902,9 +1131,9 @@ class RootCauseTest(TwCase):
         self.tw("root","ask","backend","--recommend","A","--why","cause","--cost","one","--root","cause")
         self.tw("root","answer","backend","A","--user-said","fix it")
         self.assertNotEqual(self.tw("root","spec","backend",ok=False).returncode,0)
-        rc=self.dir/".teamwork"/"roots"/"backend-RC1.md"; rc.write_text(rc.read_text().replace("<填>","filled")); self.tw("root","check","backend")
+        rc=self.dir/".teamwork"/"roots"/"backend-RC1.md"; rc.write_text(rc.read_text().replace("<填>","filled").replace("<fill>","filled")); self.tw("root","check","backend")
         self.tw("root","spec","backend")
-        spec=self.dir/".teamwork"/"roots"/"backend-RC1-spec.md"; spec.write_text(spec.read_text().replace("<填>","L1"))
+        spec=self.dir/".teamwork"/"roots"/"backend-RC1-spec.md"; spec.write_text(spec.read_text().replace("<填>","L1").replace("<fill>","L1"))
         self.tw("root","spec","backend","--check")
         self.tw("plan","approve","--user-said","go")
         self.tw("thread","add","api")
@@ -955,8 +1184,9 @@ class RootCauseTest(TwCase):
         st=self.state(); st["areas"]["backend"]["rc"]=1; (self.dir/".teamwork"/"state.json").write_text(json.dumps(st))
         (self.dir/".teamwork"/"roots"/"backend-RC2.md").write_text("existing")
         self.assertNotEqual(self.tw("root","start","backend",ok=False).returncode,0)
-        body=path.read_text(); intro, scenarios=body.split("## 故障场景",1)
-        path.write_text(intro+"## 故障场景"+scenarios.replace("S2 |", "S9 |"))
+        body=path.read_text(); heading="## Failure scenarios and tests" if "## Failure scenarios and tests" in body else "## 故障场景与测试"
+        intro, scenarios=body.split(heading,1)
+        path.write_text(intro+heading+scenarios.replace("S2 |", "S9 |"))
         self.assertNotEqual(self.tw("root","check","backend",ok=False).returncode,0)
 
     def test_default_root_keeps_question_unanswered_until_direct_answer(self):
@@ -970,9 +1200,9 @@ class RootCauseTest(TwCase):
         self.tw("root","answer","backend","A","--user-said","root fix")
         self.assertEqual(self.state()["areas"]["backend"]["state"],"rooting")
         self.assertNotEqual(self.tw("root","spec","backend",ok=False).returncode,0)
-        rc=self.dir/".teamwork"/"roots"/"backend-RC1.md"; rc.write_text(rc.read_text().replace("<填>","filled")); self.tw("root","check","backend")
+        rc=self.dir/".teamwork"/"roots"/"backend-RC1.md"; rc.write_text(rc.read_text().replace("<填>","filled").replace("<fill>","filled")); self.tw("root","check","backend")
         self.tw("root","spec","backend")
-        spec=self.dir/".teamwork"/"roots"/"backend-RC1-spec.md"; spec.write_text(spec.read_text().replace("<填>","L1"))
+        spec=self.dir/".teamwork"/"roots"/"backend-RC1-spec.md"; spec.write_text(spec.read_text().replace("<填>","L1").replace("<fill>","L1"))
         self.tw("root","spec","backend","--check")
         self.tw("root","handoff","backend","--to","api","--task","T1")
 
@@ -999,7 +1229,7 @@ class RootCauseTest(TwCase):
         for i in range(4): self.tw("req","add",f"bug {i}","--category","bug","--area","backend")
         self.tw("root","start","backend")
         template=(self.dir/".teamwork"/"roots"/"backend-RC1.md").read_text()
-        self.assertIn("兼容旧数据/旧版本",template)
+        self.assertIn("Backward compatibility",template)
         self.tw("thread","add","api")
         self.tw("task","add","T1","--title","fix","--owner","api")
         for i in range(3): self.tw("req","add",f"correction {i}","--category","correction","--tasks","T1")
@@ -1038,7 +1268,7 @@ class RootCauseSmokeTest(TwCase):
         rc = self.dir / ".teamwork" / "roots" / "login-RC1.md"
         rejected = self.tw("root", "check", "login", ok=False)
         self.assertNotEqual(rejected.returncode, 0)
-        body = rc.read_text(encoding="utf-8").replace("<填>", "已核实登录失败根因及验收条件")
+        body = rc.read_text(encoding="utf-8").replace("<填>", "已核实登录失败根因及验收条件").replace("<fill>", "已核实登录失败根因及验收条件")
         body = re.sub(r"(?m)^(\| [^\n]* \| S\d+ \| [^\n]* \|)[^\n]*$",
                       lambda m: m.group(1) + " test_main_chain_end_to_end |", body)
         rc.write_text(body, encoding="utf-8")
@@ -1057,14 +1287,14 @@ class RootCauseSmokeTest(TwCase):
         self.tw("root", "start", "login_a")
         self.tw("root", "check", "login_a", ok=False)
         rc_a = self.dir / ".teamwork" / "roots" / "login-a-RC1.md"
-        body = rc_a.read_text(encoding="utf-8").replace("<填>", "已完成初步症状和场景分析")
+        body = rc_a.read_text(encoding="utf-8").replace("<填>", "已完成初步症状和场景分析").replace("<fill>", "已完成初步症状和场景分析")
         body = re.sub(r"(?m)^(\| [^\n]* \| S\d+ \| [^\n]* \|)[^\n]*$",
                       lambda m: m.group(1) + " test_main_chain_end_to_end |", body)
         rc_a.write_text(body, encoding="utf-8")
         self.tw("root", "check", "login_a")
         self.tw("root", "ask", "login_a", "--recommend", "A", "--why", "需要全面复核", "--cost", "中", "--root", "检查兼容性与整体设计")
         self.tw("root", "answer", "login_a", "A", "--user-said", "请完整分析")
-        body = rc_a.read_text(encoding="utf-8").replace("<填>", "已检查兼容性、现有实现与验收测试")
+        body = rc_a.read_text(encoding="utf-8").replace("<填>", "已检查兼容性、现有实现与验收测试").replace("<fill>", "已检查兼容性、现有实现与验收测试")
         body = re.sub(r"(?m)^(\| [^\n]* \| S\d+ \| [^\n]* \|)[^\n]*$",
                       lambda m: m.group(1) + " test_main_chain_end_to_end |", body)
         rc_a.write_text(body, encoding="utf-8")
@@ -1073,13 +1303,14 @@ class RootCauseSmokeTest(TwCase):
         self.tw("root", "spec", "login")
         spec = self.dir / ".teamwork" / "roots" / "login-RC1-spec.md"
         spec_body = spec.read_text(encoding="utf-8")
-        spec.write_text(spec_body.replace("L1. <填>", "L1. 登录失败时显示明确错误并允许重试"), encoding="utf-8")
+        spec.write_text(spec_body.replace("L1. <填>", "L1. 登录失败时显示明确错误并允许重试").replace("L1. <fill>", "L1. 登录失败时显示明确错误并允许重试"), encoding="utf-8")
         self.tw("root", "spec", "login", "--check", ok=False)
         spec_body = spec.read_text(encoding="utf-8").replace("| C1 |", "| C9 |", 1)
         spec.write_text(spec_body, encoding="utf-8")
         self.tw("root", "spec", "login", "--check", ok=False)
         spec_body = spec.read_text(encoding="utf-8").replace("| C9 |", "| C1 |", 1)
         spec_body = re.sub(r"(?m)^(\| C\d+ \|[^\n]*\|[^\n]*\|) <填> \| <填> \|$", r"\1 L1 | 已由规格覆盖 |", spec_body)
+        spec_body = re.sub(r"(?m)^(\| C\d+ \|[^\n]*\|[^\n]*\|) <fill> \| <fill> \|$", r"\1 L1 | User: covered by spec |", spec_body)
         spec.write_text(spec_body, encoding="utf-8")
         self.tw("root", "spec", "login", "--check")
 
@@ -1104,7 +1335,7 @@ class RootCauseSmokeTest(TwCase):
         self.assertIn("pending", self.tw("root", "list").stdout)
         self.tw("root", "start", "login")
         rc2 = self.dir / ".teamwork" / "roots" / "login-RC2.md"
-        body = rc2.read_text(encoding="utf-8").replace("<填>", "已复核第二轮登录问题及修复方案")
+        body = rc2.read_text(encoding="utf-8").replace("<填>", "已复核第二轮登录问题及修复方案").replace("<fill>", "已复核第二轮登录问题及修复方案")
         body = re.sub(r"(?m)^(\| [^\n]* \| S\d+ \| [^\n]* \|)[^\n]*$",
                       lambda m: m.group(1) + " test_main_chain_end_to_end |", body)
         rc2.write_text(body, encoding="utf-8")

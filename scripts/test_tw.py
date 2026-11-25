@@ -5,6 +5,7 @@
 """
 
 import datetime as dt
+import itertools
 import json
 import os
 import re
@@ -18,6 +19,7 @@ import zipfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # scripts/: quota.py next to tw.py
 import quota  # noqa: E402
+import tw  # noqa: E402
 
 TW = Path(__file__).resolve().parent / "tw.py"
 # bash-guard logs its own errors: the tests never write (or count) the real ~/.cache/teamwork/guard-errors.jsonl
@@ -26,7 +28,7 @@ os.environ["TW_GUARD_LOG"] = str(Path(_GUARD_LOG_DIR.name) / "guard-errors.jsonl
 WALK = ["planned", "approved", "dispatched", "working", "review", "done"]
 
 
-def walk_args(run, args, state_file):
+def walk_args(run, args, state_file, prepare_primary=False):
     """Tests that only care about the end status: step a task through the legal path first (T20 enforces it).
     run(*args) must run tw.py; the final call is left to the caller."""
     if len(args) < 3 or args[0] != "task" or args[1] != "set" or "--status" not in args:
@@ -42,6 +44,14 @@ def walk_args(run, args, state_file):
     cur = st["tasks"].get(args[2], {}).get("status")
     if cur not in WALK:
         return
+    task = st["tasks"].get(args[2], {})
+    if prepare_primary and target in ("review", "done") and st.get("prefs", {}).get("require_primary", True):
+        if not task.get("primary"):
+            run("task", "set", args[2], "--primary", "The user can see all 12 restored records")
+        if (task.get("primary_check") or {}).get("result") not in ("seen", "pending-real"):
+            proof = Path(state_file).parent.parent / "primary-proof.txt"
+            proof.write_text("real artifact: 12 records", encoding="utf-8")
+            run("task", "verify", args[2], "--seen", "--how", "Open the real project artifact", "--evidence", str(proof))
     for step in target_path[WALK.index(cur) + 1:]:
         if step == "approved":
             run("plan", "approve", "--user-said", "ok")  # tasks are approved with the plan (T20)
@@ -55,13 +65,38 @@ class TwCase(unittest.TestCase):
         self.dir = Path(self._tmp.name)
         self.env = {k: v for k, v in os.environ.items() if k != "TEAMWORK_DIR"}
         self.tw("init", "demo", "--goal", "test project")
+        # Legacy suites here cover non-R71 behavior; PrimaryOutcome owns the enabled-gate coverage.
+        self.tw("prefs", "--set", "require_primary=false", "--user-said", "legacy fixture covers other task behavior")
 
     def tearDown(self):
         self._tmp.cleanup()
 
     def tw(self, *args, ok=True, walk=True):
+        # Existing suites predate R71. Prepare the primary artifact before moving
+        # a legacy task into review, and supply the required independent recheck
+        # metadata when those suites record a passing verdict.
+        if len(args) >= 3 and args[0:2] == ("task", "set"):
+            tid = args[2]
+            wants_review = ("--status" in args and args[args.index("--status") + 1] in ("review", "done"))
+            passing_review = ("--review" in args and args[args.index("--review") + 1] in ("pass", "capped"))
+            if (wants_review or passing_review) and (self.dir / ".teamwork" / "state.json").exists():
+                self.verify_primary(tid)
+            if "--review" in args:
+                defaults = [("--tests", "ran"), ("--base", "0000000")]
+                if passing_review:
+                    defaults += [("--recheck-how", "independent test run"),
+                                 ("--recheck-evidence", "Primary output shows 12 records")]
+                if "--tests" in args and args[args.index("--tests") + 1] == "not-run":
+                    defaults.append(("--tests-why", "legacy fixture did not run tests"))
+                for flag, value in defaults:
+                    if flag not in args:
+                        args = (*args, flag, value)
+        if len(args) >= 2 and args[0:1] == ("task-msg",) and "--dispatch" in args:
+            tid = args[1]
+            if (self.dir / ".teamwork" / "state.json").exists() and not self.state()["tasks"].get(tid, {}).get("primary"):
+                self.tw("task", "set", tid, "--primary", "The user can see all 12 restored records")
         if walk:
-            walk_args(lambda *x: self.tw(*x, walk=False), args, self.dir / ".teamwork" / "state.json")
+            walk_args(lambda *x: self.tw(*x, walk=False), args, self.dir / ".teamwork" / "state.json", prepare_primary=True)
         r = subprocess.run([sys.executable, str(TW), *args], cwd=self.dir, env=self.env,
                            capture_output=True, text=True)
         if ok:
@@ -70,6 +105,18 @@ class TwCase(unittest.TestCase):
 
     def state(self):
         return json.loads((self.dir / ".teamwork" / "state.json").read_text(encoding="utf-8"))
+
+    def verify_primary(self, tid):
+        task = self.state()["tasks"].get(tid)
+        if not task:
+            return
+        if not task.get("primary"):
+            self.tw("task", "set", tid, "--primary", "The user can see all 12 restored records")
+        if (task.get("primary_check") or {}).get("result") not in ("seen", "pending-real"):
+            proof = self.dir / "primary-proof.txt"
+            proof.write_text("A real artifact containing 12 records", encoding="utf-8")
+            self.tw("task", "verify", tid, "--seen", "--how", "Run the project artifact", "--evidence",
+                    str(proof))
 
     def context(self):
         out = self.tw("context").stdout
@@ -1239,8 +1286,20 @@ class RootCauseTest(TwCase):
 
 class RootCauseSmokeTest(TwCase):
     def tw(self, *args, ok=True, walk=True):
+        if len(args) >= 3 and args[0:2] == ("task", "set"):
+            tid = args[2]
+            wants_primary = "--status" in args and args[args.index("--status") + 1] in ("review", "done")
+            passing_review = "--review" in args and args[args.index("--review") + 1] in ("pass", "capped")
+            if wants_primary or passing_review:
+                self.verify_primary(tid)
+            if "--review" in args:
+                for flag, value in (("--tests", "ran"), ("--base", "0000000"),
+                                    ("--recheck-how", "independent test run"),
+                                    ("--recheck-evidence", "Primary output shows 12 records")):
+                    if flag not in args:
+                        args = (*args, flag, value)
         if walk:
-            walk_args(lambda *x: self.tw(*x, walk=False), args, self.dir / ".teamwork" / "state.json")
+            walk_args(lambda *x: self.tw(*x, walk=False), args, self.dir / ".teamwork" / "state.json", prepare_primary=True)
         r = subprocess.run([sys.executable, str(TW), *args], cwd=self.dir, env=self.env,
                            capture_output=True, text=True)
         evidence = os.environ.get("TW_SMOKE_EVIDENCE")
@@ -2842,8 +2901,17 @@ class LeasesGit(unittest.TestCase):
         self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", msg)
 
     def tw(self, *args, walk=True, ok=True):
+        if len(args) >= 3 and args[0:2] == ("task", "set") and "--review" in args:
+            passing = args[args.index("--review") + 1] in ("pass", "capped")
+            defaults = [("--tests", "ran"), ("--base", "0000000")]
+            if passing:
+                defaults += [("--recheck-how", "independent test run"),
+                             ("--recheck-evidence", "Primary output shows 12 records")]
+            for flag, value in defaults:
+                if flag not in args:
+                    args = (*args, flag, value)
         if walk and ok:
-            walk_args(lambda *x: self.tw(*x, walk=False), args, self.proj / ".teamwork" / "state.json")
+            walk_args(lambda *x: self.tw(*x, walk=False), args, self.proj / ".teamwork" / "state.json", prepare_primary=True)
         r = subprocess.run([sys.executable, str(TW), "-C", str(self.proj), *args], cwd=self.proj,
                            capture_output=True, text=True)
         if ok:
@@ -5604,6 +5672,12 @@ class MergeRehearsal(LeasesGit):
         (self.proj / "zorb.py").write_text("a = 1\n")
         (self.proj / "check.sh").write_text("grep -q 'a = ' zorb.py\n")
         self.commit("base")
+        self.tw("task", "add", "T1", "--owner", "ui", "--title", "quixbar",
+                "--primary", "The user sees one quixbar result")
+        proof = self.proj / "merge-primary-proof.txt"
+        proof.write_text("the real artifact displays 1 quixbar result", encoding="utf-8")
+        self.tw("task", "verify", "T1", "--seen", "--how", "open the real quixbar artifact",
+                "--evidence", str(proof))
         self.git("checkout", "-q", "-b", "tw/proj/ui")
         (self.proj / "quix.py").write_text("q = 1\n")
         self.commit("T1: quixbar")
@@ -6037,6 +6111,7 @@ class H1Followups(TwCase):
         git("init", "-q", "-b", "main")
         git("config", "user.name", "t"); git("config", "user.email", "t@example.invalid")
         (self.dir / "base.txt").write_text("base\n"); git("add", "base.txt"); git("commit", "-qm", "base")
+        self.tw("task", "add", "T1", "--title", "merge fixture")
         git("checkout", "-q", "-b", "tw/demo/ui")
         (self.dir / "change.txt").write_text("merged\n"); git("add", "change.txt"); git("commit", "-qm", "T1: change")
         sha = git("rev-parse", "HEAD").stdout.strip()
@@ -7112,6 +7187,7 @@ class RoutingAndChecks(TwCase):
         git("config", "user.email", "test@example.invalid")
         (self.dir / "base.txt").write_text("base\n")
         git("add", "base.txt"); git("commit", "-q", "-m", "base")
+        self.tw("task", "add", "T1", "--title", "result fixture")
         branch = "tw/demo/ui"
         git("checkout", "-q", "-b", branch)
         (self.dir / "result.txt").write_text("result\n")
@@ -9163,6 +9239,754 @@ class T72ScreenAutomationSignalsStats(TwCase):
         self.assertIn("~",why)
         self.assertNotIn(str(Path.home()),why)
         self.assertLessEqual(len(why),200)
+
+
+
+
+class PrimaryOutcome(TwCase):
+    """R71/G8 primary outcome gates, reporting and real subprocess behavior."""
+
+    def setUp(self):
+        super().setUp()
+        self.tw("prefs", "--set", "require_primary=true")
+
+    def tw(self, *args, ok=True, walk=True):
+        if walk:
+            walk_args(lambda *x: self.tw(*x, walk=False), args, self.dir / ".teamwork" / "state.json")
+        r = subprocess.run([sys.executable, str(TW), *args], cwd=self.dir, env=self.env,
+                           capture_output=True, text=True)
+        if ok:
+            self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    def add(self, tid="T1", primary="The user sees all 12 restored records"):
+        if "worker" not in self.state()["threads"]:
+            self.tw("thread", "add", "worker")
+        args = ["task", "add", tid, "--title", "restore records", "--owner", "worker", "--accept", "records match"]
+        if primary:
+            args += ["--primary", primary]
+        self.tw(*args)
+
+    def verify(self, tid="T1", *extra):
+        proof = self.dir / f"{tid}-primary.txt"
+        proof.write_text("real artifact: 12 records", encoding="utf-8")
+        return self.tw("task", "verify", tid, "--seen", "--how", "Open the real project artifact",
+                       "--evidence", str(proof), *extra)
+
+    def working(self, tid="T1"):
+        self.tw("task", "set", tid, "--status", "working")
+
+    def reviewed_task(self, tid="T1", primary="The user sees all 12 restored records"):
+        self.add(tid, primary)
+        self.working(tid)
+        self.tw("task", "verify", tid, "--seen", "--how", "open the real artifact", "--evidence", "output shows 12 records")
+        self.tw("task", "set", tid, "--status", "review")
+
+    def passing_review(self, tid="T1", **extra):
+        args = ["task", "set", tid, "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                "--base", "abcdef0", "--recheck-how", "reviewer independently opened the artifact",
+                "--recheck-evidence", "reviewer confirms 12 records"]
+        if extra.get("suspect_cleared"):
+            args.append("--suspect-cleared")
+        self.tw(*args)
+
+    def test_review_gate_evidence_and_recheck(self):
+        self.add()
+        self.working()
+        denied = self.tw("task", "set", "T1", "--status", "review", ok=False)
+        self.assertIn("primary outcome", denied.stderr.lower())
+        empty = self.tw("task", "verify", "T1", "--seen", "--how", "Open artifact", "--evidence", "OK", ok=False)
+        self.assertIn("concrete", empty.stderr.lower())
+        absent = self.tw("task", "verify", "T1", "--seen", "--how", "Open artifact", "--evidence",
+                         "./missing-primary.png", ok=False)
+        self.assertIn("concrete", absent.stderr.lower())
+        self.tw("task", "verify", "T1", "--seen", "--how", "Open artifact", "--evidence", "shows 12 records")
+        self.tw("task", "set", "T1", "--status", "review")
+        no_recheck = self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer",
+                             "--tests", "ran", "--base", "abcdef0", ok=False)
+        self.assertIn("recheck", no_recheck.stderr.lower())
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                "--base", "abcdef0", "--recheck-how", "independently opened artifact", "--recheck-evidence",
+                "confirmed 12 records")
+
+    def test_skip_review_done_still_requires_owner(self):
+        self.add()
+        self.working()
+        self.verify()
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("task", "set", "T1", "--owner", "")
+        denied = self.tw("task", "set", "T1", "--status", "done", "--skip-review", "user waived",
+                         "--user-said", "skip review", ok=False)
+        self.assertIn("no owner", denied.stderr)
+
+    def test_relative_evidence_paths_from_project_folder(self):
+        # Found on the real CLI: a bare screenshot name in the project folder was refused.
+        self.add()
+        self.working()
+        (self.dir / "shot.png").write_bytes(b"png")
+        (self.dir / "docs" / "shots").mkdir(parents=True)
+        (self.dir / "docs" / "shots" / "chat.png").write_bytes(b"png")
+        self.tw("task", "verify", "T1", "--seen", "--how", "Open the real app", "--evidence", "shot.png")
+        self.tw("task", "verify", "T1", "--seen", "--how", "Open the real app", "--evidence",
+                "screenshot docs/shots/chat.png")
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                "--base", "abcdef0", "--recheck-how", "independently reopened the app",
+                "--recheck-evidence", "shot.png")
+        nothing = self.tw("task", "verify", "T1", "--seen", "--how", "Open the real app", "--evidence",
+                          "missing.png", ok=False)
+        self.assertIn("concrete", nothing.stderr.lower())
+        self.tw("task", "verify", "T1", "--seen", "--how", "真跑 CLI", "--evidence", "输出 15 条")
+        bare = self.tw("task", "verify", "T1", "--seen", "--how", "真跑 CLI", "--evidence", "15", ok=False)
+        self.assertIn("concrete", bare.stderr.lower())
+
+    def test_zh_project_shows_chinese_everywhere(self):
+        # Lead's check: a zh project must never show the new strings in English.
+        self.tw("prefs", "--set", "language=zh")
+        self.add()
+        self.working()
+        self.tw("task", "verify", "T1", "--seen", "--how", "真启动 App", "--evidence", "显示 132 条，原库 132 条")
+        self.tw("task", "set", "T1", "--status", "review")
+        (self.dir / "shot.png").write_bytes(b"png")
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "not-run",
+                "--tests-why", "没装浏览器", "--checks", "pass", "--base", "abcdef0",
+                "--recheck-how", "独立重开 App", "--recheck-evidence", "shot.png")
+        self.tw("task", "set", "T1", "--status", "done")
+        card = self.tw("card", "--kind", "done", "--head", "T1 完成").stdout
+        self.assertTrue(card.startswith("主产出：看到了"), card)
+        self.assertIn("测试：没跑（没装浏览器） · 基于 abcdef0", card)
+        self.assertIn("测试：没跑（没装浏览器）", self.tw("task", "reviews", "T1").stdout)
+        self.add("T2", "打开页面能看到 15 条记录")
+        self.working("T2")
+        self.tw("task", "verify", "T2", "--seen", "--how", "真跑 CLI", "--evidence", "输出 15 条")
+        self.tw("task", "set", "T2", "--status", "review")
+        self.tw("task", "set", "T2", "--review", "fail", "--env-down", "浏览器起不来", "--reviewer", "reviewer",
+                "--tests", "not-run", "--tests-why", "浏览器缺失", "--base", "abcdef0")
+        done = self.tw("task", "set", "T2", "--status", "done", ok=False)
+        self.assertIn("环境起不来，待重跑：done 要等重跑", done.stderr)
+        board = self.tw("board").stdout
+        self.assertIn("看到了", board)
+        self.assertNotIn("blocked-env (", board)
+        self.assertNotIn("environment unavailable", board)
+        noreason = self.tw("task", "set", "T2", "--review", "fail", "--reviewer", "reviewer", "--tests", "not-run",
+                           "--base", "abcdef0", ok=False)
+        self.assertIn("--tests-why", noreason.stderr)
+        self.assertIn("原因", noreason.stderr)
+        self.assertIn("主产出：", self.tw("task-msg", "T2").stdout)
+
+    def test_suspect_cleared_with_chinese_negation(self):
+        # Found on the real CLI: "确认不是 mock" in --recheck-how kept the review refused.
+        self.add()
+        self.working()
+        self.tw("task", "verify", "T1", "--seen", "--how", "用 mock 数据跑", "--evidence", "显示 132 条，原库 132 条")
+        self.assertTrue(self.state()["tasks"]["T1"]["primary_suspect"])
+        self.tw("task", "verify", "T1", "--seen", "--how", "真启动，没用 mock", "--evidence", "显示 132 条，原库 132 条")
+        self.tw("task", "set", "T1", "--status", "review")
+        (self.dir / "shot.png").write_bytes(b"png")
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                "--base", "abcdef0", "--recheck-how", "独立重开 App，确认不是 mock",
+                "--recheck-evidence", "shot.png", "--suspect-cleared")
+        self.assertEqual(self.state()["tasks"]["T1"]["review"]["result"], "pass")
+
+    def test_suspect_warning_clear_and_negation(self):
+        self.add()
+        self.working()
+        suspected = self.tw("task", "verify", "T1", "--seen", "--how", "Run mocked browser", "--evidence",
+                            "shows 12 records")
+        self.assertIn("Warning", suspected.stderr)
+        self.assertTrue(self.state()["tasks"]["T1"]["primary_suspect"])
+        self.tw("task", "set", "T1", "--status", "review")
+        withheld = self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                           "--base", "abcdef0", "--recheck-how", "independently opened artifact",
+                           "--recheck-evidence", "confirmed 12 records", ok=False)
+        self.assertIn("suspect", withheld.stderr.lower())
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                "--base", "abcdef0", "--recheck-how", "independent real run, no mock used",
+                "--recheck-evidence", "confirmed 12 records", "--suspect-cleared")
+        self.add("T2")
+        self.working("T2")
+        self.tw("task", "verify", "T2", "--seen", "--how", "no mock; open the real artifact", "--evidence",
+                "shows 12 records")
+        self.assertNotIn("primary_suspect", self.state()["tasks"]["T2"])
+        self.tw("task", "set", "T2", "--status", "review")
+        self.tw("task", "set", "T2", "--status", "working")
+        task = self.state()["tasks"]["T2"]
+        self.assertNotIn("primary_check", task)
+        self.assertEqual(task["past_primary_checks"][-1]["result"], "seen")
+
+    def test_pending_real_done_requires_user_words(self):
+        self.add()
+        self.working()
+        self.tw("task", "verify", "T1", "--pending-real", "--how", "Needs physical device", "--evidence",
+                "device run pending: ticket 12", "--why", "No device available")
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("prefs", "--set", "require_review=false", "--user-said", "skip independent review for this fixture")
+        denied = self.tw("task", "set", "T1", "--status", "done", ok=False)
+        self.assertIn("user-said", denied.stderr)
+        self.tw("task", "set", "T1", "--status", "done", "--user-said", "accept device check later")
+        self.assertIn("pending-real", self.tw("board").stdout)
+        self.assertTrue(self.tw("card", "--kind", "done", "--head", "done").stdout.startswith("Primary outcome: pending-real"))
+
+    def test_blocked_environment_done_message_and_no_round(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.add()
+        self.working()
+        self.verify()
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("task", "set", "T1", "--review", "fail", "--reviewer", "reviewer", "--tests", "not-run",
+                "--tests-why", "browser runtime unavailable", "--base", "abcdef0", "--env-down",
+                "browser runtime cannot start")
+        task = self.state()["tasks"]["T1"]
+        self.assertEqual(task["review"]["result"], "blocked-env")
+        self.assertNotIn("review_rounds", task)
+        denied = self.tw("task", "set", "T1", "--status", "done", ok=False)
+        self.assertIn("环境起不来，待重跑", denied.stderr)
+
+    def test_review_options_waiver_board_reviews_card_and_dispatch(self):
+        self.add()
+        self.working()
+        self.verify()
+        self.tw("task", "set", "T1", "--status", "review")
+        missing_tests = self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--base",
+                                "abcdef0", "--recheck-how", "opened artifact", "--recheck-evidence", "12 records",
+                                ok=False)
+        self.assertIn("--tests", missing_tests.stderr)
+        missing_base = self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                               "--recheck-how", "opened artifact", "--recheck-evidence", "12 records", ok=False)
+        self.assertIn("--base", missing_base.stderr)
+        missing_why = self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests",
+                              "not-run", "--base", "abcdef0", "--recheck-how", "opened artifact",
+                              "--recheck-evidence", "12 records", ok=False)
+        self.assertIn("--tests-why", missing_why.stderr)
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "not-run",
+                "--tests-why", "runtime unavailable", "--base", "abcdef0", "--recheck-how", "opened artifact",
+                "--recheck-evidence", "12 records")
+        reviews = self.tw("task", "reviews", "T1").stdout
+        self.assertIn("tests", reviews.lower())
+        board = self.tw("board").stdout
+        self.assertIn("primary", board.lower())
+        self.tw("task", "set", "T1", "--status", "done")
+        card = self.tw("card", "--kind", "done", "--head", "Task done").stdout
+        self.assertTrue(card.splitlines()[0].startswith("Primary outcome:"), card)
+        msg = self.tw("task-msg", "T1").stdout
+        self.assertIn("Primary outcome:", msg)
+        self.assertIn("Test order:", msg)
+        self.tw("task", "add", "T2", "--title", "unscoped code task", "--owner", "worker", "--work-kind", "code")
+        missing_primary = self.tw("task-msg", "T2", "--dispatch", ok=False)
+        self.assertIn("primary outcome", missing_primary.stderr.lower())
+        self.tw("task-msg", "T2", "--dispatch", "--no-primary", "user waived", "--user-said", "ship without a primary")
+
+    def test_merge_rejects_missing_primary_and_records_waiver(self):
+        def git(*args):
+            return subprocess.run(["git", "-C", str(self.dir), *args], capture_output=True, text=True)
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "test")
+        git("config", "user.email", "test@example.invalid")
+        (self.dir / "base.txt").write_text("base\n", encoding="utf-8")
+        git("add", "base.txt"); git("commit", "-qm", "initial")
+        self.add(primary=None)
+        git("checkout", "-q", "-b", "tw/demo/worker")
+        (self.dir / "change.txt").write_text("change\n", encoding="utf-8")
+        git("add", "change.txt"); git("commit", "-qm", "T1: add change")
+        sha = git("rev-parse", "HEAD").stdout.strip()
+        blocked = self.tw("merge", "tw/demo/worker", "--sha", sha, "--no-test", "docs only", "--message",
+                          "T1: add change", "--apply", ok=False)
+        self.assertIn("primary", blocked.stderr.lower())
+        state_path = self.dir / ".teamwork" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["tasks"]["T1"]["primary_exempt"] = True
+        state["tasks"]["T1"].setdefault("primary_waivers", []).append(
+            {"why": "legacy waiver fixture", "at": "2026-01-01T00:00:00", "kind": "merge-primary"})
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        self.tw("merge", "tw/demo/worker", "--sha", sha, "--no-test", "docs only", "--message",
+                "T1: add change", "--user-said", "merge without primary proof", "--apply")
+        task = self.state()["tasks"]["T1"]
+        self.assertTrue(task["primary_exempt"])
+        self.assertEqual(task["primary_waivers"][-1]["kind"], "merge-primary")
+
+    def _merge_repo(self):
+        def git(*args):
+            return subprocess.run(["git", "-C", str(self.dir), *args], capture_output=True, text=True)
+        git("init", "-q", "-b", "main"); git("config", "user.name", "test")
+        git("config", "user.email", "test@example.invalid")
+        (self.dir / "base.txt").write_text("base\n", encoding="utf-8")
+        git("add", "base.txt"); git("commit", "-qm", "initial")
+        git("checkout", "-q", "-b", "tw/demo/worker")
+        (self.dir / "change.txt").write_text("change\n", encoding="utf-8")
+        git("add", "change.txt"); git("commit", "-qm", "T1: add change")
+        sha = git("rev-parse", "HEAD").stdout.strip()
+        git("checkout", "-q", "main")
+        return sha
+
+    def _seen_in_review(self, tid="T1"):
+        self.add(tid)
+        self.working(tid)
+        self.tw("task", "verify", tid, "--seen", "--how", "real CLI", "--evidence", "output shows 12 records")
+        self.tw("task", "set", tid, "--status", "review")
+
+    def test_merge_blocked_env_needs_user_words(self):
+        # Round-3 review I2: a blocked-env task must not merge silently.
+        self._seen_in_review()
+        self.tw("task", "set", "T1", "--review", "fail", "--env-down", "browser cannot start", "--reviewer",
+                "reviewer", "--tests", "not-run", "--tests-why", "no browser", "--base", "abcdef0")
+        sha = self._merge_repo()
+        denied = self.tw("merge", "tw/demo/worker", "--sha", sha, "--no-test", "docs", "--apply", ok=False)
+        self.assertIn("rerun", denied.stderr)
+        self.tw("merge", "tw/demo/worker", "--sha", sha, "--no-test", "docs", "--apply", "--user-said", "merge it")
+
+    def test_merge_ignores_queued_tasks_of_the_same_owner(self):
+        # Round-3 review I3: a pre-queued next task (IL-5) has no commits and must not block the merge.
+        self._seen_in_review()
+        self.passing_review()
+        self.tw("task", "add", "T5", "--title", "next", "--owner", "worker", "--accept", "ok", "--deps", "T1")
+        sha = self._merge_repo()
+        self.tw("merge", "tw/demo/worker", "--sha", sha, "--no-test", "docs", "--apply")
+
+    def test_unrecorded_tests_are_not_shown_as_ran(self):
+        # Round-3 review I4: a review without a tests record must not read "ran".
+        self.tw("prefs", "--set", "language=zh")
+        self._seen_in_review()
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "trivial", "--user-said", "跳过")
+        shown = self.tw("task", "reviews", "T1").stdout + self.tw("card", "--kind", "done", "--head", "x").stdout
+        self.assertNotIn("测试：跑了", shown)
+        self.assertIn("未记录", shown)
+
+    def test_disabling_primary_gate_needs_user_said(self):
+        denied = self.tw("prefs", "--set", "require_primary=false", ok=False)
+        self.assertIn("user's decision", denied.stderr)
+        self.tw("prefs", "--set", "require_primary=false", "--user-said", "disable for this project")
+        self.assertFalse(self.state()["prefs"]["require_primary"])
+
+    def test_b1_combined_status_and_passing_review_flags_are_gated(self):
+        self.reviewed_task()
+        for status in ("review", "done"):
+            denied = self.tw("task", "set", "T1", "--status", status, "--review", "pass", "--reviewer", "reviewer",
+                             "--tests", "ran", "--base", "abcdef0", ok=False)
+            self.assertIn("recheck", denied.stderr.lower())
+
+    def test_b1_suspect_cannot_combine_done_and_pass(self):
+        self.add(); self.working()
+        self.tw("task", "verify", "T1", "--seen", "--how", "run mocked artifact", "--evidence", "output shows 12 records")
+        self.tw("task", "set", "T1", "--status", "review")
+        denied = self.tw("task", "set", "T1", "--status", "done", "--review", "pass", "--reviewer", "reviewer",
+                         "--tests", "ran", "--base", "abcdef0", "--recheck-how",
+                         "independent real run", "--recheck-evidence", "reviewer confirms 12 records", ok=False)
+        self.assertIn("suspect", denied.stderr.lower())
+
+    def test_b2_failed_review_invalidates_primary_before_rework(self):
+        self.reviewed_task()
+        self.tw("task", "set", "T1", "--review", "fail", "--reviewer", "reviewer", "--tests", "ran", "--base", "abcdef0")
+        self.assertEqual(self.state()["tasks"]["T1"]["status"], "working")
+        denied = self.tw("task", "set", "T1", "--status", "review", ok=False)
+        self.assertIn("primary outcome", denied.stderr.lower())
+        self.assertNotIn("primary_check", self.state()["tasks"]["T1"])
+
+    def test_i1_verify_primary_and_owner_changes_void_reviews(self):
+        self.reviewed_task()
+        self.passing_review()
+        self.tw("task", "verify", "T1", "--seen", "--how", "reviewer reopens real artifact", "--evidence", "new output shows 12 records")
+        task = self.state()["tasks"]["T1"]
+        self.assertNotIn("review", task)
+        self.assertEqual(task["past_reviews"][-1]["result"], "pass")
+        self.assertEqual(task["primary_check"]["evidence"], "new output shows 12 records")
+
+        self.passing_review()
+        # A new owner changes neither the artifact nor the reviewed diff: the check and an
+        # independent pass stay (T23 rule); a reviewer who becomes the owner voids the pass.
+        self.tw("thread", "add", "replacement-owner")
+        self.tw("task", "set", "T1", "--owner", "replacement-owner")
+        task = self.state()["tasks"]["T1"]
+        self.assertEqual(task["status"], "review")
+        self.assertEqual(task["review"]["result"], "pass")
+        self.assertEqual(task["primary_check"]["result"], "seen")
+        self.tw("thread", "add", "reviewer")
+        self.tw("task", "set", "T1", "--owner", "reviewer")
+        task = self.state()["tasks"]["T1"]
+        self.assertNotIn("review", task)
+        self.assertEqual(task["primary_check"]["result"], "seen")
+        self.tw("task", "set", "T1", "--status", "done", ok=False)
+
+    def test_i1_primary_change_voids_review_and_evidence(self):
+        self.reviewed_task()
+        self.passing_review()
+        self.tw("task", "set", "T1", "--primary", "The user sees exactly 13 restored records")
+        task = self.state()["tasks"]["T1"]
+        self.assertEqual(task["status"], "working")
+        self.assertNotIn("review", task)
+        self.assertNotIn("primary_check", task)
+
+    def test_i1_base_change_voids_review(self):
+        self.reviewed_task()
+        self.passing_review()
+        self.tw("task", "set", "T1", "--base", "1234567")
+        task = self.state()["tasks"]["T1"]
+        self.assertEqual(task["status"], "review")
+        self.assertNotIn("review", task)
+        self.assertEqual(task["past_reviews"][-1]["voided"], "review base changed")
+
+    def test_i2_dispatch_exemption_bypasses_primary_gates(self):
+        self.add(primary=None)
+        self.tw("plan", "approve", "--user-said", "approve exemption fixture")
+        self.tw("task-msg", "T1", "--dispatch", "--no-primary", "user waived", "--user-said", "ship without primary")
+        self.working()
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran", "--base", "abcdef0")
+        self.tw("task", "set", "T1", "--status", "done")
+        self.assertIn("豁免" if self.state().get("prefs", {}).get("language") == "zh" else "waived", self.tw("board").stdout)
+        self.assertIn("waived", self.tw("card", "--kind", "done", "--head", "done").stdout)
+
+    def test_minor_primary_text_and_suspect_clause_rules(self):
+        self.assertTrue(tw._primary_text_valid("列表显示三条"))
+        self.assertFalse(tw._primary_text_valid("Open 12"))
+        self.assertFalse(tw._primary_evidence_specific(self.dir, "passed 100%"))
+        self.assertFalse(tw._primary_evidence_specific(self.dir, "/etc/hosts"))
+        self.assertFalse(tw._primary_suspect("simulator screenshot", "output shows 12 rows"))
+        self.assertTrue(tw._primary_suspect("no mock, but used sinon", "shows 12 rows"))
+        self.assertFalse(tw._primary_suspect("no mock", "output shows 12 rows"))
+        self.assertTrue(tw._primary_evidence_specific(self.dir, "https://example.invalid/report"))
+
+    def test_recheck_evidence_must_be_independent(self):
+        self.reviewed_task()
+        denied = self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                         "--base", "abcdef0", "--recheck-how", "independently opened artifact",
+                         "--recheck-evidence", "output shows 12 records", ok=False)
+        self.assertIn("own", denied.stderr.lower())
+
+    def test_recheck_suspect_terms_require_explicit_clearance(self):
+        self.reviewed_task()
+        denied = self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                         "--base", "abcdef0", "--recheck-how", "open the browser", "--recheck-evidence",
+                         "sinon output shows 13 records", ok=False)
+        self.assertIn("suspect", denied.stderr.lower())
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                "--base", "abcdef0", "--recheck-how", "open the browser", "--recheck-evidence",
+                "sinon output shows 13 records", "--suspect-cleared")
+        self.assertTrue(self.state()["tasks"]["T1"]["review"]["suspect_cleared"])
+
+    def test_invariant_flag_combinations_keep_final_state_valid(self):
+        self.reviewed_task()
+        self.passing_review()
+        self.tw("thread", "add", "alternate")
+        seed = self.state()
+        names = ("status", "review", "primary", "owner")
+        combinations = [combo for size in (1, 2, 3) for combo in itertools.combinations(names, size)]
+        scenario_statuses = ("working", "review", "done-ready")
+        serial = 0
+        for initial in scenario_statuses:
+            for combo in combinations:
+                serial += 1
+                tid = f"Tcombo{serial}"
+                fixture = json.loads(json.dumps(seed))
+                task = json.loads(json.dumps(seed["tasks"]["T1"]))
+                task["status"] = "review" if initial != "working" else "working"
+                if initial == "working":
+                    task.pop("review", None); task.pop("review_rounds", None)
+                if initial == "review":
+                    task.pop("review", None); task.pop("review_rounds", None)
+                task["id"] = tid
+                fixture["tasks"][tid] = task
+                state_file = self.dir / ".teamwork" / "state.json"
+                state_file.write_text(json.dumps(fixture, ensure_ascii=False), encoding="utf-8")
+                args = ["task", "set", tid]
+                if "status" in combo:
+                    args += ["--status", {"working": "review", "review": "working", "done-ready": "done"}[initial]]
+                if "primary" in combo:
+                    args += ["--primary", f"The user sees updated result {serial}"]
+                if "owner" in combo:
+                    args += ["--owner", "alternate"]
+                if "review" in combo:
+                    args += ["--review", "pass", "--reviewer", "fresh-reviewer", "--tests", "ran", "--base", "abcdef0",
+                             "--recheck-how", "fresh reviewer opens real output", "--recheck-evidence",
+                             f"reviewer confirms {serial + 20} records"]
+                result = subprocess.run([sys.executable, str(TW), *args], cwd=self.dir, env=self.env,
+                                        capture_output=True, text=True)
+                after = json.loads(state_file.read_text(encoding="utf-8"))["tasks"][tid]
+                if result.returncode == 0 and after["status"] in ("review", "done"):
+                    self.assertIn((after.get("primary_check") or {}).get("result"), ("seen", "pending-real"),
+                                  (initial, combo, result.stderr))
+                if (after.get("review") or {}).get("result") in ("pass", "capped"):
+                    self.assertTrue(after["review"].get("recheck_evidence"), (initial, combo))
+                    self.assertNotEqual(after["review"].get("recheck_evidence"),
+                                        (after.get("primary_check") or {}).get("evidence"), (initial, combo))
+
+    def test_i3_merge_message_matches_complete_task_ids(self):
+        def scenario(name, message, squash, blocked_tid=None, valid_tid=None):
+            root = self.dir / name
+            root.mkdir()
+            def git(*args):
+                return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+            git("init", "-q", "-b", "main")
+            git("config", "user.name", "test")
+            git("config", "user.email", "test@example.invalid")
+            (root / "base.txt").write_text("base\n", encoding="utf-8")
+            git("add", "base.txt"); git("commit", "-qm", "initial")
+            init = subprocess.run([sys.executable, str(TW), "init", "demo", "--goal", "merge fixture"], cwd=root,
+                                  env=self.env, capture_output=True, text=True)
+            self.assertEqual(init.returncode, 0, init.stderr)
+            if blocked_tid:
+                thread = subprocess.run([sys.executable, str(TW), "thread", "add", "worker"], cwd=root,
+                                        env=self.env, capture_output=True, text=True)
+                self.assertEqual(thread.returncode, 0, thread.stderr)
+            for tid in ("T1", "T12"):
+                task_args = ["task", "add", tid, "--title", tid, "--accept", "merged"]
+                if blocked_tid: task_args += ["--owner", "worker"]
+                add = subprocess.run([sys.executable, str(TW), *task_args],
+                                     cwd=root, env=self.env, capture_output=True, text=True)
+                self.assertEqual(add.returncode, 0, add.stderr)
+            state_path = root / ".teamwork" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            proof = root / "proof.txt"; proof.write_text("proof", encoding="utf-8")
+            for tid in ("T1", "T12"):
+                if tid == valid_tid:
+                    state["tasks"][tid]["primary_check"] = {"result": "seen", "evidence": str(proof)}
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            git("checkout", "-q", "-b", "tw/demo/worker")
+            (root / "change.txt").write_text("change\n", encoding="utf-8")
+            git("add", "change.txt"); git("commit", "-qm", f"{valid_tid or blocked_tid or 'T1'}-fix: change")
+            sha = git("rev-parse", "HEAD").stdout.strip()
+            args = ["merge", "tw/demo/worker", "--sha", sha, "--no-test", "docs only"]
+            if message is not None: args += ["--message", message]
+            if squash: args += ["--squash"]
+            args += ["--apply"]
+            result = subprocess.run([sys.executable, str(TW), *args], cwd=root, env=self.env,
+                                    capture_output=True, text=True)
+            if blocked_tid:
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(blocked_tid, result.stderr)
+            else:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if message is None or message == "chore: squash":
+                    self.assertIn("no tasks are associated", result.stderr.lower())
+
+        scenario("merge_t1", "fix: change (T1)", False, valid_tid="T1")
+        scenario("merge_t12", "fix: change (T12)", False, valid_tid="T12")
+        scenario("merge_no_message", None, False, blocked_tid="T1")
+        scenario("merge_squash", "chore: squash", True, blocked_tid="T1")
+
+    def test_legacy_review_done_tasks_allow_unrelated_updates(self):
+        self.add("Tlegacy-review")
+        self.add("Tlegacy-done")
+        path = self.dir / ".teamwork" / "state.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        legacy_fields = {key: state["tasks"]["Tlegacy-review"][key]
+                         for key in ("title", "owner", "deps", "accept", "touches", "topics", "notes", "created")}
+        state["tasks"]["Tlegacy-review"] = {**legacy_fields, "status": "review",
+                                               "review": {"result": "pass", "reviewer": "reviewer"}}
+        state["tasks"]["Tlegacy-done"] = {**legacy_fields, "title": "legacy done fixture", "status": "done"}
+        path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        self.tw("task", "set", "Tlegacy-review", "--notes", "legacy review note")
+        self.tw("task", "set", "Tlegacy-done", "--notes", "legacy done note")
+        self.tw("task", "set", "Tlegacy-done", "--merged", "abcdef0")
+        board = self.tw("board").stdout
+        self.assertIn("Tlegacy-review", board)
+        self.assertIn("legacy", board)
+        self.assertIn("Tlegacy-done", board)
+
+    def test_return_to_working_paths_share_invalidation_and_keep_not_seen(self):
+        def ready(tid):
+            self.add(tid)
+            self.working(tid)
+            self.tw("task", "verify", tid, "--seen", "--how", "open real artifact", "--evidence", "output shows 12 records")
+            self.tw("task", "set", tid, "--status", "review")
+            self.tw("task", "set", tid, "--checks", "pass")
+            self.tw("task", "set", tid, "--merged", "abcdef0")
+
+        ready("T1")
+        self.tw("task", "set", "T1", "--status", "working")
+        explicit = self.state()["tasks"]["T1"]
+        self.assertEqual((explicit["status"], explicit["checks"], explicit["rework"]), ("working", "none", 1))
+        self.assertNotIn("merged_sha", explicit)
+        self.assertNotIn("primary_check", explicit)
+
+        ready("T2")
+        self.tw("task", "set", "T2", "--review", "fail", "--reviewer", "reviewer", "--tests", "ran", "--base", "abcdef0")
+        failed = self.state()["tasks"]["T2"]
+        self.assertEqual((failed["status"], failed["checks"], failed["rework"]), ("working", "none", 1))
+        self.assertNotIn("merged_sha", failed)
+        self.assertNotIn("primary_check", failed)
+
+        ready("T3")
+        self.tw("task", "set", "T3", "--primary", "The user sees exactly 14 restored records")
+        changed = self.state()["tasks"]["T3"]
+        self.assertEqual((changed["status"], changed["checks"], changed["rework"]), ("working", "none", 1))
+        self.assertNotIn("merged_sha", changed)
+        self.assertNotIn("primary_check", changed)
+
+        ready("T4")
+        self.tw("task", "verify", "T4", "--not-seen", "--how", "open real artifact", "--evidence",
+                "output shows 0 matching records")
+        not_seen = self.state()["tasks"]["T4"]
+        self.assertEqual((not_seen["status"], not_seen["checks"], not_seen["rework"]), ("working", "none", 1))
+        self.assertEqual(not_seen["primary_check"]["result"], "not-seen")
+        self.assertNotIn("merged_sha", not_seen)
+
+    def test_merge_refs_history_and_one_time_waiver(self):
+        def fixture(name, alias="refs/heads/x", subject="T1-fix: change", verified=True, conflict=False, owner_switch=False):
+            root = self.dir / name
+            root.mkdir()
+            def git(*args):
+                return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+            git("init", "-q", "-b", "main")
+            git("config", "user.name", "test")
+            git("config", "user.email", "test@example.invalid")
+            (root / "base.txt").write_text("base\n", encoding="utf-8")
+            git("add", "base.txt"); git("commit", "-qm", "initial")
+            init = subprocess.run([sys.executable, str(TW), "init", "demo", "--goal", "merge fixture"], cwd=root,
+                                  env=self.env, capture_output=True, text=True)
+            self.assertEqual(init.returncode, 0, init.stderr)
+            for args in (("thread", "add", "worker"), ("thread", "add", "replacement")):
+                result = subprocess.run([sys.executable, str(TW), *args], cwd=root, env=self.env,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            add = subprocess.run([sys.executable, str(TW), "task", "add", "T1", "--title", "work", "--owner",
+                                  "replacement" if owner_switch else "worker", "--accept", "merged",
+                                  "--primary", "The user sees 12 restored records"], cwd=root, env=self.env,
+                                 capture_output=True, text=True)
+            self.assertEqual(add.returncode, 0, add.stderr)
+            state_path = root / ".teamwork" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["threads"]["worker"]["branch"] = "refs/heads/x"
+            task = state["tasks"]["T1"]
+            task["status"] = "working"  # dispatched work has commits on the branch; queued work does not
+            if owner_switch:
+                task["past_owners"] = ["worker"]
+            if verified:
+                task["primary_check"] = {"result": "seen", "evidence": "output shows 12 records", "sha": None}
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            git("checkout", "-q", "-b", "x")
+            if conflict:
+                (root / "base.txt").write_text("branch\n", encoding="utf-8")
+                git("add", "base.txt"); git("commit", "-qm", subject)
+                git("checkout", "-q", "main")
+                (root / "base.txt").write_text("main\n", encoding="utf-8")
+                git("add", "base.txt"); git("commit", "-qm", "main change")
+                git("checkout", "-q", "x")
+            else:
+                (root / "change.txt").write_text("change\n", encoding="utf-8")
+                git("add", "change.txt"); git("commit", "-qm", subject)
+            sha = git("rev-parse", "HEAD").stdout.strip()
+            return root, git, state_path, sha
+
+        for index, alias in enumerate(("heads/x", "refs/heads/x", "x", "sha")):
+            root, git, state_path, sha = fixture(f"merge-ref-{index}", subject="T1-fix: change")
+            branch_ref = sha if alias == "sha" else alias
+            result = subprocess.run([sys.executable, str(TW), "merge", branch_ref, "--sha", sha, "--no-test",
+                                     "docs only", "--apply"], cwd=root, env=self.env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        root, git, state_path, sha = fixture("merge-owner-switch", subject="ordinary change", verified=False,
+                                             owner_switch=True)
+        blocked = subprocess.run([sys.executable, str(TW), "merge", "refs/heads/x", "--sha", sha, "--no-test",
+                                  "docs only", "--apply"], cwd=root, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("T1", blocked.stderr)
+
+        root, git, state_path, sha = fixture("merge-failed-waiver", subject="ordinary change", verified=False,
+                                             conflict=True)
+        before_log = (root / ".teamwork" / "log.jsonl").read_text(encoding="utf-8")
+        failed = subprocess.run([sys.executable, str(TW), "merge", "x", "--sha", sha, "--no-test", "docs only",
+                                 "--user-said", "allow this merge once", "--apply"], cwd=root, env=self.env,
+                                capture_output=True, text=True)
+        self.assertNotEqual(failed.returncode, 0)
+        after = json.loads(state_path.read_text(encoding="utf-8"))["tasks"]["T1"]
+        self.assertNotIn("primary_exempt", after)
+        self.assertNotIn("primary_waivers", after)
+        self.assertEqual((root / ".teamwork" / "log.jsonl").read_text(encoding="utf-8"), before_log)
+
+        root, git, state_path, sha = fixture("merge-no-association", subject="ordinary change", verified=False)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["threads"]["worker"]["branch"] = "other"
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        denied = subprocess.run([sys.executable, str(TW), "merge", "x", "--sha", sha, "--no-test", "docs only",
+                                 "--apply"], cwd=root, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("no tasks are associated", denied.stderr.lower())
+        self.assertEqual(denied.stderr.lower().count("no tasks are associated"), 1)  # printed once, not twice
+        waived = subprocess.run([sys.executable, str(TW), "merge", "x", "--sha", sha, "--no-test", "docs only",
+                                 "--user-said", "allow unassociated merge once", "--apply"], cwd=root, env=self.env,
+                                capture_output=True, text=True)
+        self.assertEqual(waived.returncode, 0, waived.stderr)
+        task = json.loads(state_path.read_text(encoding="utf-8"))["tasks"]["T1"]
+        self.assertNotIn("primary_exempt", task)
+        events = [json.loads(line) for line in (root / ".teamwork" / "log.jsonl").read_text(encoding="utf-8").splitlines()]
+        merge_event = next(event for event in reversed(events) if event.get("ev") == "merge")
+        self.assertEqual(merge_event["primary_waiver"]["kind"], "unassociated-merge")
+
+    def test_minor_suspect_normalization_sha_env_skip_and_labels(self):
+        self.assertTrue(tw._primary_suspect("fixture run", "output shows 12 records"))
+        self.assertTrue(tw._primary_suspect("dummy data", "output shows 12 records"))
+        self.assertTrue(tw._primary_suspect("simulated browser", "output shows 12 records"))
+        self.assertTrue(tw._primary_suspect("placeholder screen", "output shows 12 records"))
+        self.assertTrue(tw._primary_suspect("样例数据", "显示 12 条记录"))
+        self.assertTrue(tw._primary_suspect("假的运行环境", "显示 12 条记录"))
+        self.assertFalse(tw._primary_evidence_specific(self.dir, "looks fine 1"))
+
+        self.add("Tno-primary", primary=None)
+        self.working("Tno-primary")
+        no_primary = self.tw("task", "verify", "Tno-primary", "--seen", "--how", "open artifact",
+                             "--evidence", "output shows 12 records", ok=False)
+        self.assertIn("--primary", no_primary.stderr)
+
+        self.add()
+        self.working()
+        self.tw("task", "verify", "T1", "--seen", "--how", "open real artifact", "--evidence",
+                "worker output shows 12 records", "--sha", "abcdef0")
+        self.tw("task", "set", "T1", "--status", "review")
+        denied = self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                         "--base", "abcdef0", "--recheck-how", "reviewer opened real artifact",
+                         "--recheck-evidence", "WORKER-output_shows 12 records", ok=False)
+        self.assertIn("own", denied.stderr.lower())
+        passed = self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "reviewer", "--tests", "ran",
+                         "--base", "1234567", "--reviewed", "abcdef0", "--recheck-how",
+                         "reviewer opened independent real artifact", "--recheck-evidence",
+                         "reviewer independently sees 12 restored records")
+        self.assertIn("verification used abcdef0", passed.stderr.lower())
+
+        self.tw("task", "set", "T1", "--status", "working")
+        self.tw("task", "verify", "T1", "--seen", "--how", "open real artifact again", "--evidence",
+                "fresh output shows 12 records")
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("task", "set", "T1", "--review", "fail", "--reviewer", "reviewer", "--tests", "not-run",
+                "--tests-why", "browser unavailable", "--base", "abcdef0", "--env-down", "browser cannot start")
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "environment is unavailable",
+                "--user-said", "accept this environment limitation")
+        self.assertEqual(self.state()["tasks"]["T1"]["status"], "done")
+        done_verify = self.tw("task", "verify", "T1", "--seen", "--how", "open the real artifact",
+                              "--evidence", "output still shows 12 records", ok=False)
+        self.assertIn("done task cannot be re-verified", done_verify.stderr)
+
+        self.tw("prefs", "--set", "language=zh")
+        labels = self.tw("board").stdout
+        self.assertIn("主产出", labels)
+        reviews = self.tw("task", "reviews", "-").stdout
+        self.assertIn("测试/基线", reviews)
+
+    def test_review_status_and_pass_can_be_recorded_together(self):
+        self.add()
+        self.working()
+        self.tw("task", "verify", "T1", "--seen", "--how", "open real artifact", "--evidence", "output shows 12 records")
+        self.tw("task", "set", "T1", "--status", "review", "--review", "pass", "--reviewer", "reviewer",
+                "--tests", "ran", "--base", "abcdef0", "--recheck-how", "reviewer opened real artifact",
+                "--recheck-evidence", "reviewer confirms 12 restored records")
+        self.assertEqual(self.state()["tasks"]["T1"]["status"], "review")
+        self.assertEqual(self.state()["tasks"]["T1"]["review"]["result"], "pass")
+
+    def test_recalled_task_redispatch_invalidates_old_verify(self):
+        self.add()
+        self.working()
+        self.verify()
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("task", "set", "T1", "--review", "fail", "--reviewer", "reviewer", "--tests", "ran", "--base", "abcdef0")
+        self.tw("plan", "approve", "--user-said", "approve redispatch fixture")
+        path = self.dir / ".teamwork" / "state.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state["tasks"]["T1"]["status"] = "recalled"
+        state["tasks"]["T1"]["primary_check"] = {"result": "seen", "evidence": "old run shows 12 records"}
+        path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        task = self.state()["tasks"]["T1"]
+        self.assertNotIn("primary_check", task)
+        self.assertEqual(task["past_primary_checks"][-1]["evidence"], "old run shows 12 records")
 
 
 if __name__ == "__main__":

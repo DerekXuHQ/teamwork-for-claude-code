@@ -211,6 +211,67 @@ LABELS = {
         "archive_restorable": "The lead can restore this with the platform tool",
         "open_session_tests": "Session opening: verified (iPhone, Auto selected at start; approved lead-created threads); inferred from records (switching mid-session on web); not tested (mid-session switch on phone, Android, opening threads while chatting with a desktop lead on phone, whether threads under a desktop lead are collapsible)",
         "handover_prompt_hint": "Use the full output of `handover <t> --prompt` as the new session's append_system_prompt; do not send only a file location.",
+        "primary_review_gate": "Primary outcome has not been verified on a real artifact. Primary: {primary}. First run the primary outcome smoke test on the real artifact.",
+        "primary_done_gate": "{primary}: done needs a seen primary outcome; pending-real needs --user-said.",
+        "primary_recheck_gate": "A passing review needs --recheck-how and concrete --recheck-evidence (an existing path or numeric output).",
+        "primary_recheck_independent": "Review evidence must be the reviewer's own; it cannot be identical to the worker evidence.",
+        "primary_suspect_gate": "The primary check is suspect; review needs --suspect-cleared after an independent real run.",
+        "primary_merge_gate": "Merge blocked: {task} has no seen or pending-real primary check. Add --user-said to waive.",
+        "primary_weak": "Primary outcome is too vague; describe what the user sees and any expected count.",
+        "primary_internal": "Warning: this primary outcome mentions an internal value users cannot see.",
+        "primary_missing_hint": "Warning: code/test task has no --primary outcome yet.",
+        "primary_evidence_weak": "Primary evidence must name an existing file or include a concrete numeric output.",
+        "primary_suspect_warning": "Warning: evidence mentions a mock or simulated source; task flagged for independent confirmation.",
+        "primary_exempt": "waived",
+        "primary_missing": "—",
+        "primary_legacy": "legacy",
+        "primary_verify_no_primary": "{task}: verify needs a primary outcome; add --primary before recording verification.",
+        "primary_verify_done": "{task}: a done task cannot be re-verified; open new work for a regression.",
+        "primary_seen": "seen", "primary_not_seen": "not seen", "primary_pending_real": "pending-real",
+        "review_tests_line": "Tests: {tests}{why} · based on {base}",
+        "pv_one": "task verify needs exactly one of --seen, --not-seen or --pending-real",
+        "pv_how": "task verify needs --how and --evidence",
+        "pv_why": "--pending-real needs --why (why it cannot run on the real thing here)",
+        "pv_sha": "--sha: 7-40 hex characters",
+        "g8_tests": "--review needs --tests ran|not-run (did the tests run?)",
+        "g8_tests_why": "--tests not-run needs --tests-why \"<why>\"",
+        "g8_base": "--review needs --base <7-40 hex characters> (the commit the review saw)",
+        "g8_reviewed": "--reviewed: 7-40 hex characters",
+        "g8_base_mismatch": "Warning: review base {base} differs from the recorded reviewed/merged commit {expected}",
+        "g8_verify_sha_mismatch": "Warning: verification used {sha}, but review --base and --reviewed should match it",
+        "g8_env_why": "--env-down needs what you saw (the environment failure)",
+        "g8_env_fail": "--env-down is recorded with --review fail (it is stored as blocked-env, not as a fail)",
+        "g8_notrun_pass": "pass/capped with --tests not-run needs --checks pass or recheck evidence",
+        "env_done_blocked": "{env}: done waits for a rerun",
+        "env_merge_blocked": "{task} {env}: merge waits for a rerun (or --user-said)",
+        "task_owner_done": "{task} has no owner: set it before marking done",
+        "task_review_done": "{task}: no passing review yet. Have an independent reviewer check the diff against 'done when', then `task set {task} --review pass --reviewer <who>` (or --skip-review \"<reason>\" --user-said \"<their words>\")",
+        "task_checks_done": "{task}: checks failed; fix them and record `--checks pass` first (skipping review does not skip checks)",
+        "rp_bool": "require_primary must be true or false",
+        "rp_user": "Turning the primary outcome gate off is the user's decision: add --user-said \"<their words>\"",
+        "tests_why_fmt": " ({why})",
+        "review_tests_ran": "ran", "review_tests_unrecorded": "not recorded", "review_tests_not_run": "not run",
+        "review_blocked_env": "environment unavailable; rerun needed",
+        "invalidate_working": "rework after review",
+        "invalidate_review_fail": "review failed; task returned to working",
+        "invalidate_verify": "primary verification changed",
+        "invalidate_primary": "primary outcome changed",
+        "invalidate_owner": "owner changed",
+        "invalidate_base": "review base changed",
+        "invalidate_accept": "done when changed",
+        "invalidate_replace": "new verdict recorded",
+        "invalidate_checks": "checks changed",
+        "invalidate_env_down": "environment unavailable; review invalidated",
+        "invalidate_redispatch": "task recalled and redispatched",
+        "card_primary_line": "{task}Primary outcome: {result} — {evidence}",
+        "primary_url": "URL",
+        "merge_no_tasks": "Warning: no tasks are associated. Merge is blocked unless --user-said records a one-time waiver.",
+        "primary_dispatch_missing": "{task}: dispatch needs a --primary outcome. Use --no-primary with --user-said only when the user waived it.",
+        "check_msg_primary_missing": "TASK is missing a Primary outcome line",
+        "board_primary_col": "primary",
+        "reviews_tests_base_col": "tests/base",
+        "dispatch_primary_line": "Primary outcome: {value}",
+        "dispatch_test_order": "Test order: verify the primary outcome on the real artifact first; stop and fix if it fails, then test details.",
         "spawn_rc": "Please switch the mode to Auto once in the lead session, then I will open it",
         "spawn_desktop": "Please send the lead a message in the desktop app and I will open it in that turn; or use a Remote Control lead for this project",
         "late_dispatch": "{task}: late result from old dispatch v{got}; current is v{current}",
@@ -496,6 +557,67 @@ LABELS = {
         "archive_restorable": "lead 可用平台工具恢复",
         "open_session_tests": "开会话的实测情况：已验证（iPhone 开局选自动、认可过的 lead 开出的线程）；按记录推断（网页上中途切换）；待测（手机中途切换、Android、手机上和桌面 lead 聊时开线程、线程是否挂在桌面 lead 下可折叠）",
         "handover_prompt_hint": "新会话的 append_system_prompt 用 `handover <t> --prompt` 的完整输出，不要只给文件位置。",
+        "primary_review_gate": "主产出还没有在真实产物上验证。主产出：{primary}。先在真实产物上跑主产出冒烟。",
+        "primary_done_gate": "{primary}：done 只认主产出 seen；pending-real 需要 --user-said。",
+        "primary_recheck_gate": "pass/capped 评审需要 --recheck-how 和具体 --recheck-evidence（存在的路径或带数字的输出）。",
+        "primary_recheck_independent": "复验证据要是评审者自己的，不能与 worker 的证据完全相同。",
+        "primary_suspect_gate": "主产出记录含可疑来源；独立真实运行后加 --suspect-cleared 确认。",
+        "primary_merge_gate": "合并被拦：{task} 没有 seen 或 pending-real 主产出记录。豁免需加 --user-said。",
+        "primary_weak": "主产出太空泛；请写用户能看到什么，以及数量是否符合预期。",
+        "primary_internal": "警告：主产出提到用户看不到的内部值。",
+        "primary_missing_hint": "警告：code/test 任务还没有 --primary 主产出。",
+        "primary_evidence_weak": "主产出证据必须指向存在的文件，或包含具体数字输出。",
+        "primary_suspect_warning": "警告：证据提到 mock 或模拟来源；任务已标为需要独立确认。",
+        "primary_exempt": "豁免",
+        "primary_missing": "—",
+        "primary_legacy": "旧版",
+        "primary_verify_no_primary": "{task}：verify 需要主产出；先用 --primary 补上再记录验证。",
+        "primary_verify_done": "{task}：done 任务不能重新 verify；回归请开新任务。",
+        "primary_seen": "看到了", "primary_not_seen": "没看到", "primary_pending_real": "待真机",
+        "review_tests_line": "测试：{tests}{why} · 基于 {base}",
+        "pv_one": "task verify 要且只要 --seen、--not-seen、--pending-real 其中一个",
+        "pv_how": "task verify 需要 --how 和 --evidence",
+        "pv_why": "--pending-real 需要 --why（为什么这里做不了真机验证）",
+        "pv_sha": "--sha：7 到 40 位十六进制",
+        "g8_tests": "--review 需要 --tests ran|not-run（测试跑没跑）",
+        "g8_tests_why": "--tests not-run 需要 --tests-why \"<原因>\"",
+        "g8_base": "--review 需要 --base <7 到 40 位十六进制>（评审基于哪一版）",
+        "g8_reviewed": "--reviewed：7 到 40 位十六进制",
+        "g8_base_mismatch": "警告：评审基于 {base}，和记录的评审/合并提交 {expected} 不一致",
+        "g8_verify_sha_mismatch": "警告：主产出验证基于 {sha}；评审的 --base 和 --reviewed 应与之相同",
+        "g8_env_why": "--env-down 需要写你看到的现象（环境怎么起不来）",
+        "g8_env_fail": "--env-down 配 --review fail 记录（存成 blocked-env，不算不通过）",
+        "g8_notrun_pass": "测试没跑时记 pass/capped，需要 --checks pass 或复验证据",
+        "env_done_blocked": "{env}：done 要等重跑",
+        "env_merge_blocked": "{task} {env}：merge 要等重跑（或加 --user-said）",
+        "task_owner_done": "{task} 没有 owner：done 前先设置负责人",
+        "task_review_done": "{task}：还没有通过的评审。让独立评审者按 'done when' 检查差异，然后记录 `task set {task} --review pass --reviewer <who>`（或用 --skip-review \"<reason>\" --user-said \"<their words>\"）",
+        "task_checks_done": "{task}：checks 失败；先修复并记录 `--checks pass`（跳过评审不等于跳过 checks）",
+        "rp_bool": "require_primary 只能是 true 或 false",
+        "rp_user": "关掉主产出闸门要用户点头：加 --user-said \"<用户原话>\"",
+        "tests_why_fmt": "（{why}）",
+        "review_tests_ran": "跑了", "review_tests_unrecorded": "未记录", "review_tests_not_run": "没跑",
+        "review_blocked_env": "环境起不来，待重跑",
+        "invalidate_working": "返工后复验记录作废",
+        "invalidate_review_fail": "评审失败，任务退回 working",
+        "invalidate_verify": "主产出验证更新，旧评审作废",
+        "invalidate_primary": "主产出变更，旧记录作废",
+        "invalidate_owner": "owner 变更",
+        "invalidate_base": "评审基线变更",
+        "invalidate_accept": "完成条件变更",
+        "invalidate_replace": "新评审替换旧结论",
+        "invalidate_checks": "测试状态变更",
+        "invalidate_env_down": "环境不可用，评审记录作废",
+        "invalidate_redispatch": "任务召回后重新派单",
+        "card_primary_line": "{task}主产出：{result} — {evidence}",
+        "primary_url": "网址",
+        "merge_no_tasks": "警告：没有关联到任务。合并默认拦截；--user-said 可记录一次性豁免。",
+        "primary_dispatch_missing": "{task}：派单需要先补 --primary 主产出；只有用户明确豁免时才用 --no-primary 和 --user-said。",
+        "check_msg_primary_missing": "TASK 缺少主产出行",
+        "board_primary_col": "主产出",
+        "reviews_tests_base_col": "测试/基线",
+        "dispatch_primary_line": "主产出：{value}",
+        "dispatch_test_order": "测试顺序：先在真实产物上验主产出；不过就停，先修；过了再测细节。",
         "spawn_rc": "请在 lead 会话里把模式切到『自动』一次，我再开",
         "spawn_desktop": "请回桌面 App 给 lead 发一句，我在那一轮里开；或者这个项目改用 Remote Control 的 lead",
         "late_dispatch": "{task}：迟到的旧结果（派发 v{got}，当前 v{current}）",
@@ -704,6 +826,165 @@ def _task_dispatch_model(st, tid):
     return {"model": initial, "status": model_lab(st, "model_no_higher", initial=initial, kind=kind), "reason": None}
 
 
+PRIMARY_FALSE_WORDS = ("正常", "可用", "工作", "ok", "works")
+PRIMARY_SUSPECT_WORDS = ("mock", "stub", "fake", "jsdom", "msw", "nock", "sinon", "mockito",
+                         "fixture", "dummy", "simulated", "placeholder", "假数据", "模拟", "虚拟", "样例数据",
+                         "假的", "unittest", "unit test")
+PRIMARY_INTERNAL_WORDS = ("return", "变量", "函数", "内部值", "internal value")
+
+
+def _primary_text_valid(value):
+    value = (value or "").strip()
+    cjk = len(re.findall(r"[\u3400-\u9fff]", value))
+    too_short = cjk < 5 if cjk else len(re.sub(r"[\W_]", "", value, flags=re.UNICODE)) < 8
+    if too_short:
+        return False
+    plain = re.sub(r"[\W_]+", "", value, flags=re.UNICODE).lower()
+    return plain not in {re.sub(r"[\W_]+", "", x, flags=re.UNICODE).lower() for x in PRIMARY_FALSE_WORDS}
+
+
+def _primary_evidence_specific(d, evidence):
+    evidence = (evidence or "").strip()
+    if not evidence:
+        return False
+    if re.search(r"https?://\S+", evidence, re.I):
+        return True
+    # Accept an existing path anywhere in the evidence string: absolute, or relative to the
+    # current folder or the project folder (bare names like shot.png and docs/shots/a.png too).
+    roots = [Path.cwd()] + ([Path(d).parent] if d else [])
+    tokens = re.findall(r'"([^"\n]+)"|\'([^\'\n]+)\'|([^\s,;，；、()（）"\'`]+)', evidence)
+    for token_parts in tokens:
+        token = next((part for part in token_parts if part), "")
+        token = token.strip(".:：。")
+        if not token or not re.search(r"[./\\]", token):
+            continue
+        normalized = token.replace("\\", "/").lower()
+        if normalized.startswith(("/etc/", "/usr/", "/bin/", "/system/", "/dev/")):
+            continue
+        p = Path(token).expanduser()
+        if any((p if p.is_absolute() else r / p).is_file() for r in roots):
+            return True
+    # A numeric result is concrete output; bare numbers without surrounding result text are not.
+    # (Chinese is dense: "输出 15 条" is concrete, a bare "15" is not.)
+    residue = re.sub(r"\d+|ok|done|passed|works|through|looks|fine|正常|可用|工作|通过|完成|没问题", "", evidence,
+                     flags=re.I)
+    meaningful = re.findall(r"[a-z]+|[\u3400-\u9fff]+", residue.lower())
+    return bool(re.search(r"\d", evidence) and len("".join(meaningful)) >= 2 and
+                sum(len(w) for w in meaningful) >= 3)
+
+
+def _primary_suspect(how, evidence):
+    words = "|".join(re.escape(w) for w in PRIMARY_SUSPECT_WORDS)
+    negation = re.compile(rf"\b(?:no|not|without|never)\s+(?:(?:use|using|used|a|any)\s+)*(?:{words})"
+                          rf"|(?:不用|没用|没有用|未用|不是|并非|非|无|没有)\s*(?:{words})", re.I)
+    for sentence in re.split(r"[,，.;；/]|\bbut\b|但|只好", f"{how or ''} {evidence or ''}", flags=re.I):
+        if negation.search(sentence):
+            continue
+        if any(word in sentence.lower() for word in PRIMARY_SUSPECT_WORDS):
+            return True
+    return False
+
+
+def review_tests_line(st, review):
+    return lab(st, "review_tests_line", tests=lab(st, "review_tests_" + (review.get("tests") or "unrecorded").replace("-", "_")),
+               why=(lab(st, "tests_why_fmt", why=review.get("tests_why"))
+                    if review.get("tests") == "not-run" and review.get("tests_why") else ""),
+               base=(review.get("base") or "-")[:9])
+
+
+def task_primary_label(st, task):
+    check = task.get("primary_check") or {}
+    if task.get("primary_exempt"): return lab(st, "primary_exempt")
+    if task.get("primary_legacy"): return lab(st, "primary_legacy")
+    return lab(st, "primary_" + check.get("result", "missing").replace("-", "_")) if check else "—"
+
+
+def primary_gate(st, tid, before, k, changes, a, said):
+    """Primary checks run only for a relevant change; legacy rows get one safe migration pass."""
+    relevant = changes.get("status_to") in ("review", "done", "working", "merge") or any(
+        changes.get(x) for x in ("review_recorded", "verify", "primary", "base", "accept"))
+    if not relevant:
+        return
+    if k.pop("primary_legacy", False):
+        if changes.get("verify") or changes.get("status_to") == "working":
+            pass
+        else:
+            k["primary_legacy"] = True
+            return
+    if changes.get("status_to") == "verify":
+        if not k.get("primary"):
+            sys.exit(lab(st, "primary_verify_no_primary", task=tid))
+        if before.get("status") == "done":
+            sys.exit(lab(st, "primary_verify_done", task=tid))
+    if changes.get("status_to") == "working":
+        k.pop("primary_legacy", None)
+    if k.get("primary_exempt") and changes.get("status_to") in ("review", "done", "merge"):
+        return
+    if not st.get("prefs", {}).get("require_primary", True):
+        return
+    check = k.get("primary_check") or {}
+    result = check.get("result")
+    target = changes.get("status_to")
+    review_check = target == "review" or (changes.get("review_recorded") and getattr(a, "review", None) in PASSING)
+    if review_check and not k.get("primary_exempt"):
+        if not (k.get("primary") and result in ("seen", "pending-real")):
+            sys.exit(lab(st, "primary_review_gate", primary=k.get("primary") or "—"))
+    if target in ("done", "merge"):
+        if target == "done" and result != "seen" and not (result == "pending-real" and said.strip()):
+            sys.exit(lab(st, "primary_done_gate", primary=k.get("primary") or "—"))
+        if target == "merge" and (k.get("review") or {}).get("result") == "blocked-env" and not said.strip():
+            sys.exit(lab(st, "env_merge_blocked", task=tid, env=lab(st, "review_blocked_env")))
+        if target == "merge" and result not in ("seen", "pending-real"):
+            if not said.strip(): sys.exit(lab(st, "primary_merge_gate", task=tid))
+            changes.setdefault("primary_waivers", []).append(tid)
+    if changes.get("review_recorded") and getattr(a, "review", None) in PASSING and not k.get("primary_exempt"):
+        if not getattr(a, "recheck_how", None) or not _primary_evidence_specific(find_dir(), getattr(a, "recheck_evidence", "")):
+            sys.exit(lab(st, "primary_recheck_gate"))
+        norm = lambda x: re.sub(r"[\W_]+", "", (x or "").lower(), flags=re.UNICODE)
+        if norm(a.recheck_evidence) == norm(check.get("evidence")):
+            sys.exit(lab(st, "primary_recheck_independent"))
+        if (k.get("primary_suspect") or _primary_suspect(a.recheck_how, a.recheck_evidence)) and not getattr(a, "suspect_cleared", False):
+            sys.exit(lab(st, "primary_suspect_gate"))
+
+
+def g8_gate(st, tid, before, k, changes, a, said):
+    """G8 review evidence and environment rules, registered beside the primary gate."""
+    if changes.get("review_recorded"):
+        if a.env_down and a.review != "fail":
+            sys.exit(lab(st, "g8_env_fail"))
+        if a.review in PASSING and a.tests == "not-run" and k.get("checks") != "pass" and not a.recheck_evidence:
+            sys.exit(lab(st, "g8_notrun_pass"))
+
+
+TASK_GATES = [primary_gate, g8_gate]  # Root's root-cause gate can register here later; keep cmd_root unchanged.
+
+
+def _done_gate_reason(st, tid, before=None, k=None, changes=None, a=None, said=""):
+    """Single done gate; callers may pass no changes to receive the legacy reason string."""
+    k = k or st["tasks"][tid]
+    changes = changes or {"status_to": "done"}
+    if changes.get("status_to") != "done": return
+    if not k.get("owner"): return lab(st, "task_owner_done", task=tid)
+    rv = k.get("review") or {}
+    if rv.get("result") == "blocked-env":
+        if not (getattr(a, "skip_review", None) and said.strip()):
+            return lab(st, "env_done_blocked", env=lab(st, "review_blocked_env"))
+    if k.get("checks") == "fail":
+        return lab(st, "task_checks_done", task=tid)
+    if rv.get("result") == "skipped":
+        return
+    if not str(k.get("accept") or "").strip():
+        return f"{tid} has no 'done when': set --accept first (a review needs something to check against)"
+    if st.get("prefs", {}).get("require_review", True) and rv.get("result") not in PASSING:
+        return lab(st, "task_review_done", task=tid)
+    if rv.get("result") in PASSING:
+        owners = [k["owner"]] + list(k.get("past_owners") or [])
+        if not all(reviewer_independent(rv.get("reviewer") or "", o) for o in owners):
+            return f"{tid}: its reviewer {rv.get('reviewer')} owns it; get another review"
+        if rv.get("result") == "capped" and k.get("checks") != "pass":
+            return f"{tid}: capped at the round limit, which needs `--checks pass`"
+
+
 def _seat_change_summary(d, st, seat, start):
     events = []
     try:
@@ -898,6 +1179,10 @@ def load(d):
     st = json.loads((d / "state.json").read_text(encoding="utf-8"))
     if not isinstance(st, dict):
         raise ValueError("state.json must contain an object")
+    for task in st.get("tasks", {}).values():
+        if task.get("status") in ("review", "done") and "primary_check" not in task and \
+                not task.get("primary_legacy") and not task.get("primary_exempt"):
+            task["primary_legacy"] = True
     st["_rev_loaded"] = st.get("rev", 0)
     return st
 
@@ -1239,20 +1524,24 @@ def render_tasks(st, only_owner=None):
             continue
         deps = ",".join(k.get("deps", [])) or "-"
         rv = k.get("review") or {}
-        review = f"{rv['result']} ({rv.get('reviewer') or '-'})" if rv else "-"
+        verdict = lab(st, "review_blocked_env") if rv.get("result") == "blocked-env" else rv.get("result")
+        review = f"{verdict} ({rv.get('reviewer') or '-'})" if rv else "-"
         if k.get("checks"):
             review += f", checks {k['checks']}"
+        primary = task_primary_label(st, k)
+        if re.search(r"https?://\S+", (k.get("primary_check") or {}).get("evidence", ""), re.I):
+            primary += f" ({lab(st, 'primary_url')})"
         reqs = ",".join([r + {"closed": "✓", "dropped": "✗"}.get(q["status"], "")
                          for r, q in st.get("requests", {}).items() if tid in (q.get("tasks") or [])]
                         + [f"({r})" for r in k.get("from_requests") or []]) or "-"  # (R1): follow-up, not holding it
         rows.append(
-            f"| {tid} | {(lab(st,'root_patch_tag') if k.get('fix_kind')=='patch' else lab(st,'root_fix_tag') if k.get('fix_kind')=='root' else '')}{k['title']}" + (f" ({k['route']})" if k.get("route") else "") + f" | {k.get('owner') or '-'} | {deps} | {k['status']} | {k.get('accept') or '-'} "
-            f"| {review} | {reqs} |"
+        f"| {tid} | {(lab(st,'root_patch_tag') if k.get('fix_kind')=='patch' else lab(st,'root_fix_tag') if k.get('fix_kind')=='root' else '')}{k['title']}" + (f" ({k['route']})" if k.get("route") else "") + f" | {k.get('owner') or '-'} | {deps} | {k['status']} | {k.get('accept') or '-'} "
+            f"| {review} | {primary} | {reqs} |"
         )
     if not rows:
         return "(no tasks)"
     return (
-        "| id | task | owner | deps | status | done when | review | req |\n|---|---|---|---|---|---|---|---|\n"
+        f"| id | task | owner | deps | status | done when | review | {lab(st, 'board_primary_col')} | req |\n|---|---|---|---|---|---|---|---|---|\n"
         + "\n".join(rows)
     )
 
@@ -1262,26 +1551,28 @@ def _cell(x):
 
 
 def render_reviews(st, only=None):
-    """Per task: verdict, rounds used of the limit (as it was when recorded), reviewer, findings left, follow-ups."""
+    """Per task: verdict, rounds, reviewer, G8 test/base record, findings and follow-ups."""
     cap = review_max(st)
     rows = []
     for tid, k in st["tasks"].items():
         if only and tid != only:
             continue
         rv = k.get("review") or {}
+        verdict = lab(st, "review_blocked_env") if rv.get("result") == "blocked-env" else rv.get("result")
         n = int(k.get("review_rounds") or 0)
         if not rv and not n and not k.get("past_reviews"):
             continue
         fu = [t + (" (verdict voided)" if x.get("parent_verdict_voided") else "")
               for t, x in st["tasks"].items() if x.get("followup_of") == tid]
         left = "; ".join(rv.get("remaining") or []) or "-"
+        test_line = review_tests_line(st, rv) if rv else "-"
         rows.append("| " + " | ".join(_cell(x) for x in (
-            tid, k.get("owner") or "-", k["status"], rv.get("result") or "-", f"{n}/{rv.get('cap', cap) or '-'}",
-            rv.get("reviewer") or "-", k.get("checks") or "-", left, ",".join(fu) or "-")) + " |")
+            tid, k.get("owner") or "-", k["status"], verdict or "-", f"{n}/{rv.get('cap', cap) or '-'}",
+            rv.get("reviewer") or "-", k.get("checks") or "-", test_line, left, ",".join(fu) or "-")) + " |")
     if not rows:
         return "(no reviews recorded)"
-    return ("| task | owner | status | verdict | rounds | reviewer | checks | remaining | follow-ups |\n"
-            "|---|---|---|---|---|---|---|---|---|\n" + "\n".join(rows))
+    return (f"| task | owner | status | verdict | rounds | reviewer | checks | {lab(st, 'reviews_tests_base_col')} | remaining | follow-ups |\n"
+            "|---|---|---|---|---|---|---|---|---|---|\n" + "\n".join(rows))
 
 
 def task_followups(d, st, a):
@@ -1489,7 +1780,7 @@ def merge_board_rows(st):
         rv = task.get("review") or {}
         owner_branch = (st.get("threads", {}).get(task.get("owner") or "") or {}).get("branch")
         rows.append(f"- {tid}: {task.get('title', tid)} — {task.get('branch') or owner_branch or '-'} — "
-                    f"{rv.get('result', 'none')} ({task.get('review_rounds', 0)}), checks {task.get('checks', 'none')}")
+                    f"{lab(st, 'review_blocked_env') if rv.get('result') == 'blocked-env' else rv.get('result', 'none')} ({task.get('review_rounds', 0)}), checks {task.get('checks', 'none')}")
     return rows
 
 
@@ -2620,6 +2911,46 @@ def root_next(state, area, st=None):
         d=find_dir(); st=load(d) if d else {"prefs":{"language":"en"}}
     return lab(st,key,area=area)
 
+def task_verify(d, st, a):
+    """`task verify`: record a primary-outcome check on the real artifact (R71)."""
+    if a.id not in st["tasks"]: sys.exit(f"unknown task {a.id}")
+    k = st["tasks"][a.id]
+    before = json.loads(json.dumps(k))
+    changes = {"verify": True}
+    if sum(bool(x) for x in (a.seen, a.not_seen, a.pending_real)) != 1:
+        sys.exit(lab(st, "pv_one"))
+    result = "seen" if a.seen else "not-seen" if a.not_seen else "pending-real"
+    if not (a.how or "").strip() or not (a.evidence or "").strip():
+        sys.exit(lab(st, "pv_how"))
+    if result == "pending-real" and not (a.why or "").strip():
+        sys.exit(lab(st, "pv_why"))
+    if a.sha and not re.fullmatch(r"[0-9a-fA-F]{7,40}", a.sha.strip()):
+        sys.exit(lab(st, "pv_sha"))
+    if not k.get("primary"):
+        sys.exit(lab(st, "primary_verify_no_primary", task=a.id))
+    if k.get("status") == "done":
+        sys.exit(lab(st, "primary_verify_done", task=a.id))
+    if not _primary_evidence_specific(d, a.evidence):
+        sys.exit(lab(st, "primary_evidence_weak"))
+    invalidate(k, ["verify"], st)
+    check = {"result": result, "how": a.how.strip(), "evidence": a.evidence.strip(), "sha": a.sha,
+             "by": getattr(a, "by", None) or "lead", "at": now()}
+    if a.why: check["why"] = a.why.strip()
+    k["primary_check"] = check
+    if _primary_suspect(a.how, a.evidence):
+        k["primary_suspect"] = True
+        print(lab(st, "primary_suspect_warning"), file=sys.stderr)
+    else:
+        k.pop("primary_suspect", None)
+    if result == "not-seen" and k.get("status") == "review":
+        return_to_working(k, "primary outcome not seen", st)
+        k["primary_check"] = check
+        changes["status_to"] = "working"
+    check_task_invariants(st, a.id, before, k, a, (getattr(a, "user_said", None) or "").strip(), changes)
+    save(d, st, {"ev": "task-primary-verify", "task": a.id, "result": result})
+    return
+
+
 def cmd_task(a):
     d = need(find_dir())
     st = load(d)
@@ -2630,6 +2961,8 @@ def cmd_task(a):
         return
     if a.id == "-":
         sys.exit(f"task {a.action} needs a task id")
+    if a.action == "verify":
+        return task_verify(d, st, a)
     if a.action == "followups":
         return task_followups(d, st, a)
     if getattr(a, "urgent_minutes", None) is not None and a.urgent_minutes < 1:
@@ -2641,6 +2974,8 @@ def cmd_task(a):
             sys.exit(f"task {a.id} exists")
         if a.owner and a.owner not in st["threads"]:
             sys.exit(f"unknown owner {a.owner} (add the thread first)")
+        if getattr(a, "primary", None) and not _primary_text_valid(a.primary):
+            sys.exit(lab(st, "primary_weak"))
         if getattr(a, "req", None):
             q = st.get("requests", {}).get(a.req)
             if not q: sys.exit(f"unknown request {a.req}")
@@ -2653,6 +2988,7 @@ def cmd_task(a):
             "title": a.title or a.id,
             **({"brief": a.brief} if getattr(a, "brief", None) else {}),
             **({"kind": a.work_kind} if getattr(a, "work_kind", None) else {}),
+            **({"primary": a.primary.strip()} if getattr(a, "primary", None) else {}),
             **({"user_said": said} if said else {}),
             "owner": a.owner,
             "deps": csv(a.deps),
@@ -2673,6 +3009,10 @@ def cmd_task(a):
         task_dir = d / "tasks"; task_dir.mkdir(exist_ok=True)
         (task_dir / f"{a.id}.md").write_text(f"# {a.id}\n\nGoal: {a.title or a.id}\n" + (f"Brief: {a.brief}\n" if getattr(a, "brief", None) else "") + f"Done when: {a.accept or '-'}\n" + (f"\n{lab(st, 'original_words')}: {said}\n" if said else ""), encoding="utf-8")
         save(d, st, {"ev": "task-add", "task": a.id, "owner": a.owner})
+        if getattr(a, "work_kind", None) in ("code", "test") and not getattr(a, "primary", None):
+            print(lab(st, "primary_missing_hint"), file=sys.stderr)
+        if getattr(a, "primary", None) and any(w in a.primary.lower() for w in PRIMARY_INTERNAL_WORDS):
+            print(lab(st, "primary_internal"), file=sys.stderr)
         if getattr(a, "beyond", None):
             st = load(d); st["questions"].append({"from": "lead", "text": lab(st, "beyond_task", task=a.id, text=a.beyond), "kind": "beyond", "task": a.id, "answered": False, "t": now()})
             save(d, st, {"ev": "question", "from": "lead", "text": st["questions"][-1]["text"]})
@@ -2692,6 +3032,8 @@ def cmd_task(a):
         if a.id not in st["tasks"]:
             sys.exit(f"unknown task {a.id}")
         k = st["tasks"][a.id]
+        before = json.loads(json.dumps(k))
+        changes = {"status_to": None}
         if a.status == "review" and a.dispatch_v is not None:
             current_v = int(k.get("dispatch_v") or 0)
             if a.dispatch_v < current_v:
@@ -2706,10 +3048,10 @@ def cmd_task(a):
         said = (a.user_said or "").strip()
         stale = {}  # follow-up tasks opened from a verdict that is now void (T23-c)
 
-        def void(why, restart=False):
-            if k.get("review"):
-                old = k.pop("review")
-                k.setdefault("past_reviews", []).append({**old, "voided": why})
+        def void(why, restart=False, change="accept"):
+            old = invalidate(k, [change], st)
+            if old:
+                k["past_reviews"][-1]["voided"] = why
                 for t, x in st["tasks"].items():
                     if x.get("followup_of") == a.id and x.get("followup_item") in (old.get("remaining") or []) \
                             and x.get("status") not in ("done", "dropped") and not x.get("parent_verdict_voided"):
@@ -2751,6 +3093,9 @@ def cmd_task(a):
             if a.owner and a.owner not in st["threads"]:
                 sys.exit(f"unknown owner {a.owner}")
             if (a.owner or None) != k.get("owner"):
+                # A new owner changes neither the artifact nor the reviewed diff, so the primary check
+                # stays. Only the old rules apply (T23): the reviewer becoming the owner voids a pass,
+                # a capped verdict stood on the old owner's rounds, and the round count starts over.
                 rv = k.get("review") or {}
                 if rv.get("result") in PASSING and not reviewer_independent(rv.get("reviewer") or "", a.owner or ""):
                     void("its reviewer became the owner")
@@ -2766,6 +3111,7 @@ def cmd_task(a):
         if a.accept is not None and a.accept != k.get("accept"):
             void("'done when' changed", restart=True)  # the verdict was against the old criterion
             k["accept"] = a.accept
+            changes["accept"] = True
         old_deps = list(k.get("deps") or [])
         if a.deps is not None:
             k["deps"] = csv(a.deps)
@@ -2779,6 +3125,21 @@ def cmd_task(a):
             k["brief"] = a.brief
         if getattr(a, "work_kind", None):
             k["kind"] = a.work_kind
+        if getattr(a, "primary", None) is not None:
+            old_primary = k.get("primary")
+            if a.primary.strip() and not _primary_text_valid(a.primary): sys.exit(lab(st, "primary_weak"))
+            if a.primary.strip(): k["primary"] = a.primary.strip()
+            else: k.pop("primary", None)
+            if old_primary != k.get("primary"):
+                changes["primary"] = True
+                if k.get("review"):
+                    void("primary outcome changed", change="primary")
+                else:
+                    invalidate(k, ["primary"], st)
+                if cur == "review":
+                    return_to_working(k, "primary outcome changed", st)
+            if a.primary.strip() and any(w in a.primary.lower() for w in PRIMARY_INTERNAL_WORDS):
+                print(lab(st, "primary_internal"), file=sys.stderr)
         if a.touches is not None:
             k["touches"] = check_touches(a.touches)
         if a.model is not None:
@@ -2812,8 +3173,11 @@ def cmd_task(a):
             if k.get("checks") == "fail" and a.checks == "none":
                 sys.exit(f"{a.id}: checks failed; only `--checks pass` clears that")
             if a.checks != "pass" and (k.get("review") or {}).get("result") == "capped":
-                void("checks no longer passing")  # capped stood on green checks
+                void("checks no longer passing", change="checks")  # capped stood on green checks
             k["checks"] = a.checks
+        if getattr(a, "base", None) and not a.review and (k.get("review") or {}).get("base") != a.base.strip().lower():
+            invalidate(k, ["base"], st)
+            changes["base"] = True
         owner = k.get("owner") or ""
         # 2. a review verdict, only on work that is in review, by someone independent of the owner
         if a.rounds is not None and not a.review:
@@ -2821,9 +3185,28 @@ def cmd_task(a):
         if a.rounds is not None and not 1 <= a.rounds <= 99:
             sys.exit("--rounds: 1 to 99")
         if a.review:
+            if not a.tests:
+                sys.exit(lab(st, "g8_tests"))
+            if a.tests == "not-run" and not (a.tests_why or "").strip():
+                sys.exit(lab(st, "g8_tests_why"))
+            if not re.fullmatch(r"[0-9a-fA-F]{7,40}", (a.base or "").strip()):
+                sys.exit(lab(st, "g8_base"))
+            if a.reviewed and not re.fullmatch(r"[0-9a-fA-F]{7,40}", a.reviewed.strip()):
+                sys.exit(lab(st, "g8_reviewed"))
+            expected_reviewed = k.get("merged_sha") or ((k.get("review") or {}).get("reviewed"))
+            if expected_reviewed and a.base.strip().lower() != expected_reviewed.lower():
+                print(lab(st, "g8_base_mismatch", base=a.base.strip(), expected=expected_reviewed), file=sys.stderr)
+            verify_sha = ((k.get("primary_check") or {}).get("sha") or "").lower()
+            if verify_sha and ((a.base or "").strip().lower() != verify_sha or
+                               (a.reviewed or "").strip().lower() != verify_sha):
+                print(lab(st, "g8_verify_sha_mismatch", sha=verify_sha), file=sys.stderr)
+            if a.env_down and not a.env_down.strip():
+                sys.exit(lab(st, "g8_env_why"))
+            if a.env_down and a.review != "fail":
+                sys.exit(lab(st, "g8_env_fail"))
             if not (a.reviewer or "").strip():
                 sys.exit("--review needs --reviewer (a fresh subagent of the owner, a review thread, ...)")
-            if cur != "review":
+            if cur != "review" and a.status != "review":
                 sys.exit(f"{a.id} is {cur}: record a review only while it is in review "
                          f"(`task set {a.id} --status review` once the work is there)")
             if not owner:
@@ -2876,27 +3259,41 @@ def cmd_task(a):
                 if not remaining:
                     sys.exit(f"{a.id}: capped needs --remaining \"<finding>; <finding>\" (the important findings left "
                              "for follow-up tasks); with none left, record pass")
-            if k.get("review"):  # a new verdict replaces the old one: it goes to past_reviews like any voided one
-                void(f"replaced by a {a.review} verdict")
-            k["review_rounds"] = rounds
-            k["review"] = {"result": a.review, "reviewer": a.reviewer.strip(), "note": a.review_note or "",
-                           **({"outside": True} if getattr(a, "outside", False) else {}),
-                           "round": rounds, "cap": review_max(st), "at": now(),
-                           **({"remaining": remaining} if remaining else {})}
-            if a.review in PASSING:  # the new verdict lists the same finding again: its follow-up stands
-                for t, x in st["tasks"].items():
-                    if x.get("followup_of") == a.id and x.get("parent_verdict_voided") \
-                            and x.get("followup_item") in remaining:
-                        x.pop("parent_verdict_voided")
-                        stale[t] = x
-            if a.review == "capped":
-                print(f"{a.id}: capped at round {rounds}; open its follow-ups with `tw.py task followups {a.id} --apply`",
-                      file=sys.stderr)
-            if a.review == "fail" and not a.status:
-                k["status"] = "working"
-                if k.get("checks") == "pass":
-                    k["checks"] = "none"  # the fix changes the code: run the checks again
-                print(f"{a.id} back to working: send its owner a FOLLOWUP with the review findings", file=sys.stderr)
+            if a.review in PASSING and a.tests == "not-run" and k.get("checks") != "pass" and not a.recheck_evidence:
+                sys.exit(lab(st, "g8_notrun_pass"))
+            if a.env_down:
+                invalidate(k, ["env-down"], st)
+                k["review"] = {"result": "blocked-env", "reviewer": a.reviewer.strip(), "note": a.env_down.strip(),
+                               "tests": a.tests, "tests_why": a.tests_why or "", "base": a.base.strip().lower(), "at": now()}
+                print(lab(st, "review_blocked_env"), file=sys.stderr)
+                changes["review_recorded"] = True
+            else:
+                changes["review_recorded"] = True
+            if not a.env_down:
+                if k.get("review"):
+                    void(f"replaced by a {a.review} verdict", change="replace")
+                k["review_rounds"] = rounds
+                k["review"] = {"result": a.review, "reviewer": a.reviewer.strip(), "note": a.review_note or "",
+                               **({"outside": True} if getattr(a, "outside", False) else {}),
+                               "round": rounds, "cap": review_max(st), "at": now(),
+                               "tests": a.tests, "tests_why": a.tests_why or "", "base": a.base.strip().lower(),
+                               "reviewed": (a.reviewed or "").strip().lower(),
+                               "recheck_how": a.recheck_how, "recheck_evidence": a.recheck_evidence,
+                               **({"suspect_cleared": True} if getattr(a, "suspect_cleared", False) else {}),
+                               **({"remaining": remaining} if remaining else {})}
+                if a.review in PASSING:
+                    for t, x in st["tasks"].items():
+                        if x.get("followup_of") == a.id and x.get("parent_verdict_voided") \
+                                and x.get("followup_item") in remaining:
+                            x.pop("parent_verdict_voided")
+                            stale[t] = x
+                if a.review == "capped":
+                    print(f"{a.id}: capped at round {rounds}; open its follow-ups with `tw.py task followups {a.id} --apply`",
+                          file=sys.stderr)
+                if a.review == "fail" and not a.status:
+                    void("review failed; task returned to working", change="review-fail")
+                    return_to_working(k, "review failed", st)
+                    print(f"{a.id} back to working: send its owner a FOLLOWUP with the review findings", file=sys.stderr)
         # 3. preconditions of the status move, against the edited task
         if a.status and a.status != k["status"]:
             if a.status == "approved" and not st.get("plan_approved"):
@@ -2904,6 +3301,8 @@ def cmd_task(a):
             if a.status == "dispatched" and k.get("needs_ask") and any(not q.get("answered") and q.get("task") == a.id for q in st.get("questions", [])):
                 sys.exit(lab(st, "beyond_wait", task=a.id))
             if a.status == "dispatched":
+                if cur == "recalled":
+                    invalidate(k, ["redispatch"], st)
                 deps = list(dict.fromkeys(old_deps + (k.get("deps") or [])))  # clearing deps here skips nothing
                 open_deps = [x for x in deps if st["tasks"].get(x, {}).get("status") != "done"]
                 if open_deps:
@@ -2918,34 +3317,17 @@ def cmd_task(a):
                 sys.exit("--skip-review \"<reason>\" needs --user-said \"<the user's words>\": skipping review is "
                          "their call")
             if a.status == "done":
-                if not owner:
-                    sys.exit(f"{a.id} has no owner: set it before marking done")
-                if st["prefs"].get("require_review", True) and not a.skip_review:
-                    rv = k.get("review") or {}
-                    if rv.get("result") not in PASSING:
-                        sys.exit(f"{a.id}: no passing review yet. Have an independent reviewer check the diff against "
-                                 f"'done when', then `task set {a.id} --review pass --reviewer <who>` "
-                                 "(or --skip-review \"<reason>\" --user-said \"<their words>\")")
-                    if not all(reviewer_independent(rv.get("reviewer") or "", o)
-                               for o in [owner] + list(k.get("past_owners") or [])):
-                        sys.exit(f"{a.id}: its reviewer {rv.get('reviewer')} owns it; get another review")
-                    if rv.get("result") == "capped" and k.get("checks") != "pass":
-                        sys.exit(f"{a.id}: capped at the round limit, which needs `--checks pass`")
-                if k.get("checks") == "fail":
-                    sys.exit(f"{a.id}: checks failed; fix them and record `--checks pass` first (skipping review "
-                             "does not skip checks)")
+                if (k.get("primary_check") or {}).get("result") == "pending-real" and said.strip():
+                    k.setdefault("primary_waivers", []).append({"why": said.strip(), "at": now(), "kind": "pending-real-done"})
                 if a.skip_review:
                     k["review"] = {"result": "skipped", "note": a.skip_review.strip(), "user_said": said, "at": now()}
-            if a.status == "done" and not a.skip_review and not str(k.get("accept") or "").strip():
-                sys.exit(f"{a.id} has no 'done when': set --accept first (a review needs something to check against)")
-            if k["status"] == "review" and a.status == "working":
-                void("rework after review")  # the old verdict no longer counts
-                k["rework"] = k.get("rework", 0) + 1
-                k.setdefault("rework_at", []).append(now())
-                if k.get("checks") == "pass" and a.checks is None:
-                    k["checks"] = "none"  # green checks were for the old code
-            if a.status == "working" and cur in ("review", "done"):  # rework: the earlier merge mark is stale
-                k.pop("merged_at", None); k.pop("merged_sha", None)
+            if a.status == "working" and cur in ("review", "done"):
+                if k.get("review"):
+                    void("rework after review", change="working")
+                else:
+                    invalidate(k, ["working"], st)
+                return_to_working(k, "explicit status working", st)
+            changes["status_to"] = k.get("status") if a.status else None
             k["status"] = a.status
             k["updated"] = now()
             if a.status == "dispatched":
@@ -2965,6 +3347,9 @@ def cmd_task(a):
         if k["status"] not in ("review", "done"):
             for r in undeliver(st):
                 print(f"request {r} back to dispatched: {a.id} is {k['status']} again", file=sys.stderr)
+        if k.get("status") != before.get("status"):
+            changes["status_to"] = k.get("status")
+        check_task_invariants(st, a.id, before, k, a, said, changes)
         save(
             d,
             st,
@@ -3436,33 +3821,80 @@ def norm_topics(s):
 REVIEW_MAX_DEFAULT = 3
 PASSING = ("pass", "capped")  # capped: the round limit was reached with no blocking finding and checks passing
 
+# Central invalidation matrix: the event that changed task validity and the records it voids.
+INVALIDATION_MATRIX = {
+    "working": ("primary", "review"), "review-fail": ("primary",),
+    # owner: not here on purpose. A new owner changes neither the artifact nor the reviewed diff;
+    # the existing rule (void only when the reviewer becomes the owner, T23) stays in cmd_task.
+    "verify": ("review",), "primary": ("primary", "review"), "env-down": ("review",),
+    "redispatch": ("primary", "review"),
+    "base": ("review",), "accept": ("review",), "replace": ("review",), "checks": ("review",),
+}
+
+
+def invalidate(k, changes, st):
+    """Apply all evidence/review invalidations from the module-level matrix."""
+    invalid = {record for change in changes for record in INVALIDATION_MATRIX.get(change, ())}
+    why = {"working": lab(st, "invalidate_working"), "review-fail": lab(st, "invalidate_review_fail"),
+           "verify": lab(st, "invalidate_verify"), "primary": lab(st, "invalidate_primary"),
+           "owner": lab(st, "invalidate_owner"), "base": lab(st, "invalidate_base"), "accept": lab(st, "invalidate_accept"),
+           "replace": lab(st, "invalidate_replace"), "checks": lab(st, "invalidate_checks"),
+           "env-down": lab(st, "invalidate_env_down"), "redispatch": lab(st, "invalidate_redispatch")}
+    if "primary" in invalid and k.get("primary_check"):
+        k.setdefault("past_primary_checks", []).append(k.pop("primary_check"))
+    if "review" in invalid and k.get("review"):
+        old = k.pop("review")
+        k.setdefault("past_reviews", []).append({**old, "voided": "; ".join(why[x] for x in changes if x in why)})
+        return old
+    return None
+
+
+def return_to_working(k, why, st):
+    """Apply the shared rework transition and invalidate the evidence tied to the old artifact."""
+    failed_review = k.pop("review", None) if (k.get("review") or {}).get("result") == "fail" else None
+    k["status"] = "working"
+    k["checks"] = "none"
+    k.pop("merged_at", None)
+    k.pop("merged_sha", None)
+    k["rework"] = k.get("rework", 0) + 1
+    k.setdefault("rework_at", []).append(now())
+    k["rework_reason"] = why
+    invalidate(k, ["working"], st)
+    if failed_review:
+        k["review"] = failed_review
+
+
+def check_task_invariants(st, tid, before, k, a, said, changes):
+    """Run registered gates for the operation's actual changes, once before save."""
+    for gate in TASK_GATES:
+        reason = gate(st, tid, before, k, changes, a, said)
+        if reason: sys.exit(reason)
+    return changes.get("primary_waivers", [])
+
 
 def review_max(st):
     v = st.get("prefs", {}).get("review_max_rounds", REVIEW_MAX_DEFAULT)
     return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 99 else REVIEW_MAX_DEFAULT
 
 
-def accept_gate(st, tid):
-    """Why a task in review is not yet acceptable (None if it is): the same bar as `task set --status done`."""
-    k = st["tasks"][tid]
-    if k.get("checks") == "fail":
-        return "has failing checks"
-    rv = k.get("review") or {}
-    if rv.get("result") == "skipped":  # the user's words, recorded with the skip
-        return None
-    if not str(k.get("accept") or "").strip():
-        return "has no 'done when' to check against"
-    if not k.get("owner"):
-        return "has no owner"
-    if not st["prefs"].get("require_review", True):
-        return None
-    if rv.get("result") not in PASSING:
-        return "has no passing independent review yet"
-    if rv.get("result") == "capped" and k.get("checks") != "pass":
-        return "was capped at the round limit, which needs checks passing"
-    if not all(reviewer_independent(rv.get("reviewer") or "", o) for o in [k["owner"]] + list(k.get("past_owners") or [])):
-        return f"was reviewed by its own owner ({rv.get('reviewer')})"
-    return None
+def accept_gate(st, tid, before=None, k=None, changes=None, a=None, said=""):
+    reason = _done_gate_reason(st, tid, before, k, changes, a, said)
+    if reason:
+        if before is None and k is None and changes is None and a is None:
+            for text, legacy in (("checks failed;", "has failing checks"), ("has no owner:", "has no owner"),
+                                 ("no passing review yet.", "has no passing independent review yet"),
+                                 ("capped at the round limit,", "was capped at the round limit, which needs checks passing")):
+                if text in reason: return legacy
+            if " reviewer " in reason and " owns it" in reason:
+                return f"was reviewed by its own owner ({(k or st['tasks'][tid]).get('review', {}).get('reviewer')})"
+        return reason
+    if (changes or {}).get("status_to") == "done":
+        rv = (k or st["tasks"][tid]).get("review") or {}
+        if (k or st["tasks"][tid]).get("primary_suspect") and rv.get("result") in PASSING and not rv.get("suspect_cleared"):
+            return lab(st, "primary_suspect_gate")
+
+
+TASK_GATES.append(accept_gate)
 
 
 def reviewer_independent(reviewer, owner):
@@ -4286,13 +4718,26 @@ def cmd_card(a):
     grant_text = lab(st, "card_grant", n=len(merge_uses)) if merge_uses else ""
     links = list(dict.fromkeys(list(a.link or []) + [x["link"] for k in DOC_KINDS for x in [st.get("docs", {}).get(k)] if x and x.get("link")]))
     head = f"[{lab(st, 'card_delivered' if a.kind == 'done' else 'card_' + a.kind)}] {' '.join(a.head.split())}"
+    primary_lines = []
+    if a.kind == "done":
+        done_primary_tasks = [(tid, task) for tid, task in tasks.items()
+                              if task.get("status") == "done" and _later(task.get("updated"), since)]
+        for tid, task in done_primary_tasks:
+            check = task.get("primary_check") or {}
+            result = task_primary_label(st, task)
+            evidence = check.get("evidence") or task.get("primary") or "—"
+            primary_lines.append(lab(st, "card_primary_line", task=(f"{tid} " if len(done_primary_tasks) > 1 else ""),
+                                     result=result, evidence=evidence))
+            review = task.get("review") or {}
+            if review:
+                primary_lines.append(review_tests_line(st, review))
     payload = {"kind": a.kind, "head": head, "done": done, "doing": doing, "waiting": waiting}
     if st.get("prefs", {}).get("ledger_line_every", "wrapup") == "report" or a.kind == "done" or a.ledger_line:
         payload["ledger"] = lab(st, "card_ledger", added=added, ended=ended, waiting=len(waiting), gpt_detail=gpt_text, grant_detail=(" · " + grant_text if grant_text else ""),
                                 links=" ".join(links) or "-")
     st["last_report_at"] = now()
     save(d, st, {"ev": "report-card", "kind": a.kind})
-    lines = [head]
+    lines = primary_lines + [head]
     for key in ("done", "doing", "waiting"):
         lines += ["", f"## {lab(st, 'card_' + key)}", "\n".join("- " + x for x in payload[key]) or lab(st, "no_items")]
     if "ledger" in payload:
@@ -4502,7 +4947,7 @@ def _mentions(text, phrase):
 # TASK fields (references/messages.md), English and the Chinese labels a zh project may use.
 MSG_FIELDS = ("Goal|User's words|Context|Read first|Depends on|Others waiting|You change only|Not doing|Done when|"
               "Constraints|Review depth|Model / method|Model|Report|To|Owner|目标|用户原话|背景|先读|依赖|只改|不做|"
-              "完成标准|验收标准|完成条件|验收|任务目标|约束|评审|模型|汇报")
+              "Primary outcome|Test order|主产出|测试顺序|完成标准|验收标准|完成条件|验收|任务目标|约束|评审|模型|汇报")
 GOAL_FIELDS, DONE_FIELDS = {"goal", "目标", "任务目标"}, {"done when", "完成标准", "验收标准", "完成条件", "验收"}
 FIELD_RE = re.compile(rf"\s*(?:[-*]|\d+[.)]|#+)?\s*\**({MSG_FIELDS})\**\s*(?:[:：]\**|$)\s*(.*)$", re.I)
 EMPTY_VALUES = {"", "...", "…", "?", "-", "n/a", "tbd", "todo", "fixme", "xxx", "???", "[tbd]", "待定", "待填"}
@@ -4614,6 +5059,8 @@ def cmd_check_msg(a):
             if missing:
                 add("fields", "a TASK needs " + " and ".join(missing) + (
                     " (it only points to a file: write the task in the message)" if re.search(PATH_RE, prose) else ""))
+            if "primary outcome" not in fields and "主产出" not in fields:
+                add("primary", lab(st, "check_msg_primary_missing"), "warning")
             if st and st.get("standing") and not re.search(r"(?im)^\s*Standing:|长期要求", raw):
                 add("standing", f"the ledger has {len(st['standing'])} standing requirement(s) and this TASK carries "
                                 "none: add a `Standing: ...` line for each (`task-msg` writes them)", "warning")
@@ -4794,6 +5241,14 @@ def cmd_task_msg(a):
     d = need(find_dir()); st = load(d)
     if a.id not in st["tasks"]: sys.exit(f"unknown task {a.id}")
     k = st["tasks"][a.id]
+    if a.dispatch and not k.get("primary"):
+        if not ((a.no_primary or "").strip() and (a.user_said or "").strip()):
+            sys.exit(lab(st, "primary_dispatch_missing", task=a.id))
+        waiver = {"why": a.user_said.strip(), "at": now(), "kind": "dispatch-no-primary"}
+        k.setdefault("primary_waivers", []).append(waiver)
+        k["primary_exempt"] = True
+        save(d, st, {"ev": "task-primary-waiver", "task": a.id, "why": a.user_said.strip()})
+        st = load(d); k = st["tasks"][a.id]
     area=area_of_task(st,k); roots=radar(st); root_line=None
     if area and roots.get(area,{}).get("state") not in (None,"ok"):
         root_line=lab(st,"root_task_line",area=area,state=lab(st,"root_"+roots[area]["state"]))
@@ -4806,7 +5261,7 @@ def cmd_task_msg(a):
         if k.get("status") != "dispatched":
             # Reuse task command's transition checks by invoking the normal CLI path.
             proxy = argparse.Namespace(**vars(a)); proxy.action = "set"; proxy.status = "dispatched"
-            for key in ("owner", "accept", "deps", "title", "touches", "model", "route", "no_scripts", "scripts_ok", "topics", "notes", "checks", "rounds", "review", "remaining", "no_blocking", "reviewer", "review_note", "skip_review", "user_said", "apply"):
+            for key in ("owner", "accept", "deps", "title", "touches", "model", "route", "no_scripts", "scripts_ok", "topics", "notes", "checks", "rounds", "review", "remaining", "no_blocking", "reviewer", "review_note", "skip_review", "user_said", "apply", "base", "tests", "tests_why", "recheck_how", "recheck_evidence", "suspect_cleared"):
                 if not hasattr(proxy, key): setattr(proxy, key, None)
             with contextlib.redirect_stdout(io.StringIO()): cmd_task(proxy)
             st = load(d); k = st["tasks"][a.id]
@@ -4815,7 +5270,9 @@ def cmd_task_msg(a):
     owner = k.get("owner") or "?"; v = int(k.get("dispatch_v") or 0)
     thread = st.get("threads", {}).get(owner) or {}
     session = (thread.get("session_id") or "").strip()
-    lines = [f"[tw:{tag(st)}] TASK lead -> {owner} {a.id}", f"Goal: {k.get('title') or a.id}",
+    primary_lines = [lab(st, "dispatch_primary_line", value=k.get("primary") or lab(st, "primary_exempt")),
+                     lab(st, "dispatch_test_order")]
+    lines = [f"[tw:{tag(st)}] TASK lead -> {owner} {a.id}", f"Goal: {k.get('title') or a.id}", *primary_lines,
              *([f"Brief: {k['brief']}"] if k.get("brief") and k.get("brief") != k.get("title") else []), f"Done when: {k.get('accept') or '-'}"]
     if root_line: lines.append(root_line)
     route = (dispatch_model or {}).get("model") or k.get("route") or k.get("model")
@@ -6321,6 +6778,11 @@ def cmd_prefs(a):
                 sys.exit("require_review must be true or false")
             if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
                 sys.exit("turning the review gate off is the user's decision: add --user-said \"<their words>\"")
+        if k == "require_primary":
+            if v.lower() not in ("1", "0", "true", "false", "yes", "no", "on", "off"):
+                sys.exit(lab(st, "rp_bool"))
+            if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
+                sys.exit(lab(st, "rp_user"))
         if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes", "urgent_ack_minutes", "quota_every_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", *QUOTA_DEFAULTS) and not re.fullmatch(r"[0-9]+", v):
             sys.exit(f"{k}: a whole number" + ("" if k in QUOTA_DEFAULTS else " of minutes"))
         if k == "quota_every_minutes" and int(v) < 1:
@@ -9896,7 +10358,11 @@ def cmd_merge(a):
         sys.exit("--squash needs --message \"T3: <summary> (squash of <branch>)\": keep the task id first so trace "
                  "and leases find it")
     old = git("rev-parse", "--verify", "--quiet", f"refs/heads/{base}^{{commit}}").stdout.strip()
-    tip = git("rev-parse", "--verify", "--quiet", f"{a.branch}^{{commit}}").stdout.strip()
+    branch_arg = a.branch.strip()
+    branch_name = re.sub(r"^(?:refs/)?heads/", "", branch_arg)
+    tip_ref = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch_name}^{{commit}}").stdout.strip()
+    tip_ref_name = f"refs/heads/{branch_name}" if tip_ref else branch_arg
+    tip = tip_ref or git("rev-parse", "--verify", "--quiet", f"{branch_arg}^{{commit}}").stdout.strip()
     given = (a.sha or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{7,40}", given):
         sys.exit(f"--sha {a.sha!r}: give the reviewed commit id (7-40 hex digits from the owner's DONE), not a branch, "
@@ -9911,7 +10377,38 @@ def cmd_merge(a):
     if not sha:
         sys.exit(f"--sha {given}: no such commit, or an ambiguous short id (use the full commit id the owner's DONE "
                  "reported as reviewed)")
+    associated = []
+    merge_waiver = None
+    waiver_tasks = []
+    if a.apply:
+        titles = git("log", "--format=%s", f"{old}..{sha}").stdout.splitlines()
+        committed_ids = {m.group(0).lower() for title in titles for m in re.finditer(r"\bT\d+\b", title, re.I)}
+        associated = [tid for tid in st.get("tasks", {}) if tid.lower() in committed_ids]
+        normalize_ref = lambda value: re.sub(r"^(?:refs/)?heads/", "", (value or "").strip())
+        branch_ref = normalize_ref(tip_ref_name)
+        branch_threads = {name for name in st.get("threads", {})
+                          if normalize_ref(branch_of(st, name)) == branch_ref}
+        associated.extend(tid for tid, task in st.get("tasks", {}).items()
+                          if task.get("status") in ("dispatched", "working", "blocked", "review") and  # queued work has no commits yet
+                          (task.get("owner") in branch_threads or set(task.get("past_owners") or []) & branch_threads))
+        associated = sorted(set(associated))
+        if not associated:
+            if not (a.user_said or "").strip():
+                sys.exit(lab(st, "merge_no_tasks"))
+            print(lab(st, "merge_no_tasks"), file=sys.stderr)
+            merge_waiver = {"why": a.user_said.strip(), "tasks": [], "kind": "unassociated-merge"}
+        else:
+            for tid in associated:
+                task = st["tasks"][tid]
+                before = json.loads(json.dumps(task))
+                gate_changes = {"status_to": "merge"}
+                waiver_tasks.extend(check_task_invariants(st, tid, before, task, a,
+                                                          (a.user_said or "").strip(), gate_changes))
+            if waiver_tasks:
+                merge_waiver = {"why": a.user_said.strip(), "tasks": waiver_tasks, "kind": "merge-primary"}
     res = {"branch": a.branch, "sha": sha, "base": base, "base_was": old, "tip": tip, "applied": False}
+    if merge_waiver:
+        res["primary_waiver"] = merge_waiver
     if sha != tip:
         res["extra_commits"] = git("log", "--oneline", "--no-decorate", f"{sha}..{tip}").stdout.splitlines()
         res["missing_commits"] = git("log", "--oneline", "--no-decorate", f"{tip}..{sha}").stdout.splitlines()
@@ -10092,6 +10589,8 @@ def cmd_merge(a):
         res["applied"] = True
         ev = {"ev": "merge", "branch": a.branch, "sha": sha, "base": base, "from": old, "to": new,
               "checks": res["checks"]}
+        if merge_waiver:
+            ev["primary_waiver"] = merge_waiver
         fresh = None
         try:  # IL-22: the board lists the merge until a regression round clears it (`qa done`)
             fresh = st = load(d)  # fresh: the checks may have run for minutes
@@ -10780,11 +11279,12 @@ def main():
     x.add_argument("thread"); x.add_argument("--text"); x.set_defaults(f=cmd_nudge)
 
     x = s.add_parser("task", help="add or update a plan task")
-    x.add_argument("action", choices=["add", "set", "followups", "reviews"],
+    x.add_argument("action", choices=["add", "set", "followups", "reviews", "verify"],
                    help="followups <id> [--apply]: one task per finding left at a capped review; reviews -: the table")
     x.add_argument("id", nargs="?", default="-")
     x.add_argument("--title")
     x.add_argument("--brief")
+    x.add_argument("--primary", help="one sentence describing the user-visible primary outcome")
     x.add_argument("--urgent", action="store_true")
     x.add_argument("--urgent-minutes", type=int)
     x.add_argument("--owner")
@@ -10814,14 +11314,32 @@ def main():
     x.add_argument("--reviewer", help="who reviewed (not the owner): lead-subagent, review thread name, user")
     x.add_argument("--outside", action="store_true", help="require reviewer outside all task participants")
     x.add_argument("--review-note")
+    x.add_argument("--tests", choices=["ran", "not-run"])
+    x.add_argument("--tests-why")
+    x.add_argument("--base", help="review base commit SHA, 7-40 hex characters")
+    x.add_argument("--reviewed", help="reviewed commit SHA from the worker DONE")
+    x.add_argument("--env-down", help="observed environment failure; records blocked-env")
+    x.add_argument("--recheck-how")
+    x.add_argument("--recheck-evidence")
+    x.add_argument("--suspect-cleared", action="store_true")
     x.add_argument("--checks", choices=["pass", "fail", "none"], help="tests / checks result on the branch")
     x.add_argument("--skip-review", metavar="REASON", help="mark done without review (recorded; needs --user-said)")
     x.add_argument("--user-said", metavar="WORDS", help="the user's words: needed for --skip-review and dropping")
+    x.add_argument("--no-primary", metavar="WHY", help="dispatch: record the user's primary-outcome waiver")
     x.add_argument("--req"); x.add_argument("--beyond"); x.add_argument("--override")
     x.add_argument("--work-kind", choices=MODEL_TYPES, help="the kind of work (as in model-log): an unsuitable model is skipped, one tier up")
+    x.add_argument("--seen", action="store_true")
+    x.add_argument("--not-seen", action="store_true")
+    x.add_argument("--pending-real", action="store_true")
+    x.add_argument("--how")
+    x.add_argument("--evidence")
+    x.add_argument("--sha")
+    x.add_argument("--why")
+    x.add_argument("--by", help="who performed task verify (default: lead)")
     x.set_defaults(f=cmd_task)
     x = s.add_parser("task-msg", help="format a task dispatch message")
-    x.add_argument("id"); x.add_argument("--dispatch", action="store_true"); x.add_argument("--override"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_task_msg)
+    x.add_argument("id"); x.add_argument("--dispatch", action="store_true"); x.add_argument("--override"); x.add_argument("--json", action="store_true")
+    x.add_argument("--no-primary"); x.add_argument("--user-said"); x.add_argument("--dispatch-v", type=int); x.set_defaults(f=cmd_task_msg)
     x = s.add_parser("promise", help="record and track commitments")
     x.add_argument("action", choices=["add", "done", "list"]); x.add_argument("text", nargs="?", default=""); x.add_argument("--req"); x.add_argument("--evidence"); x.add_argument("id", nargs="?"); x.set_defaults(f=cmd_promise)
 
@@ -10960,7 +11478,7 @@ def main():
         + ", ".join(f"{k}={v}" for k, v in QUOTA_DEFAULTS.items())
     )
     x.add_argument("--set", nargs="*")
-    x.add_argument("--user-said", metavar="WORDS", help="the user's words, needed to turn require_review off")
+    x.add_argument("--user-said", metavar="WORDS", help="the user's words, needed to turn review/primary gates off")
     x.set_defaults(f=cmd_prefs)
     x = s.add_parser("screen", help="shadow session readiness checks")
     x.add_argument("action", choices=["ask", "show", "brief", "record", "grade", "sweep", "stats", "unavailable", "list", "clear-msg", "relead"])
@@ -11060,6 +11578,7 @@ def main():
                    "exactly this commit, and only it is merged")
     x.add_argument("--squash", action="store_true", help="one squash commit (needs --message starting with the task id)")
     x.add_argument("--message", help="merge or squash commit subject; keep the task id first (T3: ...)")
+    x.add_argument("--user-said", help="user's words waiving the primary outcome merge gate")
     x.add_argument("--test", help="check command, run in the rehearsal (default: prefs check_cmd)")
     x.add_argument("--no-test", metavar="WHY", help="nothing to check (docs only): say why")
     x.add_argument("--apply", action="store_true", help="fast-forward the base after a clean merge and green checks")

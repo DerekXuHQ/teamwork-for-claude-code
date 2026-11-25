@@ -24,10 +24,11 @@ The header's keywords (`tw`, the TYPE, `->`) are always English, so they can be 
 ```
 [tw:shop] TASK lead -> ui T3
 Goal: redesign the order list page so status, total and the next action fit above the fold.
+Primary outcome: the list shows each order's status, total, and next action at phone width.
 Context: spec at docs/spec.md §3; design notes in .teamwork/MEMORY.md; the api thread owns /api/orders.
 Done when: the page renders with seeded data at phone and desktop widths, screenshots saved to docs/shots/, tests pass.
 Constraints: do not change API contracts (api owns them; hand off if you need a field). Work on tw/shop/ui.
-Report: ACK now, DONE or BLOCKED when finished (DONE with the review verdict, `rounds: N`, `reviewed: <full SHA>`, remaining and deferred findings). End every turn with the tw-status block.
+Report: ACK now, DONE or BLOCKED when finished (DONE with `primary: seen|not seen|pending-real — <how> — <evidence>` recorded by `task verify --by <who> --sha <7-40 hex>` when known, `tests: ran|not run (<why>)`, `base: <sha>`, the review verdict, `rounds: N`, `reviewed: <full SHA>`, remaining and deferred findings). End every turn with the tw-status block.
 ```
 
 That is the short form. For anything bigger, use the full form (IL-7): each line is a field, skip the ones that do not apply.
@@ -35,6 +36,8 @@ That is the short form. For anything bigger, use the full form (IL-7): each line
 ```
 [tw:shop] TASK lead -> ui T3
 Goal: <the lead's digested target, in one or two sentences: what must be true when this is done>
+Primary outcome: <what the user sees first on the real artifact, including the expected count or content>
+Dispatch requires `task add ... --primary "<user-visible result>"`; only the user's explicit waiver permits `--no-primary "<reason>" --user-said "<their words>"`.
 User's words: "<verbatim, when the task comes from the user; evidence, not the goal>"
 Read first: docs/spec.md §3, .teamwork/MEMORY.md
 Depends on: api T2 (order endpoint, on main); fake /api/orders/:id with fixtures/orders.json until T2 lands

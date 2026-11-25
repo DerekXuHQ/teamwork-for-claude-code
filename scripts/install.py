@@ -77,6 +77,7 @@ def hook_python():
 
 PY = hook_python()
 HOOK_CMD = f'"{PY}" "{DEST / "scripts" / "tw.py"}" context'
+BASH_GUARD_MATCHER = "Bash,mcp__claude-code-remote__archive_session,mcp__ccd_session__start_session"
 
 
 def _tw_hook(cmd, word):
@@ -228,15 +229,15 @@ def folder_rules(pl, sl, a, dirs):
     pre = sl.setdefault("hooks", {}).setdefault("PreToolUse", [])
     mine = [h for g in pre for h in g.get("hooks", []) if _is_guard(h.get("command"))]
     if not mine:
-        pre.append({"matcher": "Bash,mcp__claude-code-remote__archive_session", "hooks": [{"type": "command", "command": guard_hook()}]})
-        print(f"  {pl.name} PreToolUse hook: adding tw.py bash-guard for Bash and archive_session")
+        pre.append({"matcher": BASH_GUARD_MATCHER, "hooks": [{"type": "command", "command": guard_hook()}]})
+        print(f"  {pl.name} PreToolUse hook: adding tw.py bash-guard for Bash, archive_session, and start_session")
     else:
         stale = [h for h in mine if h.get("command") != guard_hook()]
         for h in stale:
             h["command"] = guard_hook()
         for group in pre:
             if any(h in mine for h in group.get("hooks", [])):
-                group["matcher"] = "Bash,mcp__claude-code-remote__archive_session"
+                group["matcher"] = BASH_GUARD_MATCHER
         print(f"  {pl.name} PreToolUse hook: " + ("updating to an absolute python path" if stale else "already present"))
     pre = sl.setdefault("hooks", {}).setdefault("PreToolUse", [])
     for group in pre:

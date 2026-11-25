@@ -1,0 +1,1 @@
+{"session_id": "session_fixture_hook", "transcript_path": "[fixture path]", "cwd": "/fixture/project", "hook_event_name": "PreToolUse", "tool_name": "mcp__claude-code-remote__create_session", "tool_input": {"environment_id": "[fixture text]", "title": "[fixture text]", "prompt": "[fixture text]", "permission_mode": "[fixture text]"}}

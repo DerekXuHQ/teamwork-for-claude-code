@@ -4501,8 +4501,8 @@ class FewerPrompts(TwCase):
             for tool in ("Bash", "Edit", "Write", "Read", "mcp__claude-code-remote__send_message",
                          "mcp__claude_ai_Claude_Docs__*", "CronCreate", "ScheduleWakeup"):
                 self.assertIn(tool, perms["allow"])
-            hooks = [h["command"] for g in sl["hooks"]["PreToolUse"] if g.get("matcher") == "Bash,mcp__claude-code-remote__archive_session" for h in g["hooks"]]
-            self.assertTrue(any(c.endswith('tw.py" bash-guard || true') for c in hooks), hooks)  # r3: never exits 2
+            hooks = [h["command"] for g in sl["hooks"]["PreToolUse"] if g.get("matcher") == install.BASH_GUARD_MATCHER for h in g["hooks"]]
+            self.assertTrue(any(c.endswith("bash-guard || true") for c in hooks), hooks)  # r3: never exits 2
             for cmd in ("git status", "git -C /tmp/q commit -m x", "ls /tmp", "python3 scripts/tw.py ready"):
                 self.assertFalse(self.rule_hits(perms["ask"] + perms["deny"], cmd), cmd)
             for cmd in (f"rm {rf} /", f"rm {rf} ~", f"rm {rf} $HOME", f'rm {rf} "$HOME"'):
@@ -7238,7 +7238,8 @@ class T71GuardAndSuccession(TwCase):
         mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
         self.assertEqual(set(mod.SIGNATURE_MANIFEST),{
             "bridge-transcript-cse_fixture-remote-session.jsonl","t71_real_candidate.jsonl",
-            "t71_real_tool_results.jsonl","t71_old_thread.jsonl"})
+            "t71_real_tool_results.jsonl","t71_old_thread.jsonl","t79_hook_start_session.jsonl",
+            "t79_hook_create_session.jsonl","t79_nested_desktop_sessions.jsonl"})
         for name in mod.SIGNATURE_MANIFEST:
             self.assertTrue(mod.manifest_matches(name),name)
         original=fixture_dir/"t71_real_candidate.jsonl"
@@ -7249,14 +7250,57 @@ class T71GuardAndSuccession(TwCase):
         self.assertFalse(mod.manifest_matches("t71_real_candidate.jsonl",tampered))
 
     def test_generated_fixtures_contain_no_private_markers(self):
-        import getpass, re
+        import getpass, importlib.util, re, socket
+        tw = importlib.util.module_from_spec(importlib.util.spec_from_file_location("tw_fixture_privacy", TW))
+        tw.__spec__.loader.exec_module(tw)
         fixtures=Path(__file__).parent/"fixtures"
-        text="\n".join(p.read_text(encoding="utf-8") for p in fixtures.glob("*.jsonl"))
-        username=getpass.getuser()
-        if username: self.assertNotRegex(text,r"(?<![A-Za-z0-9_.-])"+re.escape(username)+r"(?![A-Za-z0-9_.-])")
-        self.assertNotIn(str(Path.home()),text); self.assertNotIn("session_01",text); self.assertNotIn("/Users/",text)
-        self.assertNotRegex(text,r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-        for marker in ("env_01","cse_01"): self.assertNotIn(marker,text)
+        names={"bridge-transcript-cse_fixture-remote-session.jsonl","t71_real_candidate.jsonl",
+               "t71_real_tool_results.jsonl","t71_old_thread.jsonl","t79_hook_start_session.jsonl",
+               "t79_hook_create_session.jsonl","t79_nested_desktop_sessions.jsonl"}
+        texts=[(fixtures/name).read_text(encoding="utf-8") for name in names]
+        home=str(Path.home()).casefold()
+        username=getpass.getuser().casefold()
+        host=socket.gethostname().casefold()
+        private_dir=Path.home()/"Claude-B"/"teamwork-for-claude-code"/".teamwork"
+        if not (private_dir/"PRIVATE.md").is_file():
+            private_dir=Path(__file__).resolve().parents[1]/".teamwork"
+        private_terms,_,_=tw.load_private(private_dir)
+        private_terms.extend(x for x in (home,username) if x)
+        patterns=[re.compile(re.escape(term),re.I) for term in private_terms if term]
+        patterns.extend((re.compile(re.escape(host),re.I), re.compile(r"https?://\S+",re.I),
+                         re.compile(r"~/\S+",re.I), re.compile(r"(?i)\.pem\b"),
+                         re.compile(r"/Users/[^/\s]+",re.I), re.compile(r"session_01",re.I),
+                         re.compile(r"env_01",re.I), re.compile(r"cse_01",re.I)))
+        for text in texts:
+            for pattern in patterns:
+                self.assertIsNone(pattern.search(text), "fixture privacy marker detected")
+
+    def test_nested_metadata_fixture_preserves_real_lead_id_relationship(self):
+        rows=[json.loads(line) for line in (Path(__file__).parent/"fixtures"/"t79_nested_desktop_sessions.jsonl").read_text(encoding="utf-8").splitlines()]
+        child,parent=rows
+        self.assertTrue(child["spawnedFrom"]["sessionId"].startswith("local_"))
+        self.assertEqual(parent["bridgeSessionIds"],["cse_fixture_lead"])
+        state=self.state()
+        state["lead"]["session_id"]="session_fixture_lead"
+        # First-round comparison used raw strings and therefore missed this true relation.
+        self.assertNotIn(state["lead"]["session_id"],set(parent["bridgeSessionIds"]))
+        child["cwd"]=str(self.dir/"nested"); parent["cwd"]=str(self.dir)
+        metadata=self.dir/"metadata"/"account"/"org"; metadata.mkdir(parents=True)
+        (self.dir/"nested").mkdir()
+        (metadata/"local_child.json").write_text(json.dumps(child),encoding="utf-8")
+        (metadata/"local_parent.json").write_text(json.dumps(parent),encoding="utf-8")
+        os.environ["TEAMWORK_CLAUDE_SESSIONS_DIR"]=str(self.dir/"metadata")
+        try:
+            found,gaps=tw._nested_session_report(self.dir/".teamwork",state)
+            self.assertEqual(gaps,0)
+            self.assertEqual([row["parent_is_lead"] for row in found],[True])
+            state["lead"]["session_id"]="session_someone_else"
+            state["lead"]["sessions"]=[{"session_id":"session_fixture_lead"}]
+            found,gaps=tw._nested_session_report(self.dir/".teamwork",state)
+            self.assertEqual(gaps,0)
+            self.assertEqual([(row["parent_is_lead"],row["parent_was_lead"]) for row in found],[(False,True)])
+        finally:
+            os.environ.pop("TEAMWORK_CLAUDE_SESSIONS_DIR",None)
 
     def test_real_wrapped_get_session_result_is_read(self):
         """Real shape (HO3 run): a get_session result about another session arrives as a text block wrapped in
@@ -11119,6 +11163,121 @@ class PrimaryOutcome(TwCase):
         task = self.state()["tasks"]["T1"]
         self.assertNotIn("primary_check", task)
         self.assertEqual(task["past_primary_checks"][-1]["evidence"], "old run shows 12 records")
+
+
+class T79NoNestedDesktopThreads(TwCase):
+    def _fixture(self, name):
+        return json.loads((Path(__file__).parent / "fixtures" / name).read_text(encoding="utf-8").splitlines()[0])
+
+    def _guard(self, script, event):
+        return subprocess.run([sys.executable, str(script), "bash-guard"], input=json.dumps(event),
+                              capture_output=True, text=True, cwd=self.dir,
+                              env={**os.environ, "TW_GUARD_LOG": str(self.dir / "guard.log")})
+
+    def test_tool_name_is_normalized_for_start_and_archive_routes(self):
+        start = self._fixture("t79_hook_start_session.jsonl")
+        start["cwd"] = str(self.dir)
+        state = self.state()
+        state["lead"]["session_id"] = "session_live_lead"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        variants = (" mcp__ccd_session__start_session", "MCP__CCD_SESSION__START_SESSION")
+        for tool_name in variants:
+            with self.subTest(tool_name=tool_name):
+                start["tool_name"] = tool_name
+                decision = json.loads(self._guard(TW, start).stdout)["hookSpecificOutput"]
+                self.assertEqual(decision["permissionDecision"], "deny")
+        archive = {"cwd": str(self.dir), "session_id": "caller",
+                   "tool_input": {"session_id": "session_live_lead"}}
+        variants = (" mcp__claude-code-remote__archive_session",
+                    "MCP__CLAUDE-CODE-REMOTE__ARCHIVE_SESSION")
+        for tool_name in variants:
+            with self.subTest(tool_name=tool_name):
+                archive["tool_name"] = tool_name
+                decision = json.loads(self._guard(TW, archive).stdout)["hookSpecificOutput"]
+                self.assertEqual(decision["permissionDecision"], "deny")
+
+    def test_real_start_session_shape_denied_only_inside_teamwork_project(self):
+        event = self._fixture("t79_hook_start_session.jsonl")
+        event["cwd"] = str(self.dir)
+        decision = json.loads(self._guard(TW, event).stdout)["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+        self.assertIn("create_session", decision["permissionDecisionReason"])
+        self.assertIn("Remote Control", decision["permissionDecisionReason"])
+        outside = self.dir.parent / (self.dir.name + "-outside")
+        outside.mkdir()
+        event["cwd"] = str(outside)
+        self.assertEqual(self._guard(TW, event).stdout, "")
+
+    def test_real_create_session_shape_is_unaffected(self):
+        event = self._fixture("t79_hook_create_session.jsonl")
+        event["cwd"] = str(self.dir)
+        self.assertEqual(self._guard(TW, event).stdout, "")
+
+    def test_nested_metadata_report_matches_lead_and_skips_archived(self):
+        import copy
+        rows = [json.loads(line) for line in (Path(__file__).parent / "fixtures" / "t79_nested_desktop_sessions.jsonl").read_text().splitlines()]
+        child, parent = rows
+        child["cwd"] = str(self.dir / "nested")
+        parent["cwd"] = str(self.dir)
+        parent["bridgeSessionIds"] = ["lead-remote"]
+        state = self.state()
+        state["lead"]["session_id"] = "session_lead-remote"
+        metadata = self.dir / "metadata" / "account" / "org"
+        metadata.mkdir(parents=True)
+        (self.dir / "nested").mkdir()
+        (metadata / "local_child.json").write_text(json.dumps(child), encoding="utf-8")
+        (metadata / "local_parent.json").write_text(json.dumps(parent), encoding="utf-8")
+        os.environ["TEAMWORK_CLAUDE_SESSIONS_DIR"] = str(self.dir / "metadata")
+        try:
+            found, gaps = tw._nested_session_report(self.dir / ".teamwork", state)
+            self.assertEqual((gaps, [row["parent_is_lead"] for row in found]), (0, [True]))
+            (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+            ready_env = {**os.environ, "TEAMWORK_DIR": str(self.dir / ".teamwork"),
+                         "TEAMWORK_CLAUDE_SESSIONS_DIR": str(self.dir / "metadata")}
+            ready = subprocess.run([sys.executable, str(TW), "ready"], capture_output=True, text=True,
+                                   cwd=self.dir, env=ready_env)
+            self.assertIn("local_00000000-0000-4000-8000-000000000001", ready.stderr)
+            self.assertIn("别归档 lead", ready.stderr)
+            other_parent = dict(parent, sessionId="local_other", bridgeSessionIds=["other-remote"])
+            other_child = dict(child, sessionId="local_other_child", spawnedFrom={"sessionId": "local_other"})
+            archived = dict(child, sessionId="local_archived", isArchived=True)
+            for name, value in (("local_other.json", other_parent), ("local_other_child.json", other_child),
+                                ("local_archived.json", archived)):
+                (metadata / name).write_text(json.dumps(value), encoding="utf-8")
+            found, _ = tw._nested_session_report(self.dir / ".teamwork", state)
+            self.assertEqual({row["session_id"] for row in found}, {child["sessionId"], "local_other_child"})
+            self.assertEqual({row["parent_is_lead"] for row in found}, {True, False})
+            state["lead"]["session_id"] = "session_unrelated"
+            (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+            ready = subprocess.run([sys.executable, str(TW), "ready"], capture_output=True, text=True,
+                                   cwd=self.dir, env=ready_env)
+            self.assertIn("local_00000000-0000-4000-8000-000000000001", ready.stderr)
+            self.assertNotIn("别归档 lead", ready.stderr)
+            (metadata / "local_broken.json").write_text("{", encoding="utf-8")
+            self.assertEqual(tw._nested_session_report(self.dir / ".teamwork", state)[1], 1)
+        finally:
+            os.environ.pop("TEAMWORK_CLAUDE_SESSIONS_DIR", None)
+
+    def test_install_updates_legacy_matcher(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import install
+        (self.dir / "tmpd").mkdir()
+        project = self.dir / "project"
+        cfg = self.dir / "cfg"
+        settings = project / ".claude" / "settings.local.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{
+            "matcher": "Bash,mcp__claude-code-remote__archive_session",
+            "hooks": [{"type": "command", "command": f'"{sys.executable}" "{cfg / "skills/teamwork/scripts/tw.py"}" bash-guard || true'}]}]}}), encoding="utf-8")
+        result = subprocess.run([sys.executable, str(Path(__file__).parent / "install.py"), "--link", "--apply",
+                                 "--config-dir", str(cfg), "--project", str(project)],
+                                capture_output=True, text=True, env={**os.environ, "TMPDIR": str(self.dir / "tmpd"),
+                                                                       "CLAUDE_CONFIG_DIR": str(cfg)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+        matchers = [group["matcher"] for group in hooks]
+        self.assertIn(install.BASH_GUARD_MATCHER, matchers)
+        self.assertNotIn("Bash,mcp__claude-code-remote__archive_session", matchers)
 
 
 if __name__ == "__main__":

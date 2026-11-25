@@ -1,0 +1,1 @@
+{"session_id": "session_fixture_hook", "transcript_path": "[fixture path]", "cwd": "/fixture/project", "hook_event_name": "PreToolUse", "tool_name": "mcp__ccd_session__start_session", "tool_input": {"initiation": "own_initiative", "title": "[fixture text]", "context": "[fixture text]", "use_worktree": false, "prompt": "[fixture text]", "background": "[fixture text]"}}

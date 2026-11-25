@@ -1,0 +1,2 @@
+{"sessionId": "local_00000000-0000-4000-8000-000000000001", "cwd": "/fixture/project/nested", "isArchived": false, "spawnedFrom": {"sessionId": "local_00000000-0000-4000-8000-000000000002"}, "bridgeSessionIds": ["cse_fixture_lead"]}
+{"sessionId": "local_00000000-0000-4000-8000-000000000002", "cwd": "/fixture/project", "isArchived": false, "bridgeSessionIds": ["cse_fixture_lead"]}

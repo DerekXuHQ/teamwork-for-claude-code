@@ -4070,6 +4070,22 @@ def cmd_ready(a):
     trigger = quota_trigger_hint(st, bool(ready))
     if trigger:
         print(quota_trigger_line(st, trigger), file=sys.stderr)
+    nested_sessions, nested_gaps = _nested_session_report(d, st)
+    for row in nested_sessions:
+        relation = ("lead" if row.get("parent_is_lead") else
+                    "former lead" if row.get("parent_was_lead") else
+                    str(row.get("parent_session_id") or "unknown parent"))
+        print(f"nested desktop child session: {row.get('session_id')} (parent: {relation})", file=sys.stderr)
+    if any(row.get("parent_is_lead") for row in nested_sessions):
+        print("这些子会话挂在 lead 下面：别归档 lead；改用 create_session 重开对应线程 / "
+              "These child sessions are nested under the lead: do not archive the lead; reopen their threads with create_session",
+              file=sys.stderr)
+    if any(row.get("parent_was_lead") for row in nested_sessions):
+        print("这些子会话挂在前任 lead 下面 / These child sessions are nested under a former lead",
+              file=sys.stderr)
+    if nested_gaps:
+        print(f"嵌套会话检查缺口：{nested_gaps} 份桌面会话元数据 JSON 无法读取 / "
+              f"Nested-session scan gap: skipped {nested_gaps} unreadable desktop session metadata file(s)", file=sys.stderr)
     print(
         json.dumps(
             {
@@ -4100,6 +4116,8 @@ def cmd_ready(a):
                 "models": {t: m for t in ready for m in [task_model(st, t)] if m},
                 "model_routes": route_status,
                 "ready_notice": notice,
+                "nested_child_sessions": nested_sessions,
+                "nested_session_metadata_gaps": nested_gaps,
                 "unreported_requests": {r: q["text"] for r, q in unreported(st).items()},
                 "rc_capacity_note": "a Remote Control server holds 32 sessions by default, shared by every project and lead on it; cloud threads do not count",
                 **({"permission_warning": permission_warning(st)} if permission_warning(st) else {}),
@@ -11902,9 +11920,23 @@ def cmd_bash_guard(a):
         else:
             ev = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
             if not isinstance(ev, dict): return
-            if ev.get("tool_name") == "mcp__claude-code-remote__archive_session":
+            tool_name = ev.get("tool_name")
+            if isinstance(tool_name, str):
+                tool_name = tool_name.strip().casefold()
+            if tool_name == "mcp__claude-code-remote__archive_session":
                 return cmd_archive_guard(a, ev)
-            if ev.get("tool_name") not in ("Bash", None): return
+            if tool_name == "mcp__ccd_session__start_session":
+                if _archive_guard_projects(ev.get("cwd") or os.getcwd()):
+                    reason = ("teamwork 线程不挂在 lead 下面：用 create_session 开（Remote Control），分组看会话目录或侧栏；"
+                              "create_session 用不了就停下来问用户 / teamwork threads never nest under the lead: use create_session "
+                              "to open a Remote Control/cloud session, and group them in the session directory or sidebar; "
+                              "if create_session is unavailable, stop and ask the user")
+                    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                               "permissionDecision": "deny",
+                                                               "permissionDecisionReason": reason},
+                                      "systemMessage": reason}, ensure_ascii=False))
+                return
+            if tool_name not in ("bash", None): return
             ti = ev.get("tool_input")
             cmd = ti.get("command") if isinstance(ti, dict) else None
         if not isinstance(cmd, str):
@@ -11963,6 +11995,78 @@ def _archive_guard_caller(local_id):
     if os.environ.get("CLAUDE_CONFIG_DIR"): dirs.append(Path(os.environ["CLAUDE_CONFIG_DIR"]))
     dirs += [Path.home()/".claude",*Path.home().glob(".claude-*")]
     return _succ_bridge_remote(str(local_id).strip(),dirs)
+
+
+def _claude_session_metadata_root():
+    """One overrideable source for local desktop session metadata; missing folders are an empty source."""
+    configured = os.environ.get("TEAMWORK_CLAUDE_SESSIONS_DIR")
+    return Path(configured).expanduser() if configured else Path.home() / "Library/Application Support/Claude/claude-code-sessions"
+
+
+def _nested_session_report(team_dir, st):
+    """Return live nested desktop children whose parent metadata is bridged to this project's lead."""
+    root = Path(team_dir).resolve().parent
+    project_roots = {root}
+    worktrees = root.parent / (root.name + "-worktrees")
+    if worktrees.is_dir():
+        project_roots.update(p.resolve() for p in worktrees.iterdir() if p.is_dir())
+    if root.parent.name.endswith("-worktrees"):
+        owner = root.parent.parent / root.parent.name[:-len("-worktrees")]
+        if owner.is_dir(): project_roots.add(owner.resolve())
+    session_dir = _claude_session_metadata_root()
+    if not session_dir.is_dir(): return [], 0
+    records = {}
+    bad = 0
+    try:
+        paths = session_dir.glob("*/*/local_*.json")
+        for path in paths:
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, UnicodeError, RecursionError):
+                bad += 1
+                continue
+            if isinstance(value, dict) and isinstance(value.get("sessionId"), str):
+                records[value["sessionId"]] = value
+    except OSError:
+        return [], bad
+    lead_state = st.get("lead") or {}
+    def normalized_session_id(value):
+        value = str(value or "").strip()
+        for prefix in ("session_", "cse_"):
+            if value.startswith(prefix):
+                value = value[len(prefix):]
+                break
+        return value
+    current_lead = normalized_session_id(lead_state.get("session_id"))
+    historical_leads = set()
+    history = lead_state.get("sessions")
+    if isinstance(history, list):
+        for item in history:
+            value = item.get("session_id") or item.get("id") if isinstance(item, dict) else item
+            normalized = normalized_session_id(value)
+            if normalized and normalized != current_lead:
+                historical_leads.add(normalized)
+    rows = []
+    for child in records.values():
+        parent_link = child.get("spawnedFrom")
+        if not isinstance(parent_link, dict) or child.get("isArchived") is not False:
+            continue
+        child_cwd = child.get("cwd")
+        if not isinstance(child_cwd, str) or not child_cwd: continue
+        try: cwd = Path(child_cwd).resolve()
+        except (OSError, RuntimeError): continue
+        if not any(cwd == base or base in cwd.parents for base in project_roots): continue
+        parent = records.get(parent_link.get("sessionId"))
+        if parent is None: continue
+        remote_ids = parent.get("bridgeSessionIds")
+        remote_ids = remote_ids if isinstance(remote_ids, list) else []
+        normalized_remote_ids = {normalized_session_id(value) for value in remote_ids}
+        linked_to_lead = bool(current_lead and current_lead in normalized_remote_ids)
+        linked_to_former_lead = bool(historical_leads.intersection(normalized_remote_ids))
+        rows.append({"session_id": child.get("sessionId"), "parent_session_id": parent_link.get("sessionId"),
+                     "parent_is_lead": linked_to_lead, "parent_was_lead": linked_to_former_lead})
+    rows.sort(key=lambda item: str(item.get("session_id", "")))
+    return rows, bad
 
 
 def cmd_archive_guard(a, event=None):

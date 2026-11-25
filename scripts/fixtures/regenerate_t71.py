@@ -4,7 +4,7 @@
 Usage: python3 scripts/fixtures/regenerate_t71.py REAL_CANDIDATE REAL_BRIDGE REAL_TOOL_RESULTS REAL_RECORDS
 Source paths are arguments and are never written into this repository.
 """
-import getpass, hashlib, json, re, socket, sys
+import getpass, hashlib, json, os, re, socket, sys
 from pathlib import Path
 from pprint import pformat
 
@@ -978,7 +978,52 @@ SIGNATURE_MANIFEST = {'bridge-transcript-cse_fixture-remote-session.jsonl': {'li
                                                                   'userType': {'type': 'string'},
                                                                   'uuid': {'type': 'string'},
                                                                   'version': {'type': 'string'}},
-                                                         'type': 'object'}}]}}
+                                                         'type': 'object'}}]},
+ 't79_hook_create_session.jsonl': {'line_count': 1,
+                                   'rows': [{'sha256': '2b74eb0a0180ec153f586a65cb7546d20c336c1f70074af3a2a439c3d5e22489',
+                                             'structure': {'keys': {'cwd': {'type': 'string'},
+                                                                    'hook_event_name': {'type': 'string'},
+                                                                    'session_id': {'type': 'string'},
+                                                                    'tool_input': {'keys': {'environment_id': {'type': 'string'},
+                                                                                            'permission_mode': {'type': 'string'},
+                                                                                            'prompt': {'type': 'string'},
+                                                                                            'title': {'type': 'string'}},
+                                                                                   'type': 'object'},
+                                                                    'tool_name': {'type': 'string'},
+                                                                    'transcript_path': {'type': 'string'}},
+                                                           'type': 'object'}}]},
+ 't79_hook_start_session.jsonl': {'line_count': 1,
+                                  'rows': [{'sha256': '7b67543c6d90dc54e78abfedbf1b21295fab6de00cb0dde06d4c061aadec95f0',
+                                            'structure': {'keys': {'cwd': {'type': 'string'},
+                                                                   'hook_event_name': {'type': 'string'},
+                                                                   'session_id': {'type': 'string'},
+                                                                   'tool_input': {'keys': {'background': {'type': 'string'},
+                                                                                           'context': {'type': 'string'},
+                                                                                           'initiation': {'type': 'string'},
+                                                                                           'prompt': {'type': 'string'},
+                                                                                           'title': {'type': 'string'},
+                                                                                           'use_worktree': {'type': 'boolean'}},
+                                                                                  'type': 'object'},
+                                                                   'tool_name': {'type': 'string'},
+                                                                   'transcript_path': {'type': 'string'}},
+                                                          'type': 'object'}}]},
+ 't79_nested_desktop_sessions.jsonl': {'line_count': 2,
+                                       'rows': [{'sha256': '2c5cb920cf7927e57ad59928289b751c161d3471cdf1ef53f81ac9f9f3dc6d3b',
+                                                 'structure': {'keys': {'bridgeSessionIds': {'items': [{'type': 'string'}],
+                                                                                             'type': 'array'},
+                                                                        'cwd': {'type': 'string'},
+                                                                        'isArchived': {'type': 'boolean'},
+                                                                        'sessionId': {'type': 'string'},
+                                                                        'spawnedFrom': {'keys': {'sessionId': {'type': 'string'}},
+                                                                                        'type': 'object'}},
+                                                               'type': 'object'}},
+                                                {'sha256': 'ee650ccce95c03d76649a01b99b51ad82571eb32dc8a2a4f619b5de16d2a56a4',
+                                                 'structure': {'keys': {'bridgeSessionIds': {'items': [{'type': 'string'}],
+                                                                                             'type': 'array'},
+                                                                        'cwd': {'type': 'string'},
+                                                                        'isArchived': {'type': 'boolean'},
+                                                                        'sessionId': {'type': 'string'}},
+                                                               'type': 'object'}}]}}
 # END GENERATED SIGNATURE MANIFEST
 
 
@@ -1263,20 +1308,198 @@ def _bridge_rows(path):
     return [first] + ([] if local == first else [local])
 
 
+def _redact_t79(value):
+    """Allow-list the hook event shape and replace every free-text value."""
+    if isinstance(value, dict):
+        result = {}
+        for key, child in value.items():
+            if key == "tool_name" and isinstance(child, str):
+                result[key] = child
+            elif key == "tool_input":
+                result[key] = _fixture_tool_input(child)
+            elif key == "cwd" and isinstance(child, str):
+                result[key] = "/fixture/project"
+            elif key == "session_id" and isinstance(child, str):
+                result[key] = "session_fixture_hook"
+            elif key == "hook_event_name" and isinstance(child, str):
+                result[key] = child
+            elif key == "transcript_path" and isinstance(child, str):
+                result[key] = "[fixture path]"
+            else:
+                # Keep key/type shape; all other strings are free text.
+                result[key] = _placeholder_shape(child)
+        return result
+    return _placeholder_shape(value)
+
+
+def _placeholder_shape(value):
+    if isinstance(value, dict):
+        return {key: _placeholder_shape(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_placeholder_shape(child) for child in value]
+    if isinstance(value, str):
+        return "[fixture text]"
+    return value
+
+
+def _fixture_tool_input(value, key=None):
+    """Keep key/type shape, bounded enums and booleans; redact every free-text value."""
+    if isinstance(value, dict):
+        return {name: _fixture_tool_input(child, name) for name, child in value.items()}
+    if isinstance(value, list):
+        return [_fixture_tool_input(child, key) for child in value]
+    if not isinstance(value, str):
+        return value
+    if key == "initiation" and value in {"own_initiative", "user_requested", "delegated"}:
+        return value
+    return "[fixture text]"
+
+
+def _find_tool_use(name, roots):
+    for root in roots:
+        if not root.exists(): continue
+        for path in root.rglob("*.jsonl"):
+            try:
+                with path.open(encoding="utf-8", errors="replace") as source:
+                    for line in source:
+                        if name not in line: continue
+                        row = json.loads(line)
+                        for block in blocks(row):
+                            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == name:
+                                cwd = row.get("cwd")
+                                sid = row.get("session_id") or row.get("sessionId")
+                                if not isinstance(cwd, str) or not sid: continue
+                                return {"session_id": sid, "transcript_path": "[fixture transcript]",
+                                        "cwd": cwd, "hook_event_name": "PreToolUse", "tool_name": name,
+                                        "tool_input": block.get("input")}
+            except (OSError, ValueError, UnicodeError, RecursionError):
+                continue
+    raise ValueError("no real tool_use sample found for " + name)
+
+
+def _normal_id(value):
+    value = str(value or "").strip()
+    for prefix in ("session_", "cse_"):
+        if value.startswith(prefix):
+            return value[len(prefix):]
+    return value
+
+
+def _lead_ids_for_cwd(cwd):
+    if not isinstance(cwd, str) or not cwd:
+        return set()
+    current = Path(cwd).expanduser()
+    for directory in (current, *current.parents):
+        state_path = directory / ".teamwork" / "state.json"
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError, RecursionError):
+            continue
+        lead = state.get("lead") if isinstance(state, dict) else None
+        if not isinstance(lead, dict):
+            continue
+        ids = {_normal_id(lead.get("session_id"))}
+        history = lead.get("sessions")
+        if isinstance(history, list):
+            for item in history:
+                ids.add(_normal_id(item.get("session_id") or item.get("id")) if isinstance(item, dict)
+                        else _normal_id(item))
+        return {value for value in ids if value}
+    return set()
+
+
+def _desktop_metadata_pair(root):
+    records = {}
+    for path in root.glob("*/*/local_*.json"):
+        try: value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError, RecursionError): continue
+        if isinstance(value, dict) and isinstance(value.get("sessionId"), str): records[value["sessionId"]] = value
+    pair = next(((item, records.get(item.get("spawnedFrom", {}).get("sessionId")))
+                 for item in records.values() if isinstance(item.get("spawnedFrom"), dict)
+                 and isinstance(item.get("cwd"), str)
+                 and records.get(item["spawnedFrom"].get("sessionId"), {}).get("bridgeSessionIds")
+                 and _lead_ids_for_cwd(item.get("cwd")) & {
+                     _normal_id(value) for value in records[item["spawnedFrom"]["sessionId"]].get("bridgeSessionIds", [])
+                     if isinstance(value, str)}), None)
+    if pair is None: raise ValueError("no real child/parent metadata pair linked to a current or historical project lead")
+    child, parent = pair
+    lead_ids = _lead_ids_for_cwd(child.get("cwd"))
+    linked_id = next(value for value in parent.get("bridgeSessionIds", [])
+                     if isinstance(value, str) and _normal_id(value) in lead_ids)
+    result = []
+    child_id = "local_00000000-0000-4000-8000-000000000001"
+    parent_id = "local_00000000-0000-4000-8000-000000000002"
+    for index, item in enumerate((child, parent)):
+        selected = {key: item[key] for key in ("sessionId", "cwd", "isArchived", "spawnedFrom", "bridgeSessionIds") if key in item}
+        selected = _metadata_allowlist(selected, "/fixture/project")
+        selected["sessionId"] = child_id if index == 0 else parent_id
+        if index == 0:
+            selected["cwd"] = "/fixture/project/nested"
+            selected["spawnedFrom"] = {"sessionId": parent_id}
+        if index == 1:
+            selected["cwd"] = "/fixture/project"
+            selected["bridgeSessionIds"] = ["cse_fixture_lead"]
+        result.append(selected)
+    return result
+
+
+def _metadata_allowlist(value, project_root):
+    if isinstance(value, dict):
+        out = {}
+        for key, child in value.items():
+            if key == "cwd" and isinstance(child, str):
+                try:
+                    rel = Path(child).relative_to(Path(project_root))
+                    out[key] = "/fixture/project" + ("/" + str(rel) if str(rel) != "." else "")
+                except ValueError:
+                    out[key] = "/fixture/project"
+            elif key in {"isArchived", "sideSession"} and isinstance(child, bool):
+                out[key] = child
+            elif key == "sessionId" and isinstance(child, str):
+                out[key] = "[fixture session id]"
+            elif key == "bridgeSessionIds" and isinstance(child, list):
+                out[key] = ["cse_fixture_lead" for _ in child]
+            else:
+                out[key] = _placeholder_shape(child)
+        return out
+    return _placeholder_shape(value)
+
+
+def _generate_t79():
+    roots = [Path.home() / ".claude/projects", Path.home() / ".claude-b/projects"]
+    start = _find_tool_use("mcp__ccd_session__start_session", roots)
+    create = _find_tool_use("mcp__claude-code-remote__create_session", [roots[1]])
+    dump("t79_hook_start_session.jsonl", [_redact_t79(start)])
+    dump("t79_hook_create_session.jsonl", [_redact_t79(create)])
+    metadata_root = Path(os.environ.get("TEAMWORK_CLAUDE_SESSIONS_DIR") or
+                         (Path.home() / "Library/Application Support/Claude/claude-code-sessions"))
+    dump("t79_nested_desktop_sessions.jsonl", _desktop_metadata_pair(metadata_root))
+
+
 def main(candidate_source, bridge_source, tool_source, records_source):
+    _FIXTURE_ID_MAP.clear()
     dump("t71_real_candidate.jsonl", _quiz_rows(candidate_source))
     dump("bridge-transcript-cse_fixture-remote-session.jsonl", _bridge_rows(bridge_source))
     dump("t71_real_tool_results.jsonl", _tool_rows(tool_source))
     dump("t71_old_thread.jsonl", _old_thread_rows(records_source))
+    _generate_t79()
     signatures = {name: fixture_signatures(OUT / name) for name in sorted(
         ("bridge-transcript-cse_fixture-remote-session.jsonl", "t71_real_candidate.jsonl",
-         "t71_real_tool_results.jsonl", "t71_old_thread.jsonl"))}
+         "t71_real_tool_results.jsonl", "t71_old_thread.jsonl", "t79_hook_start_session.jsonl",
+         "t79_hook_create_session.jsonl", "t79_nested_desktop_sessions.jsonl"))}
     _save_manifest(signatures)
     print("Generated fixture signature manifest:")
     print(json.dumps(signatures, ensure_ascii=False, sort_keys=True))
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--t79-only"]:
+        _generate_t79()
+        signatures = dict(SIGNATURE_MANIFEST)
+        for name in ("t79_hook_start_session.jsonl", "t79_hook_create_session.jsonl", "t79_nested_desktop_sessions.jsonl"):
+            signatures[name] = fixture_signatures(OUT / name)
+        _save_manifest(signatures)
+        raise SystemExit(0)
     if len(sys.argv) != 5:
         raise SystemExit("usage: regenerate_t71.py REAL_CANDIDATE_JSONL REAL_BRIDGE_JSONL REAL_TOOL_RESULTS_JSONL REAL_RECORDS_JSONL")
     main(*sys.argv[1:])

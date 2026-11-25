@@ -134,6 +134,33 @@ Cloud threads cannot message the lead: they write the same fields, separated by 
 
 `kind: cloud` only with a reason on the same line: the thread never touches the project folder and never needs to message rc threads. The lead decides. It may give the work to an existing thread instead, or propose the new thread to the user first if `propose_before_start` is true. Either way it answers with `ANSWER` and, if it creates the thread, a `ROSTER`.
 
+## ACCEPT: candidate confirms a seat handover
+
+The candidate sends this after reading `BRIEF.md` and completing `HANDOFF.md`. Cloud candidates put the same fields in their STATUS block.
+
+```text
+[tw:<short>] ACCEPT <candidate-seat> -> lead -
+Handover: HO<n>
+Only-known-after-reading fact: <one verbatim user statement from the pack>
+Unresolved: <one item per line, or none>
+Tasks: <id and accepted done-when, or none>
+Rules: <[#n]> <restatement>
+Requests: <id and status, or none>
+Branch/head/fingerprint: <values>
+Write test: <result>
+```
+
+## ROLLBACK: new lead returns control to old lead
+
+Only the candidate lead sends this when it cannot safely take over. Give the handover id and concrete reason; the old lead runs `succ abort` before resuming decisions.
+
+```text
+[tw:<short>] ROLLBACK <new-lead> -> <old-lead> -
+Handover: HO<n>
+Reason: <failed acceptance checks or blocker>
+Evidence: <pack path or check names>
+```
+
 ## Rules for writing tasks
 
 - One task, one owner, one "done when" the thread can check itself.

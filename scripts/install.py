@@ -228,13 +228,22 @@ def folder_rules(pl, sl, a, dirs):
     pre = sl.setdefault("hooks", {}).setdefault("PreToolUse", [])
     mine = [h for g in pre for h in g.get("hooks", []) if _is_guard(h.get("command"))]
     if not mine:
-        pre.append({"matcher": "Bash", "hooks": [{"type": "command", "command": guard_hook()}]})
-        print(f"  {pl.name} PreToolUse hook: adding tw.py bash-guard (asks before big decisions)")
+        pre.append({"matcher": "Bash,mcp__claude-code-remote__archive_session", "hooks": [{"type": "command", "command": guard_hook()}]})
+        print(f"  {pl.name} PreToolUse hook: adding tw.py bash-guard for Bash and archive_session")
     else:
         stale = [h for h in mine if h.get("command") != guard_hook()]
         for h in stale:
             h["command"] = guard_hook()
+        for group in pre:
+            if any(h in mine for h in group.get("hooks", [])):
+                group["matcher"] = "Bash,mcp__claude-code-remote__archive_session"
         print(f"  {pl.name} PreToolUse hook: " + ("updating to an absolute python path" if stale else "already present"))
+    pre = sl.setdefault("hooks", {}).setdefault("PreToolUse", [])
+    for group in pre:
+        if group.get("matcher") == "mcp__claude-code-remote__archive_session":
+            group["hooks"] = [h for h in group.get("hooks", [])
+                              if not (isinstance(h.get("command"), str) and "tw.py\" archive-guard" in h["command"])]
+    pre[:] = [g for g in pre if g.get("matcher") != "mcp__claude-code-remote__archive_session" or g.get("hooks")]
     if not a.no_allow:
         if perms.get("defaultMode") in (None, "", "auto"):
             perms["defaultMode"] = "auto"  # R45: every session there, the lead included, runs in auto

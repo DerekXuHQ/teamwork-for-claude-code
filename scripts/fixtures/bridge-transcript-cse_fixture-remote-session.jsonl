@@ -1,0 +1,2 @@
+{"request": {"mode": "auto", "subtype": "set_permission_mode"}, "request_id": "set-mode-fixture-id", "type": "control_request", "uuid": "fixture-id"}
+{"type": "system", "subtype": "hook_started", "hook_id": "fixture-id", "hook_name": "SessionStart:startup", "hook_event": "SessionStart", "uuid": "fixture-id", "session_id": "00000000-0000-4000-8000-000000000001"}

@@ -28,6 +28,13 @@ os.environ["TW_GUARD_LOG"] = str(Path(_GUARD_LOG_DIR.name) / "guard-errors.jsonl
 WALK = ["planned", "approved", "dispatched", "working", "review", "done"]
 
 
+def quiz_transcript(path, item, answer):
+    stamp=dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    rows=[{"type":"user","timestamp":stamp,"origin":{"kind":"human"},"message":{"role":"user","content":item["question"]}},
+          {"type":"user","timestamp":stamp,"origin":{"kind":"human"},"message":{"role":"user","content":answer}}]
+    Path(path).write_text("\n".join(json.dumps(x,ensure_ascii=False) for x in rows)+"\n",encoding="utf-8")
+
+
 def walk_args(run, args, state_file, prepare_primary=False):
     """Tests that only care about the end status: step a task through the legal path first (T20 enforces it).
     run(*args) must run tw.py; the final call is left to the caller."""
@@ -95,12 +102,76 @@ class TwCase(unittest.TestCase):
             tid = args[1]
             if (self.dir / ".teamwork" / "state.json").exists() and not self.state()["tasks"].get(tid, {}).get("primary"):
                 self.tw("task", "set", tid, "--primary", "The user can see all 12 restored records")
+        if len(args) >= 3 and args[:2] == ("succ","pack") and "--transcript" in args or len(args) >= 3 and args[:2] == ("succ","pack") and "--from-transcript" in args:
+            handover=self.state().get("handovers",{}).get(args[2],{})
+            target=handover.get("old_session")
+            transcript_flag="--transcript" if "--transcript" in args else "--from-transcript"
+            transcript_paths=[args[i+1] for i,x in enumerate(args[:-1]) if x==transcript_flag]
+            action="pack"
+        elif len(args) >= 3 and args[:2] == ("succ","grade") and ("--from-transcript" in args or "--transcript" in args):
+            handover=self.state().get("handovers",{}).get(args[2],{})
+            target=handover.get("quiz",{}).get("candidate") or next((x.get("session_id") for x in handover.get("candidates",[]) if not x.get("void")),None)
+            transcript_paths=[args[i+1] for i,x in enumerate(args[:-1]) if x in ("--from-transcript","--transcript")]
+            action="grade"
+        elif len(args) >= 3 and args[:2] == ("succ","retire-check"):
+            handover=self.state().get("handovers",{}).get(args[2],{})
+            target=handover.get("old_session")
+            transcript_paths=[args[i+1] for i,x in enumerate(args[:-1]) if x=="--transcript"]
+            caller=args[args.index("--caller")+1] if "--caller" in args else None
+            caller_paths=[(args[i+1],caller) for i,x in enumerate(args[:-1]) if x=="--from-transcript"]
+            action="retire-check"
+        else:
+            target=None; transcript_paths=[]; caller_paths=[]; action=None
+        if action!="retire-check": caller_paths=[]
+        if target and transcript_paths:
+            config=Path(args[args.index("--config-dir")+1]) if "--config-dir" in args else self.dir.parent/(self.dir.name+"-claude-test-config")  # outside the repo: a test helper must not dirty the frozen worktree
+            config.mkdir(exist_ok=True)
+            bridge_rows=[]
+            fixture_old=Path(__file__).parent/"fixtures"/"t71_old_thread.jsonl"
+            fixture_candidate=Path(__file__).parent/"fixtures"/"t71_real_candidate.jsonl"
+            for path in transcript_paths:
+                p=Path(path)
+                permitted=p.is_relative_to(self.dir) or p==fixture_old or (action=="grade" and p==fixture_candidate)
+                if not permitted or p.suffix.lower()==".json" or not p.is_file(): continue
+                try:
+                    parsed=[json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+                    for row in parsed:
+                        owner=row.get("sessionId") or row.get("session_id")
+                        if not owner and p.is_relative_to(self.dir):
+                            owner="00000000-0000-4000-8000-000000000001"
+                            row["sessionId"]=owner
+                        if isinstance(owner,str) and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}",owner.strip()):
+                            bridge_rows.append({"session_id":owner.strip()})
+                    if p.is_relative_to(self.dir) and parsed:
+                        p.write_text("\n".join(json.dumps(row,ensure_ascii=False) for row in parsed)+"\n",encoding="utf-8")
+                except (OSError,ValueError): pass
+            for path,owner_target in caller_paths:
+                p=Path(path)
+                if not owner_target or not p.is_relative_to(self.dir) or p.suffix.lower()==".json" or not p.is_file(): continue
+                try:
+                    parsed=[json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+                    for row in parsed:
+                        owner=row.get("sessionId") or row.get("session_id")
+                        if not owner:
+                            owner="00000000-0000-4000-8000-000000000002"
+                            row["sessionId"]=owner
+                        if isinstance(owner,str) and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}",owner.strip()):
+                            caller_bridge=config/f"bridge-transcript-cse_{str(owner_target).removeprefix('session_')}.jsonl"
+                            with caller_bridge.open("a",encoding="utf-8") as stream: stream.write(json.dumps({"session_id":owner.strip()})+"\n")
+                    p.write_text("\n".join(json.dumps(row,ensure_ascii=False) for row in parsed)+"\n",encoding="utf-8")
+                except (OSError,ValueError): pass
+            if bridge_rows:
+                suffix=str(target).removeprefix("session_")
+                bridge=config/f"bridge-transcript-cse_{suffix}.jsonl"
+                bridge.write_text("\n".join(json.dumps(row) for row in bridge_rows)+"\n",encoding="utf-8")
+                if "--config-dir" not in args:
+                    args=(*args,"--config-dir",str(config))
         if walk:
             walk_args(lambda *x: self.tw(*x, walk=False), args, self.dir / ".teamwork" / "state.json", prepare_primary=True)
         r = subprocess.run([sys.executable, str(TW), *args], cwd=self.dir, env=self.env,
                            capture_output=True, text=True)
         if ok:
-            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.returncode, 0, r.stderr or r.stdout)
         return r
 
     def state(self):
@@ -2177,6 +2248,8 @@ class Requests(TwCase):
         self.tw("prefs", "--set", "language=zh")
         self.tw("req", "add", "按钮改成蓝色")
         self.tw("thread", "set", "ui", "--session", "s1", "--status", "working")
+        self.assertEqual(self.state()["threads"]["ui"]["status"], "working")
+        self.assertEqual(self.state()["threads"]["ui"]["session_id"], "s1")
         board = self.tw("board").stdout
         for zh in ("## 你提的事（未关闭）", "[待办]", "## 总览", "**进行中**", "## 计划"):
             self.assertIn(zh, board)
@@ -3885,14 +3958,17 @@ class Rebuild(LeasesGit):
         z = json.loads((self.proj / ".teamwork" / "state.json").read_text())["threads"]["zorb"]
         self.assertEqual(z["session_id"], "S2")
         self.assertEqual([h["session_id"] for h in z["sessions"] if not h.get("to")], ["S2"])
-        # reviving a seat whose stint ended (its session went to a seat that is archived now) is refused
+        # A status-only change cannot reopen a retired stint; explicit session reassignment opens a fresh stint.
         self.tw("thread", "add", "quix", "--session", "S3")
         self.tw("thread", "set", "quix", "--status", "archived")
         self.tw("thread", "add", "blip", "--session", "S3")
         self.tw("thread", "set", "blip", "--status", "archived")
         self.assertNotEqual(self.tw("thread", "set", "quix", "--status", "idle", ok=False).returncode, 0)
-        self.assertNotEqual(self.tw("thread", "set", "quix", "--session", "S3", "--status", "idle",
-                                    ok=False).returncode, 0)  # naming its own old session changes nothing
+        self.tw("thread", "set", "quix", "--session", "S3", "--status", "idle")
+        quix=json.loads((self.proj/".teamwork"/"state.json").read_text())["threads"]["quix"]
+        self.assertEqual((quix["session_id"],quix["status"]),("S3","idle"))
+        self.assertEqual(quix["sessions"][-1]["session_id"],"S3")
+        self.assertFalse(quix["sessions"][-1].get("to"))
 
     def test_round_t13_short_name_and_headless_log(self):
         sub = Path(self._tmp.name) / "qz"
@@ -4425,7 +4501,7 @@ class FewerPrompts(TwCase):
             for tool in ("Bash", "Edit", "Write", "Read", "mcp__claude-code-remote__send_message",
                          "mcp__claude_ai_Claude_Docs__*", "CronCreate", "ScheduleWakeup"):
                 self.assertIn(tool, perms["allow"])
-            hooks = [h["command"] for g in sl["hooks"]["PreToolUse"] if g.get("matcher") == "Bash" for h in g["hooks"]]
+            hooks = [h["command"] for g in sl["hooks"]["PreToolUse"] if g.get("matcher") == "Bash,mcp__claude-code-remote__archive_session" for h in g["hooks"]]
             self.assertTrue(any(c.endswith('tw.py" bash-guard || true') for c in hooks), hooks)  # r3: never exits 2
             for cmd in ("git status", "git -C /tmp/q commit -m x", "ls /tmp", "python3 scripts/tw.py ready"):
                 self.assertFalse(self.rule_hits(perms["ask"] + perms["deny"], cmd), cmd)
@@ -7148,6 +7224,998 @@ class ArchiveAndSeats(TwCase):
         self.assertIn("开会话的实测情况", check["session_opening"])
 
 
+class T71GuardAndSuccession(TwCase):
+    def _load_tw(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location("tw_t71_shape", TW); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        return mod
+
+    def test_generated_fixture_signatures_and_byte_tamper(self):
+        import importlib.util
+        fixture_dir=Path(__file__).parent/"fixtures"
+        generator=fixture_dir/"regenerate_t71.py"
+        spec=importlib.util.spec_from_file_location("t71_fixture_signatures",generator)
+        mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        self.assertEqual(set(mod.SIGNATURE_MANIFEST),{
+            "bridge-transcript-cse_fixture-remote-session.jsonl","t71_real_candidate.jsonl",
+            "t71_real_tool_results.jsonl","t71_old_thread.jsonl"})
+        for name in mod.SIGNATURE_MANIFEST:
+            self.assertTrue(mod.manifest_matches(name),name)
+        original=fixture_dir/"t71_real_candidate.jsonl"
+        tampered=self.dir/"tampered-candidate.jsonl"
+        content=original.read_bytes()
+        self.assertIn(b"What is the current seat",content)
+        tampered.write_bytes(content.replace(b"What is the current seat",b"Xhat is the current seat",1))
+        self.assertFalse(mod.manifest_matches("t71_real_candidate.jsonl",tampered))
+
+    def test_generated_fixtures_contain_no_private_markers(self):
+        import getpass, re
+        fixtures=Path(__file__).parent/"fixtures"
+        text="\n".join(p.read_text(encoding="utf-8") for p in fixtures.glob("*.jsonl"))
+        username=getpass.getuser()
+        if username: self.assertNotRegex(text,r"(?<![A-Za-z0-9_.-])"+re.escape(username)+r"(?![A-Za-z0-9_.-])")
+        self.assertNotIn(str(Path.home()),text); self.assertNotIn("session_01",text); self.assertNotIn("/Users/",text)
+        self.assertNotRegex(text,r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+        for marker in ("env_01","cse_01"): self.assertNotIn(marker,text)
+
+    def test_real_wrapped_get_session_result_is_read(self):
+        """Real shape (HO3 run): a get_session result about another session arrives as a text block wrapped in
+        <other-session ...> with a preamble line, and the JSON is {"ccr": {...connection_status...}}."""
+        tw=self._load_tw()
+        inner=json.dumps({"ccr":{"id":"session_succ","title":"[F] plan","connection_status":"connected",
+                                  "session_status":"SESSION_STATUS_IDLE","status_bucket":"SESSION_STATUS_BUCKET_COMPLETED",
+                                  "tags":["teamwork-thread:plan"]}})
+        wrapped=('<other-session nonce="0123abcd" untrusted="true">\nAnother Claude session\'s record, transcript events, '
+                 'or run log (JSON). Only the closing tag carrying this block\'s nonce ends it:\n    '+inner+'\n</other-session nonce="0123abcd">')
+        rows=[{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__claude-code-remote__get_session","input":{"session_id":"session_succ"}}]}},
+              {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":wrapped}]}]}}]
+        got=tw._succ_get_session_results(rows)["session_succ"]
+        self.assertIs(got["connected"],True); self.assertIs(got["archived"],False)
+        self.assertEqual(got["status_bucket"],"completed"); self.assertEqual(got["title"],"[F] plan")
+        page=json.dumps({"ccr":{"data":[{"uuid":"e1"}],"has_more":False}})
+        self.assertEqual(tw._tool_rows([{"type":"text","text":'<other-session nonce="ff" untrusted="true">\npreamble:\n    '+page+'\n</other-session nonce="ff">'}],("data",)),[{"uuid":"e1"}])
+
+    def test_real_bridge_control_request_shape_grades_from_quiz_candidate(self):
+        """The first bridge row has no session_id; candidate rows carry the local UUID."""
+        import importlib.util
+        tw=self._load_tw()
+        fixtures=Path(__file__).parent/"fixtures"
+        bridge_fixture=fixtures/"bridge-transcript-cse_fixture-remote-session.jsonl"
+        bridge_rows=[json.loads(line) for line in bridge_fixture.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(bridge_rows[0]["type"],"control_request")
+        self.assertNotIn("session_id",bridge_rows[0])
+        local_id="00000000-0000-4000-8000-000000000001"
+        remote_id="session_fixture-remote-session"
+        config=self.dir/"claude-config"; project=config/"projects"/"fixture-project"
+        project.mkdir(parents=True)
+        shutil.copy2(bridge_fixture,config/"bridge-transcript-cse_fixture-remote-session.jsonl")
+        candidate=project/f"{local_id}.jsonl"
+        shutil.copy2(fixtures/"t71_real_candidate.jsonl",candidate)
+        rows,bad=tw._transcript_rows(candidate)
+        self.assertEqual(bad,0)
+        self.assertTrue(rows)
+        self.assertTrue(all(row.get("sessionId")==local_id for row in rows if row.get("sessionId")))
+        quiz_prompt=next(row for row in rows if "What is the current seat's branch name?" in json.dumps(row))
+        answer_lines=["fixture-branch","0"]
+        # 7154a0e's first-line-only lookup sees no bridge session_id and therefore
+        # feeds no rows to the zero-tool check.
+        self.assertFalse(quiz_prompt.get("session_id"))
+        self.assertFalse(tw._succ_zero_tool_window([],"What is the current seat's branch name?",answer_lines))
+
+        self.tw("thread","add","api","--session","old")
+        self.tw("succ","start","api","--reason","real bridge shape")
+        st=self.state(); st["lead"]["session_id"]="lead"
+        key=self.dir/"HO1-real-shape.json"
+        key.write_text(json.dumps({"items":[
+            {"question":"What is the current seat's branch name?","keywords":["fixture-branch"]},
+            {"question":"How many unpushed commits are there?","keywords":["0"]}] }),encoding="utf-8")
+        rec=st["handovers"]["HO1"]
+        rec.update(phase="quiz",candidates=[{"session_id":remote_id},{"session_id":"other-candidate"}],
+                   quiz={"key_file":str(key),"candidate":remote_id})
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        answers=self.dir/"real-shape-answers.txt"; answers.write_text("fixture-branch\n0\n",encoding="utf-8")
+        result=self.tw("succ","grade","HO1","--answers",str(answers),"--caller","lead","--config-dir",str(config))
+        self.assertIn("Zero tool calls: passed",result.stdout)
+        self.assertTrue(self.state()["handovers"]["HO1"]["quiz"]["passed"])
+        self.assertEqual(self.state()["handovers"]["HO1"]["quiz"]["candidate"],remote_id)
+
+        wrong_project=config/"projects"/"wrong-project"; wrong_project.mkdir()
+        mismatched=wrong_project/f"{local_id}.jsonl"
+        wrong=[dict(row) for row in rows]
+        dialogue_index=next(i for i,row in enumerate(wrong) if row.get("message"))
+        wrong[dialogue_index]={**wrong[dialogue_index],"sessionId":"00000000-0000-4000-8000-000000000002"}
+        mismatched.write_text("\n".join(json.dumps(row,ensure_ascii=False) for row in wrong)+"\n",encoding="utf-8")
+        self.assertEqual(tw._succ_transcript_rows(mismatched,remote_id,[str(config)]),[])
+
+    def setUp(self):
+        super().setUp()
+        self._keys_tmp=tempfile.TemporaryDirectory(prefix="tw-t71-keys-")
+        self.addCleanup(self._keys_tmp.cleanup)
+        self.env["TW_KEYS_DIR"]=self._keys_tmp.name
+
+    def fixture_old_session_start(self, seat="demo"):
+        st=self.state()
+        st["lead"]["session_id"]="session_fixture-lead"
+        sessions=st["threads"][seat].setdefault("sessions",[])
+        if sessions:
+            sessions[-1]["from"]="2025-01-01T00:00:00+00:00"
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+
+    def test_succ_shared_parsers_and_empty_pack_fail_closed(self):
+        tw=self._t71_module()
+        self.assertIsNone(tw._tool_json("see items [1] and [2]"))
+        self.assertIsNone(tw._tool_json('{"ok":1}\n{"ok":2}'))
+        event={"uuid":"e1","timestamp":"2026-11-24T00:00:00Z","message":{"role":"user","content":"check export"}}
+        wrapped='<other-session nonce="x">preamble\n'+json.dumps({"ccr":{"data":[event],"has_more":False}})+'\n</other-session nonce="x">'
+        self.assertEqual(tw._tool_rows(wrapped),[event])
+        wrapped_file=self.dir/"wrapped-events.json"
+        wrapped_file.write_text(wrapped,encoding="utf-8")
+        self.assertEqual([row["type"] for row in tw._succ_transcript_rows(wrapped_file)], ["user"])
+        self.tw("thread","add","demo","--session","old-seat")
+        self.tw("succ","start","demo","--reason","replace")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        empty=self.dir/"empty.jsonl"; empty.write_text("\n",encoding="utf-8")
+        failed=self.tw("succ","pack","HO1","--transcript",str(empty),ok=False)
+        self.assertIn("zero readable records",failed.stderr)
+        self.assertEqual(self.state()["handovers"]["HO1"]["phase"],"frozen")
+
+    def test_succ_transcript_owner_required_for_explicit_exports(self):
+        tw=self._t71_module()
+        expected="session_expected"
+        event=lambda sid:{"session_id":sid,"message":{"role":"user","content":"owned event"}}
+        shapes=[
+            lambda sid:('<other-session nonce="x">preamble\n'+json.dumps({"ccr":{"id":sid,"data":[event(sid)]}})+'\n</other-session nonce="x">'),
+            lambda sid:json.dumps({"ccr":{"id":sid,"data":[event(sid)]}}),
+            lambda sid:json.dumps({"data":[event(sid)]}),
+            lambda sid:json.dumps({"data":[
+                {"message":{"role":"assistant","content":[{"type":"tool_use","id":"events-call","name":"list_events","input":{"session_id":sid}}]}},
+                {"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"events-call","content":"event export"}]}}
+            ]}),
+        ]
+        for index,make in enumerate(shapes):
+            for sid,accepted in (("session_other",False),(expected,True)):
+                path=self.dir/f"export-{index}-{sid}.json"
+                path.write_text(make(sid),encoding="utf-8")
+                rows=tw._succ_transcript_rows(path,expected,[])
+                self.assertEqual(bool(rows),accepted,(index,sid,rows))
+
+    def test_succ_transcript_rejects_non_uuid_other_session_fixture(self):
+        tw=self._t71_module()
+        fixture=Path(__file__).parent/"fixtures"/"t71_real_candidate.jsonl"
+        self.assertEqual(tw._succ_transcript_rows(fixture,"session_expected",[]),[])
+        config=self.dir/"owner-config"; config.mkdir()
+        local="00000000-0000-4000-8000-000000000021"
+        (config/"bridge-transcript-cse_expected.jsonl").write_text(json.dumps({"session_id":local})+"\n",encoding="utf-8")
+        unrelated_filename=self.dir/"00000000-0000-4000-8000-000000000099.jsonl"
+        unrelated_filename.write_text(json.dumps({"type":"user","sessionId":local,"message":{"content":"owned"}})+"\n",encoding="utf-8")
+        self.assertEqual(len(tw._succ_transcript_rows(unrelated_filename,"session_expected",[config])),1)
+
+    def test_succ_transcript_ignores_platform_metadata_but_requires_owner_for_content(self):
+        tw=self._t71_module()
+        config=self.dir/"metadata-owner-config"; config.mkdir()
+        local="00000000-0000-4000-8000-000000000001"
+        (config/"bridge-transcript-cse_expected.jsonl").write_text(
+            json.dumps({"session_id":local})+"\n",encoding="utf-8")
+        fixture=Path(__file__).parent/"fixtures"/"t71_real_candidate.jsonl"
+        source=[json.loads(line) for line in fixture.read_text(encoding="utf-8").splitlines() if line.strip()]
+        metadata=source[0]
+        self.assertIn(metadata.get("type"),{"file-history-snapshot","file-history-delta"})
+        self.assertFalse(any(key in metadata for key in ("message","content","text","tool_use","tool_result")))
+        path=self.dir/"metadata-and-dialogue.jsonl"
+        rows=source
+        path.write_text("\n".join(json.dumps(row,ensure_ascii=False) for row in rows)+"\n",encoding="utf-8")
+        accepted=tw._succ_transcript_rows(path,"session_expected",[config])
+        self.assertTrue(accepted)
+        self.assertTrue(all(row.get("sessionId")==local for row in accepted))
+        rows.append({"type":"user","message":{"role":"user","content":"unattributed dialogue"}})
+        path.write_text("\n".join(json.dumps(row,ensure_ascii=False) for row in rows)+"\n",encoding="utf-8")
+        self.assertEqual(tw._succ_transcript_rows(path,"session_expected",[config]),[])
+        path.write_text(json.dumps(metadata)+"\n",encoding="utf-8")
+        self.assertEqual(tw._succ_transcript_rows(path,"session_expected",[config]),[])
+
+    def test_succ_transcript_rejects_content_outside_message(self):
+        tw=self._t71_module()
+        config=self.dir/"outside-content-config"; config.mkdir()
+        local="00000000-0000-4000-8000-000000000031"
+        (config/"bridge-transcript-cse_expected.jsonl").write_text(json.dumps({"session_id":local})+"\n",encoding="utf-8")
+        path=self.dir/"outside-content.jsonl"
+        path.write_text(json.dumps({"type":"assistant","sessionId":local,"timestamp":"2026-11-24T00:00:01Z",
+                                   "text":"post-freeze dialogue","tool_use":[{"type":"tool_use","name":"Bash","input":{"command":"git push origin HEAD"}}]})+"\n",encoding="utf-8")
+        self.assertIsNone(tw._row_blocks(json.loads(path.read_text(encoding="utf-8"))))
+        self.assertEqual(tw._succ_transcript_rows(path,"session_expected",[config]),[])
+
+    def test_thread_set_handover_uses_the_shared_gate(self):
+        self.tw("thread","add","api","--session","old")
+        self.tw("succ","start","api","--reason","swap")
+        before=self.state()
+        for hid in ("HO1","HO99"):
+            result=self.tw("thread","set","api","--session","stranger","--handover",hid,ok=False)
+            self.assertEqual(result.returncode,1)
+            self.assertIn("--handover blocked",result.stderr)
+            self.assertEqual(self.state()["threads"],before["threads"])
+            self.assertEqual(self.state()["handovers"],before["handovers"])
+
+    def test_retire_check_rejects_bash_writes_after_freeze(self):
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","replace")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        st=self.state(); st["threads"]["demo"].update(session_id="candidate-seat",status="starting")
+        st["handovers"]["HO1"].update(phase="seated",successor="candidate-seat")
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        stamp=(dt.datetime.fromisoformat(st["handovers"]["HO1"]["freeze"]["at"])+dt.timedelta(seconds=1)).isoformat()
+        transcript=self.dir/"bash-write.jsonl"
+        transcript.write_text(json.dumps({"type":"assistant","timestamp":stamp,"message":{"content":[
+            {"type":"tool_use","name":"Bash","input":{"command":"git push origin HEAD > /tmp/log"}}]}})+"\n",encoding="utf-8")
+        failed=self.tw("succ","retire-check","HO1","--caller","session_fixture-lead","--transcript",str(transcript),ok=False)
+        self.assertIn("Bash writes=git push origin HEAD > /tmp/log",failed.stderr)
+
+    def test_retire_check_uses_primary_get_session_and_ignores_subagent(self):
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","replace")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        state=self.state(); seat_at=dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        freeze=seat_at-dt.timedelta(seconds=1)
+        state["threads"]["demo"].update(session_id="candidate-seat",status="starting")
+        state["handovers"]["HO1"].update(phase="seated",successor="candidate-seat",steps={"seat":seat_at.isoformat()})
+        (self.dir/".teamwork/state.json").write_text(json.dumps(state),encoding="utf-8")
+        old_rows=[json.loads(line) for line in (Path(__file__).parent/"fixtures"/"t71_old_thread.jsonl").read_text(encoding="utf-8").splitlines()]
+        for row in old_rows: row["timestamp"]=(freeze-dt.timedelta(seconds=1)).isoformat()
+        old=self.dir/"old.jsonl"; old.write_text("\n".join(json.dumps(row) for row in old_rows)+"\n",encoding="utf-8")
+        config=self.dir/"claude-config"; project=config/"projects"/"fixture"; local="00000000-0000-4000-8000-000000000001"
+        child=project/local/"subagents"; child.mkdir(parents=True)
+        bridge=Path(__file__).parent/"fixtures"/"bridge-transcript-cse_fixture-remote-session.jsonl"
+        shutil.copy2(bridge,config/"bridge-transcript-cse_fixture-lead.jsonl")
+        def records(stamp):
+            return [{"type":"assistant","sessionId":local,"timestamp":stamp,"message":{"content":[{"type":"tool_use","id":"g","name":"get_session","input":{"session_id":"candidate-seat"}}]}},
+                    {"type":"user","sessionId":local,"timestamp":stamp,"message":{"content":[{"type":"tool_result","tool_use_id":"g","content":json.dumps({"connected":True,"status":"connected","title":state["threads"]["demo"]["title"],"tags":["teamwork-thread:demo"]})}]}}]
+        newer=records((seat_at+dt.timedelta(seconds=6)).isoformat())
+        older=records((seat_at-dt.timedelta(hours=2)).isoformat())
+        primary=project/f"{local}.jsonl"; primary.parent.mkdir(parents=True,exist_ok=True)
+        primary.write_text("\n".join(json.dumps(row) for row in newer)+"\n",encoding="utf-8")
+        (child/"agent-old.jsonl").write_text("\n".join(json.dumps(row) for row in older)+"\n",encoding="utf-8")
+        success=self.tw("succ","retire-check","HO1","--caller","session_fixture-lead","--transcript",str(old),"--config-dir",str(config))
+        self.assertIn('"used": false',success.stdout)
+        state=self.state(); state["handovers"]["HO1"].pop("retire_ticket",None)
+        (self.dir/".teamwork/state.json").write_text(json.dumps(state),encoding="utf-8")
+        primary.unlink()
+        failed=self.tw("succ","retire-check","HO1","--caller","session_fixture-lead","--transcript",str(old),"--config-dir",str(config),ok=False)
+        self.assertIn("unverified",failed.stderr)
+
+    def test_retire_check_rejects_second_bridge_session_post_freeze_message(self):
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","replace")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        st=self.state(); freeze=dt.datetime.fromisoformat(st["handovers"]["HO1"]["freeze"]["at"])
+        st["threads"]["demo"].update(session_id="candidate-seat",status="starting")
+        st["handovers"]["HO1"].update(phase="seated",successor="candidate-seat")
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        config=self.dir/"claude-config"; (config/"projects"/"fixture").mkdir(parents=True)
+        remote="session_remote-old"
+        bridge=config/f"bridge-transcript-cse_{remote.removeprefix('session_')}.jsonl"
+        bridge.write_text(json.dumps({"session_id":"local-first"})+"\n"+
+                          json.dumps({"session_id":"local-second"})+"\n",encoding="utf-8")
+        post_freeze=(freeze+dt.timedelta(seconds=1)).isoformat()
+        old=config/"projects"/"fixture"/"local-second.jsonl"
+        old.write_text(json.dumps({"type":"user","timestamp":post_freeze,
+                                   "message":{"content":"旧会话冻结后仍有用户消息"}},ensure_ascii=False)+"\n",encoding="utf-8")
+        self.env["CLAUDE_CONFIG_DIR"]=str(config)
+        import tw
+        paths=tw._find_transcripts(remote,[str(config)])
+        self.assertIn(old,paths)
+        failed=self.tw("succ","retire-check","HO1","--caller","session_fixture-lead","--transcript",str(old),ok=False)
+        self.assertEqual(failed.returncode,1)
+        self.assertIn("failed A7: post-freeze messages remain",failed.stderr)
+        self.assertIn("human=",failed.stderr)
+
+    def test_archive_guard_allows_verified_pending_and_void_candidate(self):
+        self.tw("thread","add","api","--session","session_old")
+        st=self.state(); st["archive"]["session_old"]={"verified_at":dt.datetime.now().astimezone().isoformat()}
+        st["handovers"]={"HO1":{"id":"HO1","phase":"candidate","seat":"api","old_session":"session_old",
+            "candidates":[{"session_id":"discarded","void":True}]}}
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        event={"cwd":str(self.dir),"tool_name":"mcp__claude-code-remote__archive_session","tool_input":{"session_id":" session_old "}}
+        result=subprocess.run([sys.executable,str(TW),"bash-guard"],cwd=self.dir,env=self.env,input=json.dumps(event),capture_output=True,text=True)
+        self.assertEqual(result.stdout.strip(),"")
+        event["tool_input"]["session_id"]="discarded"
+        result=subprocess.run([sys.executable,str(TW),"bash-guard"],cwd=self.dir,env=self.env,input=json.dumps(event),capture_output=True,text=True)
+        self.assertEqual(result.stdout.strip(),"")
+
+    def test_accept_receipt_caller_must_be_a_lead(self):
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","replace")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        self.tw("succ","pack","HO1","--from-transcript",str(Path(__file__).parent/"fixtures"/"t71_old_thread.jsonl"))
+        receipt=self.dir/"accept.json"; receipt.write_text("{}",encoding="utf-8")
+        failed=self.tw("succ","verify","HO1","--accept",str(receipt),"--caller","candidate-seat",ok=False)
+        self.assertIn("candidate cannot run verify",failed.stderr)
+
+    def _t71_module(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location("tw_t71_test_module",TW)
+        mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        return mod
+
+    def test_t71_peer_message_unwraps_real_wrapper_and_platform_preamble(self):
+        mod=self._t71_module()
+        wrapped=('The following message was sent from another session:\n\n'
+                 '<cross-session-message from-session="fixture-lead">\n'
+                 '[tw:fixture] TASK: preserve the fixture.\n&gt; report status\n'
+                 '</cross-session-message>')
+        self.assertEqual(mod._peer_message(wrapped),
+                         ("fixture-lead","[tw:fixture] TASK: preserve the fixture.\n> report status"))
+        self.assertEqual(mod._peer_message("  [tw:fixture] plain message  "),
+                         (None,"[tw:fixture] plain message"))
+
+    def test_t71_quiz_uses_full_entries_without_tw_header_and_deduplicates(self):
+        mod=self._t71_module(); pack=self.dir/"pack"; pack.mkdir()
+        (pack/"words.md").write_text(
+            "[L#1] [tw:fixture] TASK: preserve status\nThe branch is tw/demo/demo and checksum is 4f92.\n"
+            "[P#2] [tw:fixture] TASK: preserve status\nThe branch is tw/demo/demo and checksum is 4f92.\n",
+            encoding="utf-8")
+        material=mod._succ_quiz_material({"pack_dir":str(pack)},self.state())
+        lead_items=[x for x in material if "lead instruct" in x["question"]]
+        questions=[x["question"] for x in lead_items]
+        self.assertEqual(len(questions),len(set(questions)))
+        self.assertEqual(len(questions),1)
+        self.assertNotIn("TASK",questions[0])
+        self.assertTrue(any("demo" in key for key in lead_items[0]["keywords"]))
+        self.assertTrue(any("checksum" in key or "4f92" in key for key in lead_items[0]["keywords"]))
+
+    def test_t71_yes_no_matching_is_bilingual_and_boundary_safe(self):
+        mod=self._t71_module()
+        for answer in ("yes","是","对"):
+            self.assertTrue(mod._succ_hit("yes",answer))
+        for answer in ("no","否","不"):
+            self.assertTrue(mod._succ_hit("no",answer))
+        self.assertFalse(mod._succ_hit("yes","不是"))
+        self.assertFalse(mod._succ_hit("no","none not nobody"))
+
+    def test_t71_repack_replaces_fixed_set_and_keeps_old_set_out_of_manifest(self):
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","fixture replacement")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        transcript=Path(__file__).parent/"fixtures"/"t71_old_thread.jsonl"
+        packed=self.tw("succ","pack","HO1","--from-transcript",str(transcript))
+        self.assertIn('"only_read_fact": "none — 原因：填写没有用户原话可引用的原因"',packed.stdout)
+        self.assertIn("## Rules\\n",packed.stdout)
+        self.assertIn("## Only-known-after-reading fact\\n",packed.stdout)
+        self.assertIn("## Unresolved\\n",packed.stdout)
+        self.tw("succ","pack","HO1","--from-transcript",str(transcript))
+        pack=Path(self.state()["handovers"]["HO1"]["pack_dir"])
+        for name in ("BRIEF.md","HANDOFF.md","words.md","MANIFEST.json"):
+            self.assertTrue((pack/name).is_file(),name)
+        archived=list((pack/"superseded").glob("*/"))
+        self.assertTrue(archived)
+        self.assertTrue(all((p/"BRIEF.md").is_file() for p in archived))
+        manifest=json.loads((pack/"MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertTrue(manifest["files"])
+        self.assertFalse(any("superseded" in name for name in manifest["files"]))
+        self.assertEqual(self._t71_module()._succ_pack_gate(pack),[])
+
+    def test_t71_pack_classifies_lead_peer_candidate_and_trims_url_punctuation(self):
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        st=self.state(); st["lead"]={"session_id":"fixture-lead","sessions":[{"session_id":"fixture-old-lead"}]}
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        self.tw("succ","start","demo","--reason","fixture replacement")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        rows=[json.loads(x) for x in (Path(__file__).parent/"fixtures"/"t71_old_thread.jsonl").read_text().splitlines()]
+        for row in rows:
+            if row.get("type")=="user" and "<cross-session-message" in str(row.get("message",{}).get("content","")):
+                row["message"]["content"]=("platform note\n\n<cross-session-message from-session=\"fixture-lead\">\n"
+                    "[tw:fixture] TASK: preserve lead data.\n&gt; exact marker\n</cross-session-message>")
+                break
+        rows.extend([
+            {"type":"user","timestamp":"2026-01-01T00:01:00Z","_handover_subagent":True,
+             "message":{"content":"<cross-session-message from-session=\"fixture-peer\">\n[tw:fixture] TASK: verify peer data.\n</cross-session-message>"}},
+            {"type":"user","timestamp":"2026-01-01T00:02:00Z","_handover_subagent":True,
+             "message":{"content":"<cross-session-message from-session=\"candidate-seat\">\n[tw:fixture] TASK: candidate test traffic.\n</cross-session-message>"}},
+            {"type":"user","timestamp":"2026-01-01T00:02:30Z","_handover_subagent":True,
+             "message":{"content":"<cross-session-message from-session=\"fixture-old-lead\">\n[tw:fixture] TASK: preserve historical lead decision.\n</cross-session-message>"}},
+            {"type":"assistant","timestamp":"2026-01-01T00:03:00Z","message":{"content":[
+                {"type":"tool_use","id":"url-fixture","name":"Bash","input":{"command":"python -c 'print(1)'"}},
+                {"type":"tool_result","tool_use_id":"url-fixture","content":"https://example.invalid/path).,;]"}]}}])
+        source=self.dir/"ho2-shaped.jsonl"; source.write_text("\n".join(json.dumps(x) for x in rows)+"\n",encoding="utf-8")
+        self.tw("succ","pack","HO1","--from-transcript",str(source))
+        pack=Path(self.state()["handovers"]["HO1"]["pack_dir"])
+        words=(pack/"words.md").read_text(encoding="utf-8")
+        self.assertIn("[L#1]",words); self.assertIn("exact marker",words)
+        self.assertIn("[P#3]",words); self.assertIn("verify peer data",words)
+        self.assertIn("[L#4]",words); self.assertIn("historical lead decision",words)
+        self.assertNotIn("candidate test traffic",words)
+        facts=json.loads((pack/"facts.json").read_text(encoding="utf-8"))
+        self.assertEqual(facts["urls"],["https://example.invalid/path"])
+
+    def test_t71_pack_strips_all_requested_url_trailing_punctuation(self):
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","fixture replacement")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        rows=[{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[
+            {"type":"tool_use","id":"url-fixture","name":"Bash","input":{"command":"python -c 'print(1)'"}},
+            {"type":"tool_result","tool_use_id":"url-fixture","content":"https://example.invalid/path).,;]"}]}}]
+        source=self.dir/"url-shaped.jsonl"; source.write_text(json.dumps(rows[0])+"\n",encoding="utf-8")
+        self.tw("succ","pack","HO1","--from-transcript",str(source))
+        pack=Path(self.state()["handovers"]["HO1"]["pack_dir"])
+        facts=json.loads((pack/"facts.json").read_text(encoding="utf-8"))
+        self.assertEqual(facts["urls"],["https://example.invalid/path"])
+
+    def test_reseat_reclaims_archived_session_after_other_seat_moved_on(self):
+        self.tw("thread", "add", "api", "--session", "s_a")
+        self.tw("thread", "set", "api", "--status", "archived")
+        self.tw("thread", "add", "other", "--session", "s_x")
+        self.tw("thread", "reseat", "other", "--session", "s_a")
+        self.tw("thread", "reseat", "other", "--session", "s_b")
+        result=self.tw("thread", "reseat", "api", "--session", "s_a")
+        self.assertIn("ROSTER", result.stderr)
+        state=self.state(); api=state["threads"]["api"]
+        self.assertEqual((api["session_id"],api["status"]),("s_a","starting"))
+        self.assertEqual(api["sessions"][-1]["session_id"],"s_a")
+        self.assertIsNone(api["sessions"][-1].get("to"))
+        self.assertTrue(api["sessions"][-2].get("to"))
+        self.assertEqual(api["sessions"][-2]["session_id"],"s_a")
+        self.assertEqual(json.loads((self.dir/".teamwork"/"log.jsonl").read_text().splitlines()[-2])["ev"],"thread-reseat")
+        board=self.tw("board").stdout
+        self.assertIn("s_a",board)
+        self.assertIn("api | rc | session_id=s_a",board)
+
+    def test_reseat_rejects_live_occupied_and_self_session_without_state_change(self):
+        self.tw("thread","add","api","--session","s_api")
+        self.tw("thread","add","other","--session","s_other")
+        before=self.state()
+        occupied=self.tw("thread","reseat","api","--session","s_other",ok=False)
+        self.assertIn("already holds the other seat",occupied.stderr)
+        self.assertEqual(self.state()["threads"],before["threads"])
+        self_session=self.tw("thread","reseat","api","--session","s_api",ok=False)
+        self.assertIn("already holds the api seat",self_session.stderr)
+        self.assertEqual(self.state()["threads"],before["threads"])
+
+    def test_set_session_restores_archived_seat_through_shared_path(self):
+        self.tw("thread","add","api","--session","old-api")
+        self.tw("thread","set","api","--status","archived")
+        result=self.tw("thread","set","api","--session","new-api","--status","working")
+        self.assertIn("ROSTER",result.stderr)
+        seat=self.state()["threads"]["api"]
+        self.assertEqual((seat["session_id"],seat["status"]),("new-api","working"))
+        self.assertEqual(json.loads((self.dir/".teamwork"/"log.jsonl").read_text().splitlines()[-1])["ev"],"thread-reseat")
+        self.tw("thread","set","api","--status","working")
+        self.assertTrue(seat["sessions"][-2].get("to"))
+        self.assertIsNone(seat["sessions"][-1].get("to"))
+
+    def test_handover_reseat_gate_requires_verified_and_graded_successor(self):
+        self.tw("thread","add","api","--session","old")
+        self.tw("succ","start","api","--reason","swap")
+        self.tw("succ","candidate","HO1","candidate")
+        before=self.state()
+        result=self.tw("thread","reseat","api","--session","candidate","--handover","HO1",ok=False)
+        self.assertIn("verify",result.stderr)
+        self.assertEqual(self.state()["threads"],before["threads"])
+        self.assertEqual(self.state()["handovers"],before["handovers"])
+
+    def test_handover_reseat_rejects_stranger_without_state_change(self):
+        self.tw("thread","add","api","--session","old")
+        self.tw("succ","start","api","--reason","swap")
+        before=self.state()
+        result=self.tw("thread","reseat","api","--session","stranger","--handover","HO1",ok=False)
+        self.assertEqual(result.returncode,1)
+        self.assertIn("candidate",result.stderr)
+        after=self.state()
+        self.assertEqual(after["threads"],before["threads"])
+        self.assertEqual(after["handovers"],before["handovers"])
+
+    def test_open_handover_blocks_plain_reseat_and_set(self):
+        self.tw("thread","add","api","--session","old")
+        self.tw("succ","start","api","--reason","swap")
+        before=self.state()
+        for args in (("thread","reseat","api","--session","new"),("thread","set","api","--session","new")):
+            result=self.tw(*args,ok=False)
+            self.assertEqual(result.returncode,1)
+            self.assertIn("succ seat or succ abort",result.stderr)
+            self.assertEqual(self.state()["threads"],before["threads"])
+
+    def test_candidate_in_other_open_handover_is_occupied(self):
+        self.tw("thread","add","api","--session","old-api")
+        self.tw("thread","add","web","--session","old-web")
+        st=self.state()
+        st["handovers"]={"HO1":{"id":"HO1","seat":"web","phase":"candidate","candidates":[{"session_id":"reserved"}]}}
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        before=self.state()
+        result=self.tw("thread","set","api","--session","reserved",ok=False)
+        self.assertEqual(result.returncode,1)
+        self.assertIn("handover HO1",result.stderr)
+        self.assertEqual(self.state()["threads"],before["threads"])
+
+    def test_retire_check_lists_peer_rows_and_ignores_fixture_tool_results(self):
+        fixture=Path(__file__).parent/"fixtures"/"t71_old_thread.jsonl"
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","fixture replacement")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        state=self.state(); freeze=dt.datetime.fromisoformat(state["handovers"]["HO1"]["freeze"]["at"])
+        rows=[json.loads(line) for line in fixture.read_text(encoding="utf-8").splitlines()]
+        for i,row in enumerate(rows): row["timestamp"]=(freeze+dt.timedelta(seconds=i+1)).isoformat()
+        old=self.dir/"old.jsonl"; old.write_text("\n".join(json.dumps(row) for row in rows)+"\n",encoding="utf-8")
+        state["threads"]["demo"].update(session_id="candidate-seat",status="starting")
+        state["handovers"]["HO1"].update(phase="seated",successor="candidate-seat")
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(state),encoding="utf-8")
+        thread=state["threads"]["demo"]
+        connected=self.dir/"connected.jsonl"
+        result_rows=[{"type":"assistant","message":{"content":[{"type":"tool_use","id":"g","name":"get_session","input":{"session_id":"candidate-seat"}}]}},
+                     {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"g","content":json.dumps({"connected":True,"status":"connected","title":thread["title"],"tags":["teamwork-thread:demo"]})}]}}]
+        connected.write_text("\n".join(json.dumps(x) for x in result_rows)+"\n",encoding="utf-8")
+        failed=self.tw("succ","retire-check","HO1","--caller","session_fixture-lead","--transcript",str(old),"--from-transcript",str(connected),ok=False)
+        self.assertIn("human=none",failed.stderr)
+        self.assertIn("peer_pending=2026",failed.stderr)
+        self.assertIn("writes=none",failed.stderr)
+
+    def test_retire_check_fails_closed_on_missing_row_timestamp(self):
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","replace")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        st=self.state(); st["threads"]["demo"].update(session_id="candidate-seat",status="starting")
+        st["handovers"]["HO1"].update(phase="seated",successor="candidate-seat")
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        rows=[json.loads(x) for x in (Path(__file__).parent/"fixtures"/"t71_old_thread.jsonl").read_text().splitlines()]
+        rows[0].pop("timestamp",None)
+        transcript=self.dir/"old-without-time.jsonl"
+        transcript.write_text("\n".join(json.dumps(x) for x in rows)+"\n",encoding="utf-8")
+        failed=self.tw("succ","retire-check","HO1","--caller","session_fixture-lead","--transcript",str(transcript),ok=False)
+        self.assertEqual(failed.returncode,1)
+        self.assertIn("rows lack timestamps; unverified",failed.stderr)
+        self.assertNotIn("retire_ticket",self.state()["handovers"]["HO1"])
+
+    def test_real_shape_fixture_handover_through_archive_guard(self):
+        fixtures=Path(__file__).parent/"fixtures"
+        candidate=fixtures/"t71_real_candidate.jsonl"; old=fixtures/"t71_old_thread.jsonl"
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","fixture replacement")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        self.tw("succ","pack","HO1","--from-transcript",str(old))
+        pack=Path(self.state()["handovers"]["HO1"]["pack_dir"])
+        words=(pack/"words.md").read_text(encoding="utf-8")
+        self.assertIn("[L#1]",words); self.assertIn("[L#2]",words)
+        quiz=self.tw("succ","quiz","HO1","--caller","session_fixture-lead")
+        self.assertGreaterEqual(self.state()["handovers"]["HO1"]["quiz"]["question_count"],3)
+        answers=self.dir/"answers.txt"
+        key=json.loads(Path(self.state()["handovers"]["HO1"]["quiz"]["key_file"]).read_text(encoding="utf-8"))
+        key["items"]=[{"question":"What is the current seat's branch name?","keywords":["fixture-branch"]},
+                      {"question":"How many unpushed commits are there?","keywords":["0"]},
+                      {"question":"What would you check next?","subjective":True,"keywords":[]}]
+        Path(self.state()["handovers"]["HO1"]["quiz"]["key_file"]).write_text(json.dumps(key),encoding="utf-8")
+        answers.write_text("fixture-branch\n0\n\n",encoding="utf-8")
+        self.tw("succ","grade","HO1","--answers",str(answers),"--caller","session_fixture-lead","--from-transcript",str(candidate))
+        self.assertTrue(self.state()["handovers"]["HO1"]["quiz"]["passed"])
+        receipt=self.dir/"accept.json"
+        t=self.state()["threads"]["demo"]
+        receipt.write_text(json.dumps({"tasks":[],"branch":t["branch"],"head":"-","rules":[],"requests":[],
+            "only_read_fact":"none — no user-authored statements were recorded",
+            "unresolved":[],"sections":"## Rules / 规则\nnone\n## Only-known-after-reading fact / 只有读过才知道的一条\nnone; no user-authored statements\n## Unresolved / 悬而未决\nnone"}),encoding="utf-8")
+        self.tw("succ","verify","HO1","--accept",str(receipt),"--caller","session_fixture-lead")
+        self.tw("succ","seat","HO1","candidate-seat")
+        connected=self.dir/"connected.jsonl"
+        real_tools=[json.loads(line) for line in (fixtures/"t71_real_tool_results.jsonl").read_text(encoding="utf-8").splitlines()]
+        calls={}; results=[]
+        recorded_after_seat=(dt.datetime.now().astimezone()+dt.timedelta(seconds=30)).isoformat(timespec="seconds")
+        def other_session(value):
+            return ('<other-session nonce="0123abcd" untrusted="true">\nAnother Claude session record (JSON):\n    '+
+                    json.dumps({"ccr":value},ensure_ascii=False)+'\n</other-session nonce="0123abcd">')
+        for row in real_tools:
+            block=(row.get("message") or {}).get("content",[{}])[0]
+            if row.get("type")=="assistant" and "get_session" in str(block.get("name")):
+                calls[block["id"]]=block
+                if len(calls)==1:
+                    block["input"]={"session_id":"candidate-seat"}; results.append(row)
+            elif row.get("type")=="user" and block.get("tool_use_id") in calls:
+                row["timestamp"]=recorded_after_seat
+                block["content"]=[{"type":"text","text":other_session({"id":"candidate-seat","title":t["title"],"connection_status":"connected","session_status":"SESSION_STATUS_IDLE","status_bucket":"SESSION_STATUS_BUCKET_COMPLETED","tags":["teamwork-thread:demo"]})}]
+                results.append(row); break
+        connected.write_text("\n".join(json.dumps(x) for x in results)+"\n",encoding="utf-8")
+        stale=json.loads(json.dumps(results))
+        stale[-1]["timestamp"]=(dt.datetime.fromisoformat(self.state()["handovers"]["HO1"]["steps"]["seat"])-dt.timedelta(seconds=1)).isoformat()
+        connected.write_text("\n".join(json.dumps(x) for x in stale)+"\n",encoding="utf-8")
+        old_rows=Path(__file__).parent/"fixtures"/"t71_old_thread.jsonl"
+        config=self.dir/"claude-config"; config.mkdir()
+        stale_result=self.tw("succ","retire-check","HO1","--caller","session_fixture-lead","--transcript",str(old_rows),"--from-transcript",str(connected),ok=False)
+        self.assertIn("not newer than seat step",stale_result.stderr)
+        wrong_owner=self.tw("succ","retire-check","HO1","--caller","session_fixture-lead","--transcript",str(candidate),"--from-transcript",str(connected),"--config-dir",str(config),ok=False)
+        self.assertNotEqual(wrong_owner.returncode,0)
+        self.assertIn("belongs to another session; unverified",wrong_owner.stderr)
+        self.assertNotIn("retire_ticket",self.state()["handovers"]["HO1"])
+        connected.write_text("\n".join(json.dumps(x) for x in results)+"\n",encoding="utf-8")
+        self.tw("succ","retire-check","HO1","--caller","session_fixture-lead","--transcript",str(old),"--from-transcript",str(connected))
+        cfg=config
+        local="00000000-0000-4000-8000-000000000001"
+        bridge=Path(__file__).parent/"fixtures"/"bridge-transcript-cse_fixture-remote-session.jsonl"
+        shutil.copy2(bridge,cfg/"bridge-transcript-cse_fixture-lead.jsonl")
+        scan=self.dir/"hook-cwd"; scan.mkdir()
+        event={"cwd":str(scan),"session_id":local,"tool_name":"mcp__claude-code-remote__archive_session","tool_input":{"session_id":"old-seat"}}
+        env={**self.env,"CLAUDE_CONFIG_DIR":str(cfg),"TW_GUARD_LOG":str(self.dir/"guard-errors.jsonl")}
+        hook=subprocess.run([sys.executable,str(TW),"bash-guard"],cwd=scan,env=env,input=json.dumps(event),capture_output=True,text=True)
+        self.assertEqual(json.loads(hook.stdout)["hookSpecificOutput"]["permissionDecision"],"allow",hook.stdout)
+        connected.write_text("\n".join(json.dumps(x) for x in results)+"\n",encoding="utf-8")
+        archived_call=json.loads(json.dumps(real_tools[2] if len(real_tools)>2 else real_tools[0]))
+        archived_result=json.loads(json.dumps(real_tools[3] if len(real_tools)>3 else real_tools[1]))
+        call_block=archived_call["message"]["content"][0]; call_block.update(id="fixture-old-get",input={"session_id":"old-seat"})
+        archived_result["timestamp"]=recorded_after_seat
+        result_block=archived_result["message"]["content"][0]; result_block.update(tool_use_id="fixture-old-get",content=[{"type":"text","text":other_session({"id":"old-seat","session_status":"SESSION_STATUS_ARCHIVED","status_bucket":"SESSION_STATUS_BUCKET_COMPLETED","archived":True})}])
+        lead_call=json.loads(json.dumps(archived_call)); lead_result=json.loads(json.dumps(archived_result))
+        lead_call["message"]["content"][0].update(id="fixture-lead-get",input={"session_id":"session_fixture-lead"})
+        lead_result["timestamp"]=recorded_after_seat
+        lead_result["message"]["content"][0].update(tool_use_id="fixture-lead-get",content=[{"type":"text","text":other_session({"id":"session_fixture-lead","connection_status":"connected","session_status":"SESSION_STATUS_IDLE","title":"lead","tags":[]})}])
+        with connected.open("a",encoding="utf-8") as f: f.write(json.dumps(archived_call)+"\n"+json.dumps(archived_result)+"\n"+json.dumps(lead_call)+"\n"+json.dumps(lead_result)+"\n")
+        self.tw("succ","archived","HO1","--caller","session_fixture-lead","--from-transcript",str(connected))
+        self.assertEqual(self.state()["handovers"]["HO1"]["phase"],"retired")
+
+    def test_failed_verify_and_grade_exit_nonzero_without_phase_advance(self):
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","fixture replacement")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        self.tw("succ","pack","HO1","--from-transcript",str(Path(__file__).parent/"fixtures"/"t71_old_thread.jsonl"))
+        pack=Path(self.state()["handovers"]["HO1"]["pack_dir"])
+        bad=self.dir/"bad.json"
+        bad.write_text(json.dumps({"tasks":[],"branch":self.state()["threads"]["demo"]["branch"],"head":"-","rules":[],"requests":[],
+            "only_read_fact":"invented quote","unresolved":[],"sections":"## Rules\nnone\n## Only-known-after-reading fact\ninvented quote\n## Unresolved\nnone"}),encoding="utf-8")
+        failed=self.tw("succ","verify","HO1","--accept",str(bad),"--caller","session_fixture-lead",ok=False)
+        self.assertNotEqual(failed.returncode,0)
+        self.assertEqual(self.state()["handovers"]["HO1"]["phase"],"packed")
+        self.assertEqual(json.loads(self.tw("succ","status","HO1","--json").stdout)[0]["next"],"verify")
+        good=self.dir/"good.json"
+        good.write_text(json.dumps({"tasks":[],"branch":self.state()["threads"]["demo"]["branch"],"head":"-","rules":[],"requests":[],
+            "only_read_fact":"none — no user-authored statements were recorded","unresolved":[],"sections":"## Rules\nnone\n## Only-known-after-reading fact\nnone; no user-authored statements\n## Unresolved\nnone"}),encoding="utf-8")
+        self.tw("succ","verify","HO1","--accept",str(good),"--caller","session_fixture-lead")
+        self.tw("succ","quiz","HO1","--caller","session_fixture-lead")
+        wrong=self.dir/"wrong.txt"; wrong.write_text("wrong\nwrong\nwrong\nwrong\n",encoding="utf-8")
+        failed_grade=self.tw("succ","grade","HO1","--answers",str(wrong),"--caller","session_fixture-lead","--from-transcript",str(Path(__file__).parent/"fixtures"/"t71_real_candidate.jsonl"),ok=False)
+        self.assertNotEqual(failed_grade.returncode,0)
+        self.assertEqual(self.state()["handovers"]["HO1"]["phase"],"quiz")
+        self.assertEqual(json.loads(self.tw("succ","status","HO1","--json").stdout)[0]["next"],"grade")
+
+    def test_verify_self_lists_items_and_todo_pack_is_rejected(self):
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","fixture replacement")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        self.tw("succ","pack","HO1","--from-transcript",str(Path(__file__).parent/"fixtures"/"t71_old_thread.jsonl"))
+        out=self.tw("succ","verify","HO1","--self").stdout
+        for name in ("tasks","branch","head","rules","requests","pack_integrity","only_read_fact"):
+            self.assertIn("Verification "+name+":",out)
+        import importlib.util
+        spec=importlib.util.spec_from_file_location("tw_module",TW); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        pack=self.dir/"bad-pack"; (pack/"raw").mkdir(parents=True)
+        (pack/"BRIEF.md").write_text("## Current facts\nstate\n",encoding="utf-8")
+        (pack/"words.md").write_text("",encoding="utf-8")
+        (pack/"HANDOFF.md").write_text("## Rules\n- TODO\n## Only-known-after-reading fact\n- TODO\n## Unresolved\n- TODO\n",encoding="utf-8")
+        (pack/"raw/old.jsonl").write_text("{}\n",encoding="utf-8")
+        (pack/"MANIFEST.json").write_text(json.dumps({"files":{},"gaps":[]}),encoding="utf-8")
+        missing=mod._succ_pack_gate(pack)
+        self.assertTrue(any("TODO" in x for x in missing)); self.assertTrue(any("words.md" in x for x in missing))
+
+    def test_only_read_fact_none_is_not_applicable_only_when_pack_has_no_quotes(self):
+        self.tw("thread","add","demo","--session","old-seat")
+        self.fixture_old_session_start()
+        self.tw("succ","start","demo","--reason","fixture replacement")
+        self.tw("succ","candidate","HO1","candidate-seat")
+        self.tw("succ","freeze","HO1","--stopped","old-seat stopped")
+        self.tw("succ","pack","HO1","--from-transcript",str(Path(__file__).parent/"fixtures"/"t71_old_thread.jsonl"))
+        pack=Path(self.state()["handovers"]["HO1"]["pack_dir"])
+        receipt={"tasks":[],"branch":self.state()["threads"]["demo"]["branch"],"head":"-","rules":[],"requests":[],
+                 "only_read_fact":"none — 包里没有用户原话可引用","unresolved":[],
+                 "sections":"## Rules\nnone\n## Only-known-after-reading fact\nnone; 包里没有用户原话可引用\n## Unresolved\nnone"}
+        path=self.dir/"receipt.json"; path.write_text(json.dumps(receipt),encoding="utf-8")
+        self.tw("succ","verify","HO1","--accept",str(path),"--caller","session_fixture-lead")
+        self.assertTrue(self.state()["handovers"]["HO1"]["verify"]["checks"]["only_read_fact"])
+        words=pack/"words.md"; words.write_text(words.read_text(encoding="utf-8")+"\n[#1] User explicitly requested a retained original statement.\n",encoding="utf-8")
+        # Keep the manifest current so only the receipt applicability changes.
+        import hashlib
+        mf=json.loads((pack/"MANIFEST.json").read_text(encoding="utf-8")); mf["files"]["words.md"]=hashlib.sha256(words.read_bytes()).hexdigest()
+        (pack/"MANIFEST.json").write_text(json.dumps(mf,ensure_ascii=False,indent=2),encoding="utf-8")
+        self.tw("succ","verify","HO1","--accept",str(path),"--caller","session_fixture-lead",ok=False)
+        self.assertFalse(self.state()["handovers"]["HO1"]["verify"]["checks"]["only_read_fact"])
+
+    def test_archive_guard_denies_live_ids_and_consumes_release_once(self):
+        self.tw("thread", "add", "api", "--session", "session_live_api")
+        self.tw("thread", "add", "next", "--session", "session_candidate")
+        st=self.state(); st["lead"]={"session_id":"session_lead"}
+        st["threads"]["next"]["status"]="archived"
+        st["handovers"]={"HO1":{"id":"HO1","phase":"seated","seat":"api","old_session":"session_old",
+            "successor":"session_successor","candidates":[{"session_id":"session_candidate"}],
+            "retire_ticket":{"id":"ticket1","session_id":"session_old","issuer":"session_caller",
+                "expires_at":(dt.datetime.now().astimezone()+dt.timedelta(minutes=5)).isoformat(),"used":False}}}
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        scan=self.dir/"hook-cwd"; scan.mkdir()
+        cfg=self.dir/"claude-config"; cfg.mkdir()
+        local="00000000-0000-4000-8000-000000000001"
+        bridge=Path(__file__).parent/"fixtures"/"bridge-transcript-cse_fixture-remote-session.jsonl"
+        shutil.copy2(bridge,cfg/"bridge-transcript-cse_caller.jsonl")
+        def hook(target):
+            event={"cwd":str(scan),"session_id":local,
+                   "tool_name":"mcp__claude-code-remote__archive_session","tool_input":{"session_id":target}}
+            env={**self.env,"CLAUDE_CONFIG_DIR":str(cfg),"TW_GUARD_LOG":str(self.dir/"guard-errors.jsonl")}
+            return subprocess.run([sys.executable,str(TW),"bash-guard"],cwd=scan,env=env,
+                input=json.dumps(event),capture_output=True,text=True)
+        expected_reasons={"session_live_api":"在座会话（api）/ active seat session (api)",
+                          "session_lead":"lead / lead", "session_candidate":"候选会话 / candidate session",
+                          "session_successor":"继任会话 / successor session",
+                          "session_caller":"调用者自己 / caller session itself"}
+        for target,reason in expected_reasons.items():
+            result=hook(target); output=json.loads(result.stdout)["hookSpecificOutput"]
+            self.assertEqual(output["permissionDecision"],"deny")
+            self.assertIn(reason,output["permissionDecisionReason"])
+        allowed=hook("session_old")
+        self.assertEqual(json.loads(allowed.stdout)["hookSpecificOutput"]["permissionDecision"],"allow",allowed.stdout)
+        self.assertTrue(self.state()["handovers"]["HO1"]["retire_ticket"]["used"])
+        self.assertEqual(hook("session_old").stdout.strip(),"")
+
+    def test_archive_guard_finds_project_from_worktree_cwd(self):
+        project=self.dir/"demo"; (project/".teamwork").mkdir(parents=True)
+        state=self.state(); state["lead"]["session_id"]="project-lead"
+        (project/".teamwork"/"state.json").write_text(json.dumps(state),encoding="utf-8")
+        worktree=self.dir/"demo-worktrees"/"api"; worktree.mkdir(parents=True)
+        event={"cwd":str(worktree),"tool_name":"mcp__claude-code-remote__archive_session","tool_input":{"session_id":"project-lead"}}
+        result=subprocess.run([sys.executable,str(TW),"bash-guard"],cwd=worktree,env=self.env,
+            input=json.dumps(event),capture_output=True,text=True)
+        self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"],"deny",result.stdout)
+
+    def test_candidate_cannot_run_own_quiz_or_grade(self):
+        self.tw("thread","add","api","--session","session_api")
+        self.tw("succ","start","api","--reason","replacement")
+        pack=self.dir/"candidate-pack"; pack.mkdir()
+        (pack/"BRIEF.md").write_text("## Current facts\nfixture\n",encoding="utf-8")
+        key=Path(self._keys_tmp.name)/"HO1-quiz.json"; key.write_text(json.dumps({"items":[{"question":"fixture question","keywords":["fixture"]}]}),encoding="utf-8")
+        answers=self.dir/"answers.txt"; answers.write_text("fixture\n",encoding="utf-8")
+        st=self.state(); st["handovers"]["HO1"].update(phase="quiz",candidates=[{"session_id":"candidate"}],
+            pack_dir=str(pack),quiz={"candidate":"candidate","key_file":str(key)})
+        st["lead"]["session_id"]="lead"; st["handovers"]["HO1"]["lead_session"]="lead"
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        quiz=self.tw("succ","quiz","HO1","--caller","candidate",ok=False)
+        grade=self.tw("succ","grade","HO1","--caller","candidate","--answers",str(answers),ok=False)
+        self.assertEqual(quiz.returncode,1); self.assertEqual(grade.returncode,1)
+        self.assertIn("candidate cannot run quiz",quiz.stderr)
+        self.assertIn("candidate cannot run grade",grade.stderr)
+        missing=self.tw("succ","grade","HO1","--caller","lead","--answers",str(answers),ok=False)
+        self.assertIn("Zero tool calls: unverified",missing.stdout)
+        self.assertNotEqual(missing.returncode,0)
+
+    def test_pack_gate_checks_summary_checksum(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location("tw_module",TW); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        pack=self.dir/"pack"; (pack/"raw").mkdir(parents=True)
+        (pack/"BRIEF.md").write_text("# HO1\n\n## Current facts\n",encoding="utf-8")
+        (pack/"words.md").write_text("",encoding="utf-8")
+        (pack/"HANDOFF.md").write_text("# HANDOFF\n\n## Rules / 规则\n- No user rules were recorded.\n\n## Only-known-after-reading fact\n- No user-authored statement was recorded.\n\n## Unresolved\n- none\n",encoding="utf-8")
+        (pack/"raw/old.jsonl").write_text("{}\n",encoding="utf-8")
+        summary=pack/"CANDIDATE-SUMMARY.md"; summary.write_text("safe\n",encoding="utf-8")
+        files={p.relative_to(pack).as_posix():mod.hashlib.sha256(p.read_bytes()).hexdigest() for p in pack.rglob("*") if p.is_file()}
+        (pack/"MANIFEST.json").write_text(json.dumps({"files":files,"gaps":["No user-authored statements in this seat term; transcript extraction completed with zero eligible user messages."]}),encoding="utf-8")
+        self.assertEqual(mod._succ_pack_gate(pack),[])
+        summary.write_text("changed\n",encoding="utf-8")
+        self.assertIn("MANIFEST checksum: CANDIDATE-SUMMARY.md",mod._succ_pack_gate(pack))
+
+    def test_archive_disconnected_direct_pref_is_opt_in(self):
+        self.tw("thread","add","api","--session","session_api","--status","idle")
+        self.tw("thread","set","api","--disconnected")
+        self.tw("archive","verify","session_api","--stopped","idle verified","--config-dir",str(self.dir/"claude"))
+        self.assertNotEqual(self.tw("archive","done","session_api",ok=False).returncode,0)
+        self.tw("prefs","--set","archive_disconnected_direct=true")
+        out=self.tw("archive","done","session_api")
+        self.assertIn("direct",out.stdout.lower())
+
+    def test_archive_guard_logs_per_project_state_read_error_and_fails_open(self):
+        scan=self.dir/"bad-state-cwd"; state=scan/"broken"/".teamwork"/"state.json"
+        state.parent.mkdir(parents=True); state.write_text("{broken",encoding="utf-8")
+        log=self.dir/"guard-errors.jsonl"
+        env={**self.env,"TW_GUARD_LOG":str(log)}
+        event={"cwd":str(scan),"tool_name":"mcp__claude-code-remote__archive_session","tool_input":{"session_id":"target"}}
+        result=subprocess.run([sys.executable,str(TW),"bash-guard"],cwd=scan,env=env,input=json.dumps(event),capture_output=True,text=True)
+        decision=json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"],"deny")
+        self.assertEqual(decision["permissionDecisionReason"],"teamwork 看板读不出来/处理出错，先修好 / board unreadable or guard error")
+        rows=[json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows[-1]["guard"],"archive-guard")
+        self.assertIn(rows[-1]["type"],("ValueError","JSONDecodeError"))
+
+    def test_archive_guard_denies_all_requests_after_project_error(self):
+        scan=self.dir/"null-archive-cwd"; team=scan/".teamwork"; team.mkdir(parents=True)
+        (team/"state.json").write_text(json.dumps({"lead":{"session_id":"lead-x"},
+            "threads":{"demo":{"session_id":"seat-x","status":"working"}},"archive":None}),encoding="utf-8")
+        log=self.dir/"null-archive-guard-errors.jsonl"
+        env={**self.env,"TW_GUARD_LOG":str(log)}
+        for target in ("lead-x","seat-x"):
+            event={"cwd":str(scan),"tool_name":"mcp__claude-code-remote__archive_session","tool_input":{"session_id":target}}
+            result=subprocess.run([sys.executable,str(TW),"bash-guard"],cwd=scan,env=env,input=json.dumps(event),capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            decision=json.loads(result.stdout)["hookSpecificOutput"]
+            self.assertEqual(decision["permissionDecision"],"deny")
+            self.assertEqual(decision["permissionDecisionReason"],"teamwork 看板读不出来/处理出错，先修好 / board unreadable or guard error")
+        errors=[json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(errors),2)
+        self.assertTrue(all(error["guard"]=="archive-guard" for error in errors))
+        elsewhere=self.dir/"no-teamwork-project"; elsewhere.mkdir()
+        event={"cwd":str(elsewhere),"tool_name":"mcp__claude-code-remote__archive_session","tool_input":{"session_id":"seat-x"}}
+        silent=subprocess.run([sys.executable,str(TW),"bash-guard"],cwd=elsewhere,env=env,input=json.dumps(event),capture_output=True,text=True)
+        self.assertEqual(silent.stdout,"")
+
+    def test_archive_guard_denies_unreadable_or_incomplete_board(self):
+        for label,state in (("corrupt","{broken"),("missing",json.dumps({"prefs":{},"lead":{}}))):
+            with self.subTest(label=label):
+                scan=self.dir/label/"project"; team=scan/".teamwork"; team.mkdir(parents=True)
+                (team/"state.json").write_text(state,encoding="utf-8")
+                log=self.dir/f"{label}-guard-errors.jsonl"
+                env={**self.env,"TW_GUARD_LOG":str(log)}
+                event={"cwd":str(scan),"tool_name":"mcp__claude-code-remote__archive_session","tool_input":{"session_id":"lead-x"}}
+                result=subprocess.run([sys.executable,str(TW),"bash-guard"],cwd=scan,env=env,input=json.dumps(event),capture_output=True,text=True)
+                self.assertEqual(result.returncode,0,result.stderr)
+                decision=json.loads(result.stdout)["hookSpecificOutput"]
+                self.assertEqual(decision["permissionDecision"],"deny")
+                self.assertEqual(decision["permissionDecisionReason"],"teamwork 看板读不出来/处理出错，先修好 / board unreadable or guard error")
+                self.assertTrue(log.is_file())
+
+    def test_archive_guard_strips_ids_when_building_deny_table(self):
+        st=self.state()
+        st["lead"]["session_id"]=" lead-x "
+        st["lead"]["sessions"]=[{"session_id":" lead-history "}]
+        st["threads"]={"demo":{"session_id":" seat-x ","status":"working","sessions":[]}}
+        st["handovers"]={"HO1":{"phase":"candidate","candidates":[{"session_id":" candidate-x "}],"successor":" successor-x "}}
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        for target in ("lead-x","lead-history","seat-x","candidate-x","successor-x"):
+            event={"cwd":str(self.dir),"tool_name":"mcp__claude-code-remote__archive_session","tool_input":{"session_id":target}}
+            result=subprocess.run([sys.executable,str(TW),"bash-guard"],cwd=self.dir,env=self.env,input=json.dumps(event),capture_output=True,text=True)
+            self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"],"deny",target)
+
+    def test_discard_restores_candidate_tracked_change_and_moves_only_new_untracked(self):
+        def git(*args):
+            return subprocess.run(["git","-C",str(self.dir),*args],capture_output=True,text=True)
+        git("init","-q","-b","main"); git("config","user.name","fixture"); git("config","user.email","fixture@example.invalid")
+        (self.dir/"candidate.txt").write_text("base\n"); (self.dir/"user.txt").write_text("user base\n")
+        git("add","candidate.txt","user.txt"); git("commit","-q","-m","base")
+        self.tw("thread","add","api","--session","old")
+        st=self.state(); st["repo"]["path"]=str(self.dir)
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        (self.dir/"user.txt").write_text("pre-existing user edit\n")
+        (self.dir/"user-untracked.txt").write_text("pre-existing untracked\n")
+        (self.dir/"other-thread-output.txt").write_text("other thread work\n")
+        (self.dir/"snapshot-untracked.txt").write_text("already present at snapshot\n")
+        self.tw("succ","start","api","--reason","replace")
+        self.tw("succ","candidate","HO1","--plan")
+        self.tw("succ","candidate","HO1","candidate")
+        (self.dir/"candidate.txt").write_text("candidate edit\n")
+        (self.dir/"candidate-new.txt").write_text("candidate new file\n")
+        out=self.tw("succ","candidate","HO1","candidate","--discard").stdout
+        self.assertEqual((self.dir/"candidate.txt").read_text(),"base\n")
+        self.assertEqual((self.dir/"user.txt").read_text(),"pre-existing user edit\n")
+        self.assertEqual((self.dir/"user-untracked.txt").read_text(),"pre-existing untracked\n")
+        self.assertEqual((self.dir/"other-thread-output.txt").read_text(),"other thread work\n")
+        self.assertEqual((self.dir/"snapshot-untracked.txt").read_text(),"already present at snapshot\n")
+        saved=self.dir/".teamwork/private/api/tmp/HO1/discarded/candidate-new.txt"
+        self.assertFalse((self.dir/"candidate-new.txt").exists())
+        self.assertEqual(saved.read_text(),"candidate new file\n")
+        self.assertIn("candidate-new.txt",out)
+
+    def test_grade_without_caller_is_rejected_and_cannot_pass_reseat_gate(self):
+        self.tw("thread","add","api","--session","old")
+        st=self.state(); st["lead"]["session_id"]="lead"
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        self.tw("succ","start","api","--reason","replace")
+        key=self.dir/"quiz.json"; key.write_text(json.dumps({"items":[{"question":"q1","keywords":["one"]},{"question":"q2","keywords":["two"]},{"question":"q3","keywords":["three"]}]}),encoding="utf-8")
+        answers=self.dir/"answers.txt"; answers.write_text("one\ntwo\nthree\n",encoding="utf-8")
+        st=self.state(); rec=st["handovers"]["HO1"]; rec.update(phase="quiz",candidates=[{"session_id":"candidate"}],quiz={"key_file":str(key),"candidate":"candidate"})
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        out=self.tw("succ","grade","HO1","--answers",str(answers),ok=False)
+        self.assertEqual(out.returncode,1)
+        self.assertIn("rerun with --caller",out.stderr)
+        self.assertEqual(self.state()["handovers"]["HO1"]["phase"],"quiz")
+        self.assertNotIn("graded_at",self.state()["handovers"]["HO1"]["quiz"])
+        blocked=self.tw("succ","seat","HO1","candidate",ok=False)
+        self.assertNotEqual(blocked.returncode,0)
+        item=json.loads(key.read_text(encoding="utf-8"))["items"][0]
+        transcript=self.dir/"candidate.jsonl"
+        transcript.write_text("\n".join(json.dumps({"message":{"content":text}}) for text in (item["question"],"one","two","three"))+"\n",encoding="utf-8")
+        verified=self.tw("succ","grade","HO1","--answers",str(answers),"--caller","lead","--from-transcript",str(transcript)).stdout
+        self.assertIn("Zero tool calls: passed",verified)
+        self.assertTrue(self.state()["handovers"]["HO1"]["quiz"]["passed"])
+
+    def test_grade_missing_answers_file_has_clear_error(self):
+        self.tw("thread","add","api","--session","old")
+        st=self.state(); st["lead"]["session_id"]="lead"
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        self.tw("succ","start","api","--reason","replace")
+        key=self.dir/"quiz.json"; key.write_text(json.dumps({"items":[{"question":"q1","keywords":["one"]}]}),encoding="utf-8")
+        st=self.state(); rec=st["handovers"]["HO1"]; rec.update(phase="quiz",candidates=[{"session_id":"candidate"}],quiz={"key_file":str(key),"candidate":"candidate"})
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        missing=self.dir/"missing-answers.txt"
+        result=self.tw("succ","grade","HO1","--answers",str(missing),"--caller","lead",ok=False)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn("cannot read answers file",result.stderr)
+        self.assertNotIn("Traceback",result.stderr)
+
+    def test_ack_parser_and_latest_list_triggers_result(self):
+        self.tw("thread","add","api","--session","old")
+        self.tw("succ","start","lead","--reason","replace lead")
+        st=self.state(); rec=st["handovers"]["HO1"]; rec.update(phase="seated",ack_needed=["api"])
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        ack=self.dir/"acks.jsonl"
+        ack.write_text(json.dumps({"type":"user","message":{"role":"user","content":[{"type":"text","text":"<cross-session-message from-session=\"session_api\">\n[tw:demo] ACK api -> lead\n</cross-session-message>"}]},"origin":{"kind":"human"}})+"\n",encoding="utf-8")  # real shape: a peer message arrives wrapped
+        self.tw("succ","ack","HO1","--caller","lead-next","--from-transcript",str(ack))
+        self.assertEqual(self.state()["handovers"]["HO1"]["acks"],["api"])
+        tr=Path(__file__).parent/"fixtures"/"t71_real_tool_results.jsonl"
+        self.tw("succ","ack","HO1","--triggers","--from-transcript",str(tr))
+        self.assertTrue(self.state()["handovers"]["HO1"]["trigger_snapshot"]["result"])
+
+    def test_freeze_unreachable_env_gone_and_status_next_step(self):
+        self.tw("thread","add","api","--session","old")
+        self.tw("succ","start","api","--reason","replace")
+        self.tw("succ","freeze","HO1","--unreachable","--reason","env-gone")
+        row=json.loads(self.tw("succ","status","HO1","--json").stdout)[0]
+        self.assertTrue(row["unreachable"]); self.assertEqual(row["unreachable_reason"],"env-gone")
+        self.assertIn("continue from recorded transcript",self.tw("succ","status","HO1").stdout)
+
+    def test_pack_extracts_promises_in_both_languages_and_ignores_non_promises(self):
+        # Exercise the shared promise extractor through a lead transcript pack.
+        self.tw("lead","--session","lead-old")
+        self.tw("succ","start","lead","--reason","replace")
+        self.tw("succ","candidate","HO1","candidate")
+        self.tw("succ","freeze","HO1","--stopped","lead-old idle")
+        tr=self.dir/"lead.jsonl"
+        tr.write_text("\n".join(json.dumps({"type":"assistant","message":{"content":s}}) for s in ("我会核对接口。","I'll send the result.","普通说明。"))+"\n",encoding="utf-8")
+        self.tw("succ","pack","HO1","--transcript",str(tr))
+        promises=self.state()["promises"]
+        self.assertEqual([x["text"] for x in promises],["我会核对接口。","I'll send the result."])
+        self.assertTrue(all(x["confidence"]=="low" for x in promises))
+
+    def test_accept_receipt_requires_two_sections_and_fact_from_original_words(self):
+        self.tw("thread","add","api","--session","old")
+        self.fixture_old_session_start("api")
+        self.tw("succ","start","api","--reason","replace")
+        st=self.state(); rec=st["handovers"]["HO1"]
+        rec.update(phase="packed",candidates=[{"session_id":"candidate"}],pack_dir=str(self.dir/"pack"),
+                   freeze={"dirty_fingerprint":"-"},steps={"freeze":"2026-01-01T00:00:00+00:00","pack":"2026-01-01T00:01:00+00:00"})
+        (self.dir/".teamwork/state.json").write_text(json.dumps(st),encoding="utf-8")
+        pack=self.dir/"pack"; (pack/"raw").mkdir(parents=True)
+        fact="Never overwrite user work; preserve the original notes."
+        (pack/"BRIEF.md").write_text("## Current facts\n",encoding="utf-8")
+        (pack/"HANDOFF.md").write_text("## Rules\n- keep files\n",encoding="utf-8")
+        (pack/"words.md").write_text("[#1] "+fact+"\n",encoding="utf-8")
+        (pack/"raw/old.jsonl").write_text("{}\n",encoding="utf-8")
+        files={p.relative_to(pack).as_posix():__import__("hashlib").sha256(p.read_bytes()).hexdigest() for p in pack.rglob("*") if p.is_file()}
+        (pack/"MANIFEST.json").write_text(json.dumps({"files":files,"gaps":[]}),encoding="utf-8")
+        receipt=self.dir/"receipt.json"
+        base={"tasks":[],"branch":self.state()["threads"]["api"]["branch"],"head":"-","rules":[],"requests":[],"only_read_fact":fact,"unresolved":[]}
+        receipt.write_text(json.dumps({**base,"sections":"## Only-known-after-reading fact\n"+fact+"\n## Unresolved\nnone\n"}),encoding="utf-8")
+        self.tw("succ","verify","HO1","--accept",str(receipt),"--caller","session_fixture-lead",ok=False)
+        checks=self.state()["handovers"]["HO1"]["verify"]["checks"]
+        self.assertFalse(checks["handoff_rules"])
+        receipt.write_text(json.dumps({**base,"sections":"## Rules\nkeep files\n## Only-known-after-reading fact\n"+fact+"\n## Unresolved\nnone"}),encoding="utf-8")
+        self.tw("succ","verify","HO1","--accept",str(receipt),"--caller","session_fixture-lead",ok=False)
+        checks=self.state()["handovers"]["HO1"]["verify"]["checks"]
+        self.assertTrue(checks["unresolved_section"])
+        receipt.write_text(json.dumps({**base,"only_read_fact":"invented statement","sections":"## Rules\nkeep files\n## Only-known-after-reading fact\ninvented\n## Unresolved\nnone"}),encoding="utf-8")
+        self.tw("succ","verify","HO1","--accept",str(receipt),"--caller","session_fixture-lead",ok=False)
+        checks=self.state()["handovers"]["HO1"]["verify"]["checks"]
+        self.assertFalse(checks["only_read_fact"])
+        self.assertFalse(self.state()["handovers"]["HO1"]["verify"]["passed"])
+
+
 class RoutingAndChecks(TwCase):
     """T57 block B: card detail, route/quota hints, decision lookup, package checks and sensitive guard."""
 
@@ -7752,9 +8820,12 @@ class ArchiveBatch5(TwCase):
         self.tw("thread", "set", "api", "--disconnected")
         self.tw("task", "add", "T1", "--title", "finish API", "--owner", "api")
         tr = self.dir / ".teamwork" / "tr.jsonl"
-        tr.write_text(json.dumps({"type": "user", "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "origin": {"kind": "human"},
+        config=self.dir/"claude-config"; config.mkdir()
+        (config/"bridge-transcript-cse_sid.jsonl").write_text(
+            json.dumps({"session_id":"00000000-0000-4000-8000-000000000001"})+"\n",encoding="utf-8")
+        tr.write_text(json.dumps({"type": "user", "sessionId": "00000000-0000-4000-8000-000000000001", "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "origin": {"kind": "human"},
                                   "message": {"content": "keep the export in CSV, never xlsx"}}) + "\n", encoding="utf-8")
-        self.tw("archive", "verify", "sid", "--stopped", "confirmed stopped", "--park", "user will decide later", "--transcript", str(tr), "--config-dir", str(self.dir / "claude-config"))
+        self.tw("archive", "verify", "sid", "--stopped", "confirmed stopped", "--park", "user will decide later", "--transcript", str(tr), "--config-dir", str(config))
         st = self.state()
         self.assertTrue(any(n.get("kind") == "parked" and "T1" in n.get("text", "") for n in st.get("notices", [])))
         pack = st["archive_packs"]["AR1"]
@@ -7799,9 +8870,10 @@ class SeatSwap(TwCase):
         self.tw("succ", "candidate", "HO1", "session_candidate")
         self.assertNotEqual(self.tw("succ", "freeze", "HO1", "--stopped", "idle confirmed", ok=False).returncode, 0)
         self.tw("succ", "freeze", "HO1", "--stopped", "s-old idle; last event 12:00")
-        packed = self.tw("succ", "pack", "HO1", "--config-dir", str(self.dir / "claude")).stdout
-        self.assertRegex(packed, r"缺口 [1-9]\d*")
-        self.assertTrue(Path(packed.split(" · ")[0]).exists())
+        packed = self.tw("succ", "pack", "HO1", "--config-dir", str(self.dir / "claude"),ok=False)
+        self.assertEqual(packed.returncode,1)
+        self.assertIn("--transcript",packed.stderr)
+        self.assertEqual(self.state()["handovers"]["HO1"]["phase"],"frozen")
         self.tw("succ", "abort", "HO1", "--reason", "cancel")
         self.tw("rebuild")
         self.assertEqual(self.state()["handovers"]["HO1"]["phase"], "aborted")
@@ -7848,26 +8920,42 @@ class SeatSwap(TwCase):
         self.assertEqual(manifest["compactions"], 1)
 
     def test_quiz_uses_rule_and_fact_material_and_grades_keywords(self):
+        st=self.state(); st["lead"]["session_id"]="session_lead"
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
         self.tw("succ", "start", "api", "--reason", "换掉")
         self.tw("succ", "candidate", "HO1", "session-next")
         stamp = dt.datetime.now().astimezone().isoformat(timespec="seconds")
         transcript = self.dir / "quiz.jsonl"
         rows = [{"type": "user", "timestamp": stamp, "origin": {"kind": "human"},
-                 "message": {"content": f"必须检查第{i}项结果"}} for i in range(1, 11)]
+                 "message": {"content": f"必须落实 Rule{i} 检查 Item{i}"}} for i in range(1, 11)]
         transcript.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in rows), encoding="utf-8")
         self.tw("succ", "freeze", "HO1", "--stopped", "s-old idle evidence")
         self.tw("succ", "pack", "HO1", "--transcript", str(transcript), "--config-dir", str(self.dir / "claude"))
-        prompt = self.tw("succ", "quiz", "HO1").stdout
-        self.assertEqual(len(prompt.splitlines()), 10)
+        prompt = self.tw("succ", "quiz", "HO1","--caller","session_lead").stdout
+        self.assertEqual(len(prompt.splitlines()), 10)  # The ten distinct rule answers fill this quiz.
         keyfile = self.keys / "HO1-quiz-1.json"
         key = json.loads(keyfile.read_text(encoding="utf-8"))["items"]
+        self.assertEqual({f"rule{i}" for i in range(1,11)},
+                         {word for item in key for word in item["keywords"] if word.startswith("rule")})
         answers = self.keys / "answers.txt"
         answers.write_text("\n".join(" ".join(x["keywords"]) for x in key), encoding="utf-8")
-        graded = self.tw("succ", "grade", "HO1", "--answers", str(answers)).stdout
-        self.assertIn("10/10", graded)
-        second = self.tw("succ", "quiz", "HO1")
-        self.assertNotEqual(prompt, second.stdout)
-        self.assertIn("素材不足", second.stderr)
+        graded = self.tw("succ", "grade", "HO1", "--answers", str(answers),"--caller","session_lead",ok=False)
+        self.assertEqual(graded.returncode,1)
+        self.assertIn("Zero tool calls: unverified",graded.stdout)
+        quiz_transcript(self.dir/"candidate.jsonl",key[0]," ".join(answers.read_text(encoding="utf-8").splitlines()))
+        import importlib.util
+        spec=importlib.util.spec_from_file_location("tw_quiz_probe",TW); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        transcript_rows=mod._succ_transcript_rows(self.dir/"candidate.jsonl")
+        answer_lines=answers.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(mod._succ_zero_tool_window(transcript_rows,key[0]["question"],answer_lines),
+                        f"question={key[0]['question']!r}; answers={answer_lines!r}; rows={transcript_rows!r}")
+        self.tw("succ","grade","HO1","--answers",str(answers),"--caller","session_lead","--from-transcript",str(self.dir/"candidate.jsonl"))
+        second = self.tw("succ", "quiz", "HO1","--caller","session_lead",ok=False)
+        self.assertEqual(len(second.stdout.splitlines()),2)  # branch and unpushed count remain after all ten rules.
+        self.tw("succ","grade","HO1","--answers",str(answers),"--caller","session_lead","--from-transcript",str(self.dir/"candidate.jsonl"),ok=False)
+        final=self.tw("succ","quiz","HO1","--caller","session_lead",ok=False)
+        self.assertEqual(final.returncode,1)
+        self.assertIn("没有未使用的测验材料",final.stderr)
 
     def test_signals_relay_count_and_replaced_archive_reason(self):
         today = dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -7907,7 +8995,7 @@ class SeatSwap(TwCase):
         receipt = self.keys / "receipt.json"
         receipt.write_text(json.dumps({"tasks": {"T1": {"accept": "包含测试和报告"}}, "branch": "tw/demo/api", "head": head,
                                        "rules": [1], "requests": {"R1": "open"}}, ensure_ascii=False), encoding="utf-8")
-        result = self.tw("succ", "verify", "HO1", "--receipt", str(receipt))
+        result = self.tw("succ", "verify", "HO1", "--receipt", str(receipt), ok=False)
         self.assertIn("冻结后还有改动", result.stdout)
         self.assertFalse(self.state()["handovers"]["HO1"]["verify"]["passed"])
 
@@ -7934,6 +9022,7 @@ class SeatSwapFlow(TwCase):
             subprocess.run(["git", "-C", str(self.dir), *args], check=True, capture_output=True)
         git("init", "-q", "-b", "main"); git("config", "user.name", "t"); git("config", "user.email", "t@example.invalid")
         (self.dir / "f.txt").write_text("a\n"); git("add", "f.txt"); git("commit", "-q", "-m", "init")
+        self.tw("lead", "--session", "session_lead")
         keys = self.dir.parent / (self.dir.name + "-keys"); keys.mkdir()
         self.env["TW_KEYS_DIR"] = str(keys)
         self.tw("prefs", "--set", "language=zh")
@@ -7946,22 +9035,35 @@ class SeatSwapFlow(TwCase):
         self.env["TW_NOW"] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=2)).isoformat(timespec="seconds")
         self.tw("succ", "start", "ui", "--reason", "把 ui 换掉")
         self.tw("succ", "candidate", "HO1", " new1 ")
+        self.tw("screen","ask","ui","--session","new1")
+        self.tw("screen","record","SC1","--scores",",".join(f"P{i}=2" for i in range(1,7)))
+        self.tw("screen","clear-msg","SC1")
+        self.tw("succ","screened","HO1","new1","--screen","SC1")
+        self.tw("succ","candidate","HO1","new1","--cleared")
         self.tw("succ", "freeze", "HO1", "--stopped", "get_session old1: idle")
         self.tw("succ", "pack", "HO1", "--transcript", str(transcript))
         missing = self.tw("succ", "seat", "HO1", "new1", ok=False)
         self.assertIn("verify", missing.stderr)
         head = subprocess.run(["git", "-C", str(self.dir), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         receipt = self.dir / ".teamwork" / "rc.json"
-        receipt.write_text(json.dumps({"tasks": [], "branch": "tw/demo/ui", "head": head, "rules": [1], "requests": []}))
+        fact="导出一定要用 CSV 格式，不要用 xlsx 表格"
+        receipt.write_text(json.dumps({"tasks": [], "branch": "tw/demo/ui", "head": head, "rules": [1], "requests": [],
+            "only_read_fact":fact,"unresolved":[],"sections":"## Rules\nNo additional rule changes.\n## Only-known-after-reading fact / 只有读过才知道的一条\n"+fact+"\n## Unresolved / 悬而未决\nnone"}))
         verified = self.tw("succ", "verify", "HO1", "--receipt", str(receipt)).stdout
         self.assertNotIn("不过", verified)
-        quiz = self.tw("succ", "quiz", "HO1").stdout
+        quiz = self.tw("succ", "quiz", "HO1", "--caller", "session_lead").stdout
         self.assertNotIn("xlsx", quiz.split("\n", 1)[-1].split("\n")[0] if "xlsx" in quiz else "")
         answers = self.dir / ".teamwork" / "ans.txt"
         items = json.loads((keys / "demo" / "HO1-quiz-1.json").read_text(encoding="utf-8"))["items"]
         answers.write_text("\n".join(" ".join(item["keywords"]) for item in items), encoding="utf-8")
-        self.tw("succ", "grade", "HO1", "--answers", str(answers))
-        self.tw("succ", "seat", "HO1", " new1 ")
+        unverified = self.tw("succ", "grade", "HO1", "--answers", str(answers), "--caller", "session_lead", ok=False)
+        self.assertIn("Zero tool calls: unverified", unverified.stdout)
+        items=json.loads((keys/"demo"/"HO1-quiz-1.json").read_text(encoding="utf-8"))["items"]
+        candidate_transcript=self.dir/".teamwork"/"candidate.jsonl"
+        quiz_transcript(candidate_transcript,items[0]," ".join(answers.read_text(encoding="utf-8").splitlines()))
+        self.tw("succ","grade","HO1","--answers",str(answers),"--caller","session_lead","--from-transcript",str(candidate_transcript))
+        seat_card=self.tw("succ", "seat", "HO1", " new1 ").stdout
+        self.assertRegex(seat_card,r"体检分：\d+/\d+；测验 得分/总数：\d+/\d+；验收 通过/总项：\d+/\d+")
         self.assertEqual(self.state()["threads"]["ui"]["session_id"], "new1")
         (self.dir / "f.txt").write_text("changed after seat\n")
         self.tw("thread", "set", "ui", "--status", "working", "--from-status")
@@ -8013,6 +9115,7 @@ class LeadSwap(TwCase):
         self.assertIn("lead handover", result.stderr)
 
     def test_lead_seat_updates_history_and_clears_lock(self):
+        self.tw("lead", "--session", "lead-old")
         self.tw("succ", "start", "lead", "--reason", "换 lead")
         self.tw("succ", "candidate", "HO1", "lead-next")
         self.tw("screen", "ask", "lead", "--session", "lead-next")
@@ -8027,15 +9130,21 @@ class LeadSwap(TwCase):
         self.tw("succ", "freeze", "HO1", "--stopped", "lead-old idle event")
         self.tw("succ", "pack", "HO1", "--transcript", str(transcript), "--config-dir", str(self.dir / "claude"))
         receipt = self.dir / "receipt.json"
-        receipt.write_text(json.dumps({"tasks":[],"branch":None,"head":"-","rules":list(range(1,11)),"requests":[]}),encoding="utf-8")
+        fact="Always validate alpha endpoint"
+        receipt.write_text(json.dumps({"tasks":[],"branch":None,"head":"-","rules":list(range(1,11)),"requests":[],
+            "only_read_fact":fact,"unresolved":[],"sections":"## Rules\nAll listed rules reviewed.\n## Only-known-after-reading fact\n"+fact+"\n## Unresolved\nnone"}),encoding="utf-8")
         self.tw("succ", "verify", "HO1", "--receipt", str(receipt))
-        self.tw("succ", "quiz", "HO1")
+        self.tw("succ", "quiz", "HO1", "--caller", "lead-old")
         key = json.loads((self.keys / "HO1-quiz-1.json").read_text(encoding="utf-8"))["items"]
         answers = self.dir / "answers.txt"
         answers.write_text("\n".join(" ".join(item["keywords"]) for item in key),encoding="utf-8")
-        self.tw("succ", "grade", "HO1", "--answers", str(answers))
+        unverified = self.tw("succ", "grade", "HO1", "--answers", str(answers), "--caller", "lead-old", ok=False)
+        self.assertIn("Zero tool calls: unverified", unverified.stdout)
+        quiz_transcript(self.dir/"candidate.jsonl",key[0]," ".join(answers.read_text(encoding="utf-8").splitlines()))
+        self.tw("succ","grade","HO1","--answers",str(answers),"--caller","lead-old","--from-transcript",str(self.dir/"candidate.jsonl"))
         result = self.tw("succ", "seat", "HO1", "lead-next")
         self.assertIn("https://claude.ai/code/lead-next", result.stdout)
+        self.assertIn("验收通过项：13/13",result.stdout)
         st = self.state()
         self.assertEqual(st["lead"]["session_id"], "lead-next")
         self.assertEqual([x["session_id"] for x in st["lead"]["sessions"]], ["lead-old", "lead-next"])
@@ -8061,13 +9170,18 @@ class LeadSwap(TwCase):
         if subscriptions: args += ["--subscriptions", str(subscriptions)]
         self.tw(*args)
         receipt = self.dir / "receipt.json"
-        receipt.write_text(json.dumps({"tasks":[],"branch":None,"head":"-","rules":list(range(1,11)),"requests":[]}),encoding="utf-8")
+        fact="Always validate alpha endpoint"
+        receipt.write_text(json.dumps({"tasks":[],"branch":None,"head":"-","rules":list(range(1,11)),"requests":[],
+            "only_read_fact":fact,"unresolved":[],"sections":"## Rules\nAll listed rules reviewed.\n## Only-known-after-reading fact\n"+fact+"\n## Unresolved\nnone"}),encoding="utf-8")
         self.tw("succ", "verify", "HO1", "--receipt", str(receipt))
-        self.tw("succ", "quiz", "HO1")
+        self.tw("succ", "quiz", "HO1", "--caller", "lead-old")
         items = json.loads((self.keys / "HO1-quiz-1.json").read_text(encoding="utf-8"))["items"]
         answers = self.dir / "answers.txt"
         answers.write_text("\n".join(" ".join(item["keywords"]) for item in items),encoding="utf-8")
-        self.tw("succ", "grade", "HO1", "--answers", str(answers))
+        unverified = self.tw("succ", "grade", "HO1", "--answers", str(answers), "--caller", "lead-old", ok=False)
+        self.assertIn("Zero tool calls: unverified", unverified.stdout)
+        quiz_transcript(self.dir/"candidate.jsonl",items[0]," ".join(answers.read_text(encoding="utf-8").splitlines()))
+        self.tw("succ","grade","HO1","--answers",str(answers),"--caller","lead-old","--from-transcript",str(self.dir/"candidate.jsonl"))
         return self.tw("succ", "seat", "HO1", "lead-next")
 
     def test_ack_blocks_archive_until_every_thread_acknowledges(self):
@@ -8126,11 +9240,16 @@ class LeadSwap(TwCase):
         self.tw("succ", "freeze", "HO2", "--stopped", "lead-old idle event")
         self.tw("succ", "pack", "HO2", "--transcript", str(transcript))
         receipt = self.dir / "receipt.json"
-        receipt.write_text(json.dumps({"tasks":[],"branch":None,"head":"-","rules":list(range(1,11)),"requests":[]}),encoding="utf-8")
-        self.tw("succ", "verify", "HO2", "--receipt", str(receipt)); self.tw("succ", "quiz", "HO2")
+        fact="Always validate alpha endpoint"
+        receipt.write_text(json.dumps({"tasks":[],"branch":None,"head":"-","rules":list(range(1,11)),"requests":[],
+            "only_read_fact":fact,"unresolved":[],"sections":"## Rules\nAll listed rules reviewed.\n## Only-known-after-reading fact\n"+fact+"\n## Unresolved\nnone"}),encoding="utf-8")
+        self.tw("succ", "verify", "HO2", "--receipt", str(receipt)); self.tw("succ", "quiz", "HO2", "--caller", "lead-old")
         items=json.loads((self.keys / "HO2-quiz-1.json").read_text())["items"]
         answers=self.dir / "answers2.txt"; answers.write_text("\n".join(" ".join(x["keywords"]) for x in items))
-        self.tw("succ", "grade", "HO2", "--answers", str(answers))
+        unverified = self.tw("succ", "grade", "HO2", "--answers", str(answers), "--caller", "lead-old", ok=False)
+        self.assertIn("Zero tool calls: unverified", unverified.stdout)
+        quiz_transcript(self.dir/"candidate.jsonl",items[0]," ".join(answers.read_text(encoding="utf-8").splitlines()))
+        self.tw("succ","grade","HO2","--answers",str(answers),"--caller","lead-old","--from-transcript",str(self.dir/"candidate.jsonl"))
         seated=self.tw("succ", "seat", "HO2", "lead-next", "--json")
         obj=json.loads(seated.stdout)
         self.assertIsNone(obj["thread"]); self.assertEqual(obj["lead"]["session_id"],"lead-next")
@@ -8158,25 +9277,33 @@ class LeadSwap(TwCase):
         st["handovers"]["HO1"].update(candidates=[{"session_id":"lead-next"}],quiz={"key_file":str(keyfile),"candidate":"lead-next"},phase="quiz",steps={"quiz":"now"})
         (self.dir/".teamwork/state.json").write_text(json.dumps(st))
         answers=self.dir/"threshold-2.txt"; answers.write_text("apple\nwrong\n")
-        result=self.tw("succ","grade","HO1","--answers",str(answers))
+        candidate=self.dir/"lead-candidate-low.jsonl"; quiz_transcript(candidate,{"question":"one"},"apple wrong")
+        result=self.tw("succ","grade","HO1","--answers",str(answers),"--caller","lead-old","--from-transcript",str(candidate),ok=False)
+        self.assertNotEqual(result.returncode, 0)
         self.assertIn("1/2 不过",result.stdout)
-        self.assertIn("素材不足 3 题",result.stdout)
+        self.assertIn("本轮可用题目少于 3 题",result.stdout)
         self.assertFalse(self.state()["handovers"]["HO1"]["quiz"]["passed"])
         st=self.state(); keyfile=self.keys/"HO1-quiz-2.json"
         keyfile.write_text(json.dumps({"items":[{"question":str(i),"keywords":[f"word{i}"]} for i in range(10)]}))
         st["handovers"]["HO1"].update(candidates=[{"session_id":"lead-next"}],quiz={"key_file":str(keyfile),"candidate":"lead-next"},phase="quiz",steps={"quiz":"now"})
         (self.dir/".teamwork/state.json").write_text(json.dumps(st))
         answers=self.dir/"threshold-10.txt"; answers.write_text("\n".join(["wrong",*[f"word{i}" for i in range(1,10)]])+"\n")
-        result=self.tw("succ","grade","HO1","--answers",str(answers))
+        candidate=self.dir/"lead-candidate.jsonl"
+        quiz_transcript(candidate,{"question":"0"},"\n".join(["wrong",*[f"word{i}" for i in range(1,10)]]))
+        result=self.tw("succ","grade","HO1","--answers",str(answers),"--caller","lead-old","--from-transcript",str(candidate))
         self.assertIn("9/10 过",result.stdout)
+        self.assertIn("Zero tool calls: passed",result.stdout)
         self.assertTrue(self.state()["handovers"]["HO1"]["quiz"]["passed"])
 
     def test_english_brief_and_locked_readonly_lead(self):
         self.tw("prefs","--set","language=en")
+        self.tw("lead","--session","lead-old")
         self.tw("succ","start","lead","--reason","Please hand over the lead")
         transcript=self.dir/"english.jsonl"
-        transcript.write_text(json.dumps({"type":"user","timestamp":dt.datetime.now().astimezone().isoformat(),"origin":{"kind":"human"},"message":{"content":"Keep every task status accurate"}})+"\n")
+        stamp=(dt.datetime.now().astimezone()+dt.timedelta(minutes=1)).isoformat(timespec="seconds")
+        transcript.write_text(json.dumps({"type":"user","timestamp":stamp,"origin":{"kind":"human"},"message":{"content":"Keep every task status accurate"}})+"\n")
         self.tw("succ","candidate","HO1","lead-next")
+        self.env["TW_NOW"]=(dt.datetime.fromisoformat(stamp)+dt.timedelta(minutes=1)).isoformat()
         self.tw("succ","freeze","HO1","--stopped","lead-old idle event")
         self.tw("succ","pack","HO1","--transcript",str(transcript))
         brief=(self.dir/".teamwork/private/handover/HO1-lead/BRIEF.md").read_text()
@@ -8274,6 +9401,8 @@ class SeatSwap2(TwCase):
         self.assertNotIn("→", self.tw("succ", "status", "HO1").stdout)
 
     def test_grade_rejects_candidate_different_from_quiz_candidate(self):
+        st=self.state(); st["lead"]["session_id"]="session_lead"
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
         self.tw("succ", "start", "api", "--reason", "swap")
         st = self.state()
         rec = st["handovers"]["HO1"]
@@ -8285,13 +9414,16 @@ class SeatSwap2(TwCase):
         (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
         answers = self.dir / "answers.txt"
         answers.write_text("apple\n", encoding="utf-8")
-        result = self.tw("succ", "grade", "HO1", "--candidate", "candidate-b", "--answers", str(answers), ok=False)
+        result = self.tw("succ", "grade", "HO1", "--candidate", "candidate-b", "--answers", str(answers),"--caller","session_lead", ok=False)
         self.assertIn("candidate", result.stderr)
 
-    def test_thread_set_cannot_replace_session_during_open_handover(self):
+    def test_thread_set_session_is_blocked_during_open_handover(self):
         self.tw("succ", "start", "api", "--reason", "swap")
-        result = self.tw("thread", "set", "api", "--session", "new-api", ok=False)
-        self.assertIn("succ seat", result.stderr)
+        before=self.state()
+        result = self.tw("thread", "set", "api", "--session", "new-api",ok=False)
+        self.assertEqual(result.returncode,1)
+        self.assertIn("succ seat 或 succ abort",result.stderr)
+        self.assertEqual(self.state()["threads"],before["threads"])
 
 
 class LeadSwap2(TwCase):
@@ -8380,9 +9512,10 @@ class LeadSwap2(TwCase):
         self.tw("succ", "freeze", "HO1", "--stopped", "lead-old idle")
         for args in (("--session", "lead-next"), ("--session", "lead-next", "--force")):
             result = self.tw("lead", *args, ok=False)
+            self.assertEqual(result.returncode,1)
             self.assertIn("succ seat or succ abort", result.stderr)
         removed = self.tw("lead", "--session", "lead-next", "--handover", "HO1", ok=False)
-        self.assertNotEqual(removed.returncode, 0)
+        self.assertEqual(removed.returncode,2)
 
 
 class ScreenShadow2(TwCase):
@@ -8399,17 +9532,16 @@ class ScreenShadow2(TwCase):
         pack_dir = self.dir / ".teamwork" / "private" / "handover" / "HO1-api"
         pack_dir.mkdir(parents=True)
         st = self.state()
-        st["handovers"] = {"HO1": {"id":"HO1", "seat":"api", "kind":"thread", "phase":"packed",
+        st["handovers"] = {"HO1": {"id":"HO1", "seat":"api", "kind":"thread", "phase":"packed", "lead_session":"lead-session",
                                     "steps":{"start":"now"}, "pack_dir":str(pack_dir),
                                     "candidates":[{"session_id":"candidate-next"}]}}
         (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
         receipt = self.tw("succ", "verify", "HO1", "--candidate", "candidate-next",
                           "--receipt", str(self.dir / "missing-receipt.json"), ok=False)
         self.assertIn("找不到验收回执", receipt.stderr)
-        import hashlib
-        used = self.keys / "HO1-used.json"
-        used.write_text(json.dumps({"questions":[hashlib.sha256("未推送提交有几条？".encode()).hexdigest()]}), encoding="utf-8")
-        quiz = self.tw("succ", "quiz", "HO1", "--candidate", "candidate-next", ok=False)
+        self.tw("succ", "quiz", "HO1", "--candidate", "candidate-next", "--caller", "lead-session")
+        quiz = self.tw("succ", "quiz", "HO1", "--candidate", "candidate-next", "--caller", "lead-session", ok=False)
+        self.assertNotEqual(quiz.returncode, 0)
         self.assertIn("没有未使用的测验材料", quiz.stderr)
 
     def test_scoring_is_immutable(self):

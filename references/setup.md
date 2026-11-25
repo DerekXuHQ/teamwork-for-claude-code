@@ -66,6 +66,8 @@ In the test, an RC child stopped at "Waiting on permission: Send Message". In a 
 
 These are user-level settings: every session on that computer reads them, teamwork or not. Cloud threads never read them; their prompts depend on the `permission_mode` the lead passes (below). The dry run (`install.py` without `--apply`) lists exactly what each key gains. Rules already there are kept; a settings file whose `permissions` is not an object stops the installer with a message instead of being overwritten.
 
+  - The single `PreToolUse` `bash-guard` hook matches `Bash,mcp__claude-code-remote__archive_session`. It applies the existing command policy to Bash and routes archive requests through the archive-seat check. That check scans nearby `.teamwork/state.json` files and denies archiving a caller, lead, live seat, or open handover candidate/successor. A valid `succ retire-check` release ticket allows its named old session once and records use. Other requests produce no decision, so Claude's existing ask prompt remains. Internal failures are logged and fail open. The folder `archive_session` ask rule remains; whether a hook `allow` suppresses that prompt is unverified.
+
 ### Permission mode, from the lead down
 
 Without a `permission_mode`, an rc thread gets the Remote Control server's default mode, and in field tests that meant a manual "allow" in claude.ai for nearly every Bash and Edit call. So the mode is passed all the way down:

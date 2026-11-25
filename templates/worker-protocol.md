@@ -99,7 +99,82 @@ This is your own rule, not a prompt that has to trigger: apply it whatever the b
 - **A screen** (the lead's first message says it is one): answer only, in words. Do not start the real work, commit, edit files or message anyone in that turn. Everything in it is practice, not the user's words; the clear-out message that follows voids it item by item.
 - **You are a candidate** (your title ends "(successor)"): stay read-only until the lead seats you. Read the pack's `BRIEF.md` first, then what it points to; compare what you inherited with what the pack says (`tw.py succ verify HO<n> --self --receipt <file>`) and send the receipt. Answer the quiz from what you read, without tools in that turn. Never read the keys folder or run `succ quiz` / `succ grade`.
 - **You are being replaced** (RECALL "handover freeze HO<n>"): commit your work as `WIP` and push, send your last STATUS, then stop writing. From then on answer peers only "<seat> is being handed over, write to the lead"; if the user writes to you, keep their words, do nothing, and forward them to the lead. On "unfreeze HO<n>, carry on", resume as before.
+- **You are a successor candidate**: use the receipt template printed by `succ pack`. Keep the worktree read-only until seated. Send an `ACCEPT` after verification; the lead sends the quiz separately, and that answer turn uses no tools.
+
+## Succession document templates
+
+### BRIEF · HO<n> · <seat>
+
+#### Current facts
+
+- Base/head and version used:
+- Uncommitted changes and unpushed commits:
+- Current documents and output folders:
+- User rules and decision pointers (`[#n]`):
+- Open tasks and done-when conditions:
+- Related requests and status:
+- Leases and in-flight HANDOFFs:
+- Worktree and file map:
+
+#### Handover instructions
+
+- Candidate and seat:
+- Steps completed and next step:
+- Read-only period ends when:
+- {{SOURCE_BASELINE}}
+- Read-first files:
+
+### HANDOFF · HO<n>
+
+#### Rules
+
+- [#n] <one applicable user rule, restated in operational language>
+
+#### Decisions and current facts
+
+- <fact> [#n]
+
+#### Tasks and acceptance conditions
+
+- <task id>: <done-when condition>
+
+#### Requests, leases and in-flight work
+
+- <request id/status, lease, or HANDOFF; write `none` when empty>
+
+#### Only-known-after-reading fact
+
+- <one verbatim user statement from `words.md`>
+
+#### Unresolved
+
+- <one unresolved issue per line, or `none`>
+
+#### Next step
+
+- <safe next action after acceptance>
+
+### Self-notes · HO<n>
+
+Low-confidence map written by the outgoing session. This is not authoritative; check each item against the handover pack.
+
+#### Intended next steps
+
+- <what I planned to do>
+
+#### Uncertain or blocked
+
+- <uncertainty, blocker, or `none`>
+
+#### Background tasks and subagents
+
+- <task, state, and last known result>
+
+#### User statements received after freeze
+
+- <verbatim text and timestamp, or `none`>
 - **The lead is being changed** (the lead says "lead handover HO<n>"): finish your turn, keep working on your task, and hold messages that need a lead decision until the new lead writes to you. When it does, check its session id against the new roster, reply `ACK` to it, and from then on send everything to the new lead only. Anything you sent during the change goes to the new lead again if it does not confirm it. If the old lead writes "the change did not finish", carry on with the old lead as before.
+- **You are the new lead and cannot take over**: send `ROLLBACK HO<n>` to the old lead with the failed checks and evidence. Do not archive yourself; the old lead must record `succ abort` before resuming decisions.
 
 ## Ownership and handoffs
 

@@ -17,11 +17,13 @@ import argparse
 import contextlib
 import copy
 import hashlib
+import html
 import datetime as dt
 import functools
 import fnmatch
 import io
 import json
+import textwrap
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback
@@ -29,6 +31,7 @@ except ImportError:  # pragma: no cover - Windows fallback
 import os
 import re
 import shutil
+import shlex
 import struct
 import subprocess
 import sys
@@ -64,6 +67,7 @@ THREAD_STATUSES = {
     "resolved": "Resolved",
     "archived": "archived session",
 }
+SESSION_CHANGE_STATUSES = {"starting", "working", "waiting", "review", "landing", "idle", "resolved"}
 TASK_STATUSES = [
     "planned",
     "approved",
@@ -281,6 +285,7 @@ LABELS = {
         "d_stale": "stale", "succ_seat_missing": "Not seated: these steps have not passed yet: {steps}", "screen_v_pass": "passed", "screen_v_marginal": "borderline", "screen_v_fail": "failed", "screen_v_unscored": "not screened",
         "succ_start": "Recorded. Starting the {seat} handover, about 15 minutes; I will return with a card.\nLead next: prepare a candidate and verify it by session ID.",
         "succ_freeze": "Handover {id} is frozen. Submit and push WIP, send the last STATUS, then reply to peers only: {seat} handover in progress; send it to lead. Do not edit files.",
+        "succ_freeze_unreachable": "Handover {id} is frozen with the old session unreachable ({reason}); no RECALL or final STATUS was sent. Continue from local records.",
         "succ_abort": "Unfreeze {id}; continue.\nHandover cancelled; send messages to {old} as before.",
         "succ_relay_limit": "Warning: this seat has relayed {n} times today, at or above the daily limit {limit}.",
         "archive_replaced_handover": "{handover} replaced this session after its successor reported",
@@ -385,7 +390,7 @@ LABELS = {
         "succ_ack_usage": "ack requires a known thread", "succ_moved_usage": "moved requires --trigger or --subscription",
         "succ_reconciled_usage": "reconciled requires --count N", "succ_window_early": "window is available after lead seat",
         "succ_window_ready": "Handover window: [{freeze_at}, {seated_at}]\nUse list_events to check messages from the old lead and each thread in this interval, one by one.",
-        "succ_question_user": "What requirement did the user state about \"{x}\"?", "succ_question_branch": "What is the current seat's branch name?",
+        "succ_question_user": "What requirement did the user state about \"{x}\"?", "succ_question_lead": "What did the lead instruct about \"{x}\"?", "succ_question_branch": "What is the current seat's branch name?",
         "succ_question_task": "What is the done when requirement for {task}?", "succ_question_unpushed": "How many unpushed commits are there?",
         "succ_question_file": "Does file {path} still exist?", "succ_question_request": "What is the status of related request {id}?",
         "succ_pack_line": "{path} · {gap} {n}", "succ_verify_line": "Verification {name}: {result}", "succ_final_grade": "{score}/{total} {result}",
@@ -394,7 +399,7 @@ LABELS = {
         "succ_archive_window": "The handover window has not been reconciled", "succ_archive_lead": "{id} replaced the lead",
         "succ_reason_sep": "; ",
         "succ_triggers": "triggers", "succ_subscriptions": "subscriptions",
-        "succ_status_row": "{id} {seat} {phase} → {next}", "succ_redacted": "[redacted]",
+        "succ_status_row": "{id} {seat} {phase} → {next}", "succ_redacted": "[redacted]", "succ_unreachable_next": "Old session unreachable ({reason}); continue from recorded transcript, then verify the freeze fingerprint before seating.",
         "archive_handover_needed": "Hand over first: {items}. Use --handed-to <thread|lead> or --park \"<why>\".",
         "succ_verify_self": "Self-check: compare tasks, branch, head, rules and requests with the pack before you send the receipt.",
         "succ_retire_needs_archive": "Archive the old session first: archive verify, done and check.",
@@ -409,7 +414,7 @@ LABELS = {
         "succ_tests_void": "screening check, void",
         "succ_seat_card": "New lead: {sid} (https://claude.ai/code/{sid})\nScreen: {screen}; quiz: {score}/{total}\nThreads awaiting new lead acknowledgement: {threads}; pending requests: {requests}; questions awaiting the user: {questions}",
         "succ_candidate_required": "Specify --candidate; exactly one active candidate is required for automatic selection.", "succ_already_frozen": "This handover is already frozen.", "succ_reload_state": "State changed on disk; reload and rerun the command.", "succ_step_phase": "Handover {id} is {phase}; cannot run {step} now.",
-        "succ_grade_short": "Fewer than 3 questions: add facts to the first page of BRIEF, then quiz again.",
+        "succ_grade_short": "Fewer than 3 questions were available; add facts to the first page of BRIEF before the next quiz.",
         "succ_skipped_answers": "Skipped {n} child-agent records containing screening answers.",
         "signals_bad_lines": "Skipped {n} malformed transcript lines.",
         "succ_screen_uncleared": "Screen {id} has no clear message; its void window ends at {at}.",
@@ -418,7 +423,7 @@ LABELS = {
         "critical_screen_reassign": "A critical seat has a failed screen; replace its session first.", "signal_none": "No signals", "signal_no_transcript": "No transcript; only the ledger was counted.",
         "screen_immutable": "This screen has already been scored.", "succ_screen_mismatch": "The screen must match this candidate and handover seat.", "succ_screen_strict": "A critical seat requires a strict screen.",
         "signal_deadline": "defer to the next merge point",
-        "succ_thread_card": "Seat change: {seat} {old} → {sid}\nVerification passed; quiz passed\nNext: wait for thread acknowledgements, then archive the old session through archive.",
+        "succ_thread_card": "Seat change: {seat} {old} → {sid}\nVerification passed; quiz passed\nNext: wait for thread acknowledgements, then archive the old session through archive.", "succ_card_scores": "Screen: {screen}/{screen_total}; quiz: {score}/{total}; acceptance: {accepted}/{checks}", "succ_card_acceptance": "Acceptance checks passed: {accepted}/{checks}",
         "succ_abort_user": "Handover {id} did not complete ({reason}); I will continue here.", "succ_abort_threads": "Continue sending messages to me as before.", "succ_abort_candidate": "Candidate: stop work; this handover was cancelled.",
     },
     "zh": {
@@ -520,6 +525,7 @@ LABELS = {
         "decided_memory_source": "MEMORY.md 第 {n} 行", "decided_state_source": "已记录的决定",
         "succ_start": "记下了，开始换 {seat}，大约 15 分钟，完了给你一张卡。\nlead 下一步：准备候选并按会话 ID 核实。",
         "succ_freeze": "交接冻结 {id}。提交 WIP 并推送、回最后一个 STATUS；之后同伴来消息只回「{seat} 交接中，请发给 lead」；不再改文件。",
+        "succ_freeze_unreachable": "交接 {id} 按旧会话失联冻结（{reason}）；未发 RECALL 或最后 STATUS，按本机记录继续。",
         "succ_abort": "解冻 {id}，继续。\n交接取消，照旧发给 {old}。",
         "succ_relay_limit": "提醒：该席位今天已接力 {n} 次，达到或超过每日上限 {limit}。",
         "archive_replaced_handover": "{handover} 换下的会话，新会话已汇报",
@@ -709,14 +715,14 @@ LABELS = {
         "succ_lead_ping": "lead ping 需要 --candidate-seen 时间", "succ_ack_usage": "ack 需要已登记的线程", "succ_moved_usage": "moved 需要 --trigger 或 --subscription",
         "succ_reconciled_usage": "reconciled 需要 --count N", "succ_window_early": "lead 上任后才能对账换届窗口",
         "succ_window_ready": "换届窗口：[{freeze_at}, {seated_at}]\n用 list_events 查旧 lead 和各线程在这段时间发来的消息，逐条对账。",
-        "succ_question_user": "用户关于“{x}”说过什么要求？", "succ_question_branch": "当前席位的分支名是什么？", "succ_question_task": "{task} 的 done when 要求是什么？",
+        "succ_question_user": "用户关于“{x}”说过什么要求？", "succ_question_lead": "lead 对“{x}”的指令是什么？", "succ_question_branch": "当前席位的分支名是什么？", "succ_question_task": "{task} 的 done when 要求是什么？",
         "succ_question_unpushed": "未推送提交有几条？", "succ_question_file": "文件 {path} 现在还在吗？", "succ_question_request": "关联请求 {id} 的状态是什么？",
         "succ_pack_line": "{path} · {gap} {n}", "succ_verify_line": "验收 {name}：{result}", "succ_final_grade": "{score}/{total} {result}",
         "succ_ack_pending": "还有这些线程没认新 lead：{threads}", "succ_move_pending": "还有这些项目没迁：{items}", "succ_archive_ack": "还有 {n} 个线程没认新 lead",
         "succ_archive_move": "还有 {n} 项提醒或订阅没迁", "succ_archive_window": "换届窗口还没对账", "succ_archive_lead": "{id} 换下的 lead",
         "succ_reason_sep": "；",
         "succ_triggers": "定时提醒", "succ_subscriptions": "订阅",
-        "succ_status_row": "{id} {seat} {phase} → {next}", "succ_redacted": "[含打码]",
+        "succ_status_row": "{id} {seat} {phase} → {next}", "succ_redacted": "[含打码]", "succ_unreachable_next": "旧会话失联（{reason}）；根据记录继续交接，上座前复核冻结指纹。",
         "archive_handover_needed": "先交接：{items}。用 --handed-to <线程|lead> 指定接手人，或 --park \"<为什么先挂着>\"。",
         "succ_verify_self": "自检：请核对 tasks、branch、head、rules、requests",
         "succ_retire_needs_archive": "先走 archive verify/done/check",
@@ -731,7 +737,7 @@ LABELS = {
         "succ_tests_void": "体检内容，作废",
         "succ_seat_card": "新 lead：{sid}（https://claude.ai/code/{sid}）\n体检：{screen}；测验：{score}/{total}\n还有 {threads} 个线程待认新 lead；待办请求：{requests}；等用户回答：{questions}",
         "succ_candidate_required": "必须指定 --candidate；只有一个未作废候选时才能自动选择。", "succ_already_frozen": "这条交接已经冻结。", "succ_reload_state": "磁盘状态已变化，请重载后重跑命令。", "succ_step_phase": "{id} 已经 {phase}，不能再 {step}",
-        "succ_grade_short": "素材不足 3 题：把事实补进 BRIEF 第一页再测。",
+        "succ_grade_short": "本轮可用题目少于 3 题；下轮测验前先把事实补进 BRIEF 第一页。",
         "succ_skipped_answers": "跳过 {n} 份读过答案的子 agent 记录",
         "signals_bad_lines": "跳过 {n} 行坏记录",
         "succ_screen_uncleared": "{id} 没发清场消息，作废窗口截到 {at}",
@@ -740,7 +746,7 @@ LABELS = {
         "critical_screen_reassign": "关键席位有未通过体检的会话，请先换人。", "signal_none": "信号正常", "signal_no_transcript": "没有对话记录，只算了台账",
         "screen_immutable": "这条体检已经打过分。", "succ_screen_mismatch": "体检必须属于本交接的候选和席位。", "succ_screen_strict": "关键席位要求 strict 体检。",
         "signal_deadline": "推迟到下一个合并点",
-        "succ_thread_card": "换座卡：{seat} {old} → {sid}\n验收已过；测验已过\n下一步：先等各线程回 ACK，再按 archive 流程归档旧会话。",
+        "succ_thread_card": "换座卡：{seat} {old} → {sid}\n验收已过；测验已过\n下一步：先等各线程回 ACK，再按 archive 流程归档旧会话。", "succ_card_scores": "体检分：{screen}/{screen_total}；测验 得分/总数：{score}/{total}；验收 通过/总项：{accepted}/{checks}", "succ_card_acceptance": "验收通过项：{accepted}/{checks}",
         "succ_abort_user": "换届没完成，原因：{reason}；我先接着干。", "succ_abort_threads": "各线程照旧发给我。", "succ_abort_candidate": "候选：停止工作；本次换届已取消。",
     },
 }
@@ -2101,10 +2107,66 @@ def _close_archived(st, sid, me, ts):
 
 def _session_taken(st, sid, me, handover=None):
     """Another live seat already holds this session: two seats would share one inbox."""
-    holder=next((n for n, t in st["threads"].items()
-                 if n != me and t.get("session_id") == sid and t.get("status") != "archived"), None)
-    if holder: return holder
-    return next((f"handover {hid} candidate" for hid,h in st.get("handovers",{}).items() if hid != handover and _ho_open(h) for c in h.get("candidates",[]) if c.get("session_id")==sid),None)
+    other=next((n for n, t in st["threads"].items()
+                 if n != me and t.get("session_id") == sid and t.get("status") not in ("archived", "resolved", "planned")), None)
+    if other: return other
+    for hid,ho in st.get("handovers",{}).items():
+        if hid==handover or ho.get("phase") in ("aborted","retired"): continue
+        occupied={x.get("session_id") for x in ho.get("candidates",[])}|{ho.get("successor")}
+        if sid in occupied: return f"handover {hid}"
+    return None
+
+
+def _succ_handover_gate(st, hid, seat, sid):
+    ho=st.get("handovers",{}).get(hid) or {}
+    candidate=next((x for x in ho.get("candidates",[]) if x.get("session_id")==sid),None)
+    missing=[]
+    if ho.get("seat")!=seat or ho.get("phase") in ("aborted","retired"): missing.append("handover")
+    if not candidate: missing.append("candidate")
+    if (ho.get("verify") or {}).get("candidate")!=sid or not (ho.get("verify") or {}).get("passed"): missing.append("verify")
+    if (ho.get("quiz") or {}).get("candidate")!=sid or not (ho.get("quiz") or {}).get("passed"): missing.append("quiz")
+    steps=ho.get("steps",{}); freeze=_when(steps.get("freeze")); pack=_when(steps.get("pack")); verify=_when(steps.get("verify")); quiz=_when(steps.get("quiz")); grade=_when(steps.get("grade"))
+    if not (freeze and pack and verify and freeze<pack<verify): missing.append("freeze < pack < verify")
+    if not (pack and quiz and grade and pack<quiz<grade): missing.append("pack < quiz < grade")
+    if _succ_pack_gate(ho.get("pack_dir") or ""): missing.append("pack")
+    thread=st.get("threads",{}).get(seat) or {}
+    snap=_succ_git_snapshot(st,thread.get("branch"),thread.get("worktree"))
+    if snap.get("fingerprint")!=(ho.get("freeze") or {}).get("dirty_fingerprint"): missing.append("freeze fingerprint")
+    return list(dict.fromkeys(missing))
+
+
+_SUCC_RECEIPT_SECTIONS = ("Rules", "Only-known-after-reading fact", "Unresolved")
+
+
+def _succ_receipt_sections_ok(text):
+    headings=list(re.finditer(r"(?im)^#{1,4} (.+?)\s*$",str(text or "")))
+    names=[m.group(1).strip() for m in headings]
+    positions=[]
+    for wanted in _SUCC_RECEIPT_SECTIONS:
+        idx=next((i for i,name in enumerate(names) if wanted.casefold() in name.casefold()),None)
+        if idx is None: return False
+        body=str(text)[headings[idx].end():headings[idx+1].start() if idx+1<len(headings) else len(str(text))]
+        if not body.strip() or re.search(r"(?i)\bTODO\b|待填|待定|FIXME|XXX",body): return False
+        positions.append(idx)
+    return positions==sorted(positions)
+
+
+def _thread_change_seat(st, name, sid, reason, ts=None, status=None):
+    """End the current seat stint and start a fresh one; used by set, reseat, and accepted succession."""
+    t=st["threads"][name]; ts=ts or now(); previous=t.get("session_id")
+    t.pop("disconnected",None)
+    hist=t.setdefault("sessions",[])
+    if previous and not any(h.get("session_id")==previous for h in hist):
+        hist.append({"session_id":previous,"from":t.get("created")})
+    for stint in hist:
+        if stint.get("session_id")==previous and not stint.get("to"):
+            stint["to"]=ts; stint["reason"]=reason
+    hist.append({"session_id":sid,"from":ts})
+    t["session_id"]=sid
+    _close_archived(st,sid,name,ts)
+    t.pop("stuck_on",None); t.pop("waiting_for",None); t.pop("nudges",None)
+    t["status"]=status or "starting"; t["last_status_at"]=ts
+    return previous,ts
 
 
 def _ho_open(rec):
@@ -2177,12 +2239,13 @@ def cmd_thread(a):
     d = need(find_dir())
     st = load(d)
     name = a.name
-    if a.action == "reseat" and any(hid != getattr(a,"handover",None) and x.get("seat") == name and _ho_open(x) for hid,x in st.get("handovers", {}).items()):
-        sys.exit(lab(st, "seat_handover_open_hint"))
+    if a.action != "add" and not (a.action == "set" and name == "all" and a.roster_sent) and name not in st["threads"]:
+        sys.exit(f"unknown thread {name}; known: {', '.join(st['threads']) or '-'}")
     if a.session is not None:
         a.session = a.session.strip()
-        if a.action == "set" and a.session != (st.get("threads", {}).get(name) or {}).get("session_id") and any(x.get("seat") == name and _ho_open(x) for x in st.get("handovers", {}).values()):
-            sys.exit(lab(st, "seat_handover_open_hint"))
+    if getattr(a,"handover",None) is not None:
+        missing=_succ_handover_gate(st,a.handover,name,a.session)
+        if missing: sys.exit("--handover blocked: "+", ".join(missing))
     if a.session and not_a_session(a.session, {"threads": dict(st["threads"], **{name: {}})}):
         sys.exit(not_a_session(a.session, {"threads": dict(st["threads"], **{name: {}})}))
     if a.action == "add" and a.cloud_reason is not None and (a.kind or "rc") != "cloud":
@@ -2230,6 +2293,9 @@ def cmd_thread(a):
         if kind == "rc" and a.cloud_reason is not None:
             sys.exit("--cloud-reason goes with --kind cloud; an rc thread needs no reason")
     if a.session and a.action in ("add", "set", "reseat"):
+        if a.action in ("set","reseat") and getattr(a,"handover",None) is None and any(
+                h.get("seat")==name and _ho_open(h) for h in st.get("handovers",{}).values()):
+            sys.exit(lab(st,"seat_handover_open_hint"))
         critical_target = a.action == "add" and bool(a.critical) or a.action == "set" and (bool(a.critical) or bool((st["threads"].get(name) or {}).get("critical"))) or a.action == "reseat" and bool((st["threads"].get(name) or {}).get("critical"))
         if critical_target and _screen_failed(st, a.session):
             sys.exit(lab(st, "critical_screen_block"))
@@ -2244,18 +2310,6 @@ def cmd_thread(a):
             sys.exit(f"session {a.session} already holds the {other} seat; one session holds one seat")
         if a.session == (st.get("lead") or {}).get("session_id"):
             sys.exit(f"session {a.session} is the lead; a thread needs its own session")
-    if a.action in ("set", "reseat") and name in st["threads"] and a.status \
-            and (not a.session or a.session == st["threads"][name].get("session_id")) \
-            and st["threads"][name]["status"] == "archived" and a.status != "archived":
-        sid0 = st["threads"][name].get("session_id")
-        hist0 = st["threads"][name].get("sessions") or []
-        closed = sid0 and any(h.get("session_id") == sid0 for h in hist0) and \
-            not any(h.get("session_id") == sid0 and not h.get("to") for h in hist0)
-        other = _session_taken(st, sid0, name) or \
-            ("the lead" if sid0 and sid0 == (st.get("lead") or {}).get("session_id") else None) or \
-            ("another seat or the lead (its stint here has ended)" if closed else None)
-        if other:  # reviving an archived seat whose session has moved on to another seat or the lead
-            sys.exit(f"{name}'s session now belongs to {other}: reseat {name} with a new --session instead")
     if a.action == "add":
         added_status = a.status if a.session else "planned"
         if a.waiting_for and added_status != "waiting":
@@ -2333,6 +2387,8 @@ def cmd_thread(a):
         sys.exit("--waiting-for applies only to a thread in waiting status")
     if a.stuck_on and a.stuck_on != "none" and (a.action not in ("set", "add") or (a.status or t.get("status")) not in ("working", "waiting")):
         sys.exit("--stuck-on applies only to a working or waiting thread")
+    if a.action == "set" and t.get("status") == "archived" and a.status and a.status != "archived" and not a.session:
+        sys.exit(f"{name} is archived; restore it through the seat-change path with --session <new session id>")
     if a.kind is not None or a.cloud_reason is not None:  # planned seat, checked above: the user edited the plan
         t["kind"] = a.kind or t["kind"]
         if t["kind"] == "cloud":
@@ -2345,31 +2401,16 @@ def cmd_thread(a):
     if a.action == "reseat":
         if not a.session:
             sys.exit("reseat needs --session <new session id> (create the new session first)")
-        if a.session == t.get("session_id"):
+        if a.session == t.get("session_id") and t.get("status") != "archived":
             sys.exit(f"{a.session} already holds the {name} seat")
-        if a.status and a.status not in ("starting", "working", "waiting", "idle"):
-            sys.exit("reseat --status must be starting, working, waiting or idle (a new live session)")
     reason = a.reason or ("reseated" if a.action == "reseat" else "session changed")
     prev_session = t.get("session_id")
-    if a.session and a.session != t.get("session_id"):
-        t.pop("disconnected", None)
-        hist = t.setdefault("sessions", [])
-        ts = now()  # one instant: the old stint ends exactly when the new one starts
-        if t.get("session_id") and not any(h.get("session_id") == t["session_id"] for h in hist):
-            hist.append({"session_id": t["session_id"], "from": t.get("created")})
-        for h in hist:
-            if h.get("session_id") == t.get("session_id") and not h.get("to"):
-                h["to"] = ts
-                h["reason"] = reason
-        hist.append({"session_id": a.session, "from": ts})
-        t["session_id"] = a.session
-        _close_archived(st, a.session, name, ts)
-        if a.action == "reseat":
-            t.pop("stuck_on", None); t.pop("waiting_for", None); t.pop("nudges", None)
-            if not a.status:
-                t["status"] = "starting"
-            t["last_status_at"] = ts  # the new session gets a fresh stuck timer (same instant: not a report)
-    if a.status:
+    session_change = bool(a.session and (a.session != t.get("session_id") or t.get("status") == "archived"))
+    if session_change:
+        if a.status and a.status not in SESSION_CHANGE_STATUSES:
+            sys.exit(f"status must be one of {sorted(SESSION_CHANGE_STATUSES)}")
+        prev_session,ts=_thread_change_seat(st,name,a.session,reason,status=a.status)
+    if a.status and not session_change:
         if a.status not in THREAD_STATUSES:
             sys.exit(f"status must be one of {list(THREAD_STATUSES)}")
         t["status"] = a.status
@@ -2416,21 +2457,26 @@ def cmd_thread(a):
         bump_roster(st)  # peers need a new ROSTER; t itself learns it with the same broadcast
     if a.roster_sent:
         t["roster_seen"] = st.get("roster_version", 0)
+    if a.action == "reseat" and getattr(a,"handover",None):
+        ho=st.get("handovers",{}).get(a.handover)
+        if ho:
+            ho.update(successor=a.session,phase="seated")
+            _succ_save(d,st,ho,"seat")
     t["last_seen"] = now()
     save(
         d,
         st,
         {
-            "ev": "thread-reseat" if a.action == "reseat" else "thread-set",
+            "ev": "thread-reseat" if session_change and prev_session else "thread-set",
             "thread": name,
             "status": t["status"],
             "summary": t["summary"],
             **({"session": t["session_id"], "prev_session": prev_session, "reason": reason}
-               if t.get("session_id") != prev_session else {}),
+               if session_change else {}),
         },
     )
     print(json.dumps({name: t}, ensure_ascii=False, indent=2))
-    if a.action == "reseat":
+    if session_change:
         print("send the updated ROSTER to the new session before dispatching work", file=sys.stderr)
         print(lab(st, "handover_prompt_hint"), file=sys.stderr)
 
@@ -4905,7 +4951,7 @@ def cmd_qa(a):
 
 
 # Every header type in references/messages.md and templates/worker-protocol.md.
-MSG_TYPES = ("TASK FOLLOWUP HANDOFF RECALL ROSTER INFO ANSWER ACK UPDATE STATUS DONE BLOCKED QUESTION MEMORY "
+MSG_TYPES = ("TASK FOLLOWUP HANDOFF RECALL ROSTER INFO ANSWER ACK UPDATE STATUS DONE BLOCKED QUESTION MEMORY ACCEPT ROLLBACK "
              "NEED-THREAD").split()
 # Words a hand-written template leaves in angle brackets (`<session id>`, `<thread>`); HTML-like `<button>` is not one.
 HOLE_WORDS = {"id", "sid", "session", "thread", "peer", "sha", "commit", "branch", "branchname", "recipient", "words",
@@ -5961,11 +6007,27 @@ def _screen_final_score(rec, scores, language_penalty=0):
     return raw,maximum,score,verdict,veto
 
 
+def _tool_json(raw):
+    """JSON from a tool result's text. Results about other sessions come wrapped by the platform
+    (<other-session nonce=... untrusted="true"> + one preamble line + JSON); take the JSON inside. None if there is none."""
+    if not isinstance(raw, str): return None
+    text = raw.strip()
+    m = re.match(r'(?s)<other-session\b[^>]*>(.*)</other-session[^>]*>\s*$', text)
+    if m:
+        text=m.group(1)
+        start=min([i for i in (text.find("{"),text.find("[")) if i>=0],default=-1)
+        if start<0: return None
+        try: return json.JSONDecoder().raw_decode(text[start:])[0]
+        except ValueError: return None
+    try: return json.loads(text)
+    except ValueError: return None
+
+
 def _tool_page(raw, keys, depth=0):
     """The page dict holding a list under one of keys, searched up to 4 wrappers deep (for has_more), or None."""
     if isinstance(raw, str):
-        try: raw = json.loads(raw)
-        except ValueError: return None
+        raw = _tool_json(raw)
+        if raw is None: return None
     if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], dict) and raw[0].get("type") == "text":
         return _tool_page(raw[0].get("text", ""), keys, depth)
     if not isinstance(raw, dict) or depth > 4: return None
@@ -5978,8 +6040,8 @@ def _tool_rows(raw, keys=("data",)):
     """The rows inside a platform tool result (list_events, list_sessions: bare list, {"data"}, {"ccr": {...}},
     or a text block holding JSON), or None when the shape is not one of these."""
     if isinstance(raw, str):
-        try: raw = json.loads(raw)
-        except ValueError: return None
+        raw = _tool_json(raw)
+        if raw is None: return None
     if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], dict) and raw[0].get("type") == "text":
         return _tool_rows(raw[0].get("text", ""), keys)
     if isinstance(raw, list): return [row for row in raw if isinstance(row, dict)]
@@ -6072,10 +6134,71 @@ def _row_role(row):
     return "user"
 
 
+_PEER_WRAP_RE = re.compile(r"(?is)<cross-session-message\b([^>]*)>\s*(.*?)\s*</cross-session-message>")
+
+
+def _peer_message(text):
+    """A peer message as delivered: (sender session id or None, its own words). Drops the platform's wrapper and the
+    preamble the platform puts before every relayed message; plain [tw:] text comes back as is."""
+    m = _PEER_WRAP_RE.search(text or "")
+    if not m: return None, (text or "").strip()
+    sender = re.search(r'from-session="([^"]+)"', m.group(1))
+    body = html.unescape(m.group(2))
+    tw_at = re.search(r"(?m)^\s*\[tw:", body)
+    if tw_at: body = body[tw_at.start():]
+    elif body.startswith("The following was sent"):
+        parts = re.split(r"\n\s*\n", body, maxsplit=1); body = parts[1] if len(parts) > 1 else body
+    return (sender.group(1) if sender else None), textwrap.dedent(body).strip()
+
+
 def _row_text(row):
     """The row's own words: text blocks without system reminders or command wrappers."""
-    text = "\n".join(str(b.get("text", "")) for b in _row_content(row) if isinstance(b, dict) and b.get("type") in ("text", "input_text"))
+    blocks = _row_blocks(row) or []
+    text = "\n".join(str(b.get("text", "")) for b in blocks if isinstance(b, dict) and b.get("type") in ("text", "input_text"))
     return _REMINDER_RE.sub(" ", text)
+
+
+def _row_blocks(row):
+    """Return dialogue/tool blocks from the platform's message.content field.
+
+    Local transcript rows only have one authoritative payload location. Any
+    content-like field elsewhere in the row makes the row unverified.
+    """
+    def has_external_payload(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in ("message", "attachment", "toolUseResult", "serverClassifierContext", "rendered", "wireToolInputs"):
+                    continue
+                if key in ("text", "content", "tool_use", "tool_result"):
+                    return True
+                if has_external_payload(child):
+                    return True
+        elif isinstance(value, list):
+            return any(has_external_payload(item) for item in value)
+        return False
+
+    if not isinstance(row, dict):
+        return None
+    message = row.get("message")
+    row_type=row.get("type") or (message.get("role") if isinstance(message,dict) else None)
+    # Non-message platform rows (attachments, queue operations, file history)
+    # are metadata and never contribute dialogue/tool blocks.
+    if row_type not in ("user","assistant","peer") and not isinstance(message,dict):
+        return []
+    if has_external_payload(row):
+        return None
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content", "")
+    return content if isinstance(content, list) else ([{"type": "text", "text": str(content)}] if content else [])
+
+
+def _tool_result_text(value):
+    """Extract text from string, JSON string, or MCP content text blocks."""
+    if isinstance(value,list):
+        return "\n".join(str(x.get("text", "")) for x in value if isinstance(x,dict) and x.get("type")=="text")
+    if isinstance(value,str): return value
+    return ""
 
 
 _ERROR_WORDS_RE = re.compile(r"error|fail|denied|refused|not found|doesn't|does not|cannot|can't|失败|报错|出错|不行|不支持|没成功|被拒|找不到|不存在", re.I)
@@ -6084,7 +6207,7 @@ _DONE_CLAIM_RE = re.compile(r"已修好|修好了|已完成|已经完成|搞定�
 
 def _tool_error(blocks):
     return any(isinstance(b, dict) and b.get("type") in ("tool_result", "tool_output") and
-               (b.get("is_error") or str(b.get("content", "")).lstrip().startswith(("<tool_use_error>", "Error:", "error:")))
+               (b.get("is_error") or _tool_result_text(b.get("content")).lstrip().startswith(("<tool_use_error>", "Error:", "error:")))
                for b in blocks)
 
 
@@ -6098,8 +6221,15 @@ def _find_transcripts(old_session, config_dirs):
         for bridge in bridges:
             if not bridge.is_file(): continue
             try:
-                ids = {json.loads(line).get("session_id") for line in bridge.read_text(encoding="utf-8").splitlines() if line.strip()}
-            except (OSError, ValueError): continue
+                ids=set()
+                with bridge.open(encoding="utf-8") as stream:
+                    for line in stream:
+                        if not line.strip(): continue
+                        try: row=json.loads(line)
+                        except ValueError: continue
+                        sid=row.get("session_id") if isinstance(row,dict) else None
+                        if isinstance(sid,str) and sid.strip(): ids.add(sid.strip())
+            except (OSError, UnicodeError): continue
             for proj in (root / "projects").glob("*"):
                 for sid in ids:
                     if not isinstance(sid, str): continue
@@ -6112,10 +6242,14 @@ def _find_transcripts(old_session, config_dirs):
     return list(dict.fromkeys(found))
 
 
-def _session_rows(session):
+def _primary_transcript_paths(paths):
+    return [p for p in paths if "subagents" not in Path(p).parts]
+
+
+def _session_rows(session, config_dirs=None):
     """Merge readable primary session transcripts in stable time order; missing times inherit the prior row."""
     collected=[]; found=None
-    paths=[p for p in _find_transcripts(session, _config_dirs()) if "subagents" not in p.parts]
+    paths=_primary_transcript_paths(_find_transcripts(session, _config_dirs() if config_dirs is None else config_dirs))
     for file_order, path in enumerate(paths):
         try: rows, _ = _transcript_rows(path)
         except (OSError, ValueError): continue
@@ -6150,7 +6284,7 @@ def _extract_screen_answer(rows, sid, text_only=False):
             elif block.get("type") in ("tool_use", "tool_call"):
                 out.append(f"[tool_use {block.get('name', '?')}: {json.dumps(block.get('input') or block.get('arguments') or {}, ensure_ascii=False)[:1000]}]")
             elif block.get("type") in ("tool_result", "tool_output"):
-                out.append(f"[tool_result: {str(block.get('content') or block.get('output') or '')[:1000]}]")
+                out.append(f"[tool_result: {_tool_result_text(block.get('content') or block.get('output'))[:1000]}]")
     return "\n".join(x for x in out if x).strip()
 
 
@@ -7572,6 +7706,7 @@ def cmd_worker_prompt(a):
         "WORKTREE": (f"`{t.get('worktree') or worktree_path(st, a.thread)}` (the lead creates it; if it is missing, "
                      f"create it yourself with exactly: `{worktree_cmd(st, a.thread)}`)")
         if t["kind"] == "rc" else "your container's checkout of the repo (cloud thread)",
+        "SOURCE_BASELINE": "事实来源与版本基线：" if st.get("prefs", {}).get("language") == "zh" else "Source of truth and version baseline:",
     }
     out = tpl
     for k, v in fill.items():
@@ -8817,7 +8952,7 @@ def cmd_archive(a):
             if failed: print("\n".join(f"{x['session_id']} [{x.get('seat')}] — {lab(st, 'archive_failed')}" for x in failed))
         return
     sid = a.session_id
-    if a.action in ("verify","done") and any((h.get("phase") not in ("aborted","retired") and (sid == h.get("successor") or any(c.get("session_id")==sid for c in h.get("candidates",[])))) for h in st.get("handovers",{}).values()):
+    if a.action in ("verify","done") and any((h.get("phase") not in ("aborted","retired") and (sid == h.get("successor") or any(c.get("session_id")==sid and not c.get("void") for c in h.get("candidates",[])))) for h in st.get("handovers",{}).values()):
         sys.exit("handover candidate or successor cannot be archived")
     candidates = {x["session_id"]: x for x in archive_candidates(st)}
     if a.action in ("verify", "done") and sid in candidates and candidates[sid].get("category") == "blocked-replaced":
@@ -8906,11 +9041,13 @@ def cmd_archive(a):
         if (rec.get("category") != "replaced" or t.get("last_report_session") == sid) and (int(t.get("report_count") or 0) != int(rec.get("report_count") or 0) or \
                 _later(t.get("last_status_at"), _when(rec["verified_at"]) or EPOCH)):
             sys.exit("a newer report arrived after verification; verify again")
-        if rec.get("category") in ("disconnected", "idle-old") and not (a.user_said or "").strip():
+        direct_disconnected=rec.get("category")=="disconnected" and bool(st.get("prefs",{}).get("archive_disconnected_direct",False))
+        if rec.get("category") in ("disconnected", "idle-old") and not direct_disconnected and not (a.user_said or "").strip():
             sys.exit("this category needs --user-said (user decision)")
         rec["archived_at"] = now()
         rec.pop("check", None); rec.pop("checked_at", None)
         rec["user_said"] = (a.user_said or "").strip()
+        if direct_disconnected: rec["direct_disconnected_id_verified"] = sid
         handoff = next((x for x in reversed(st.get("archive_handoffs", [])) if x.get("session") == sid), None)
         receiver = handoff.get("to") if handoff else "lead"
         thread = st.get("threads", {}).get(rec.get("seat"), {})
@@ -8948,13 +9085,13 @@ def cmd_archive(a):
     print(json.dumps(rec, ensure_ascii=False))
 
 
-def _succ_save(d, st, rec, step):
+def _succ_save(d, st, rec, step, record_step=True):
     stamp = _when(now())
     prior = [_when(x) for x in rec.setdefault("steps", {}).values()]
     prior = [x for x in prior if x]
     if prior and stamp <= max(prior): stamp = max(prior) + dt.timedelta(seconds=1)
     value = stamp.astimezone().isoformat(timespec="seconds")
-    rec["steps"][step] = value
+    if record_step: rec["steps"][step] = value
     event={"ev":"succ-"+step,"handover":rec["id"]}
     if rec.get("kind")=="lead" and step=="seat": event["lead_change"]={"from":rec.get("old_session"),"to":rec.get("successor")}
     save(d, st, event)
@@ -8997,11 +9134,12 @@ def _succ_git_snapshot(st, branch=None, repo_override=None):
     mine=["--",".",":(exclude).teamwork"]  # the ledger and the handover pack change during a handover by design
     diff=git("diff","HEAD","--binary",*mine).stdout
     names=git("ls-files","--others","--exclude-standard","-z",*mine).stdout.split(b"\0")
-    untracked=[]; digest=hashlib.sha256(diff)
+    untracked=[]; untracked_hashes={}; digest=hashlib.sha256(diff)
     for raw in names:
         if not raw: continue
         rel=os.fsdecode(raw); untracked.append(rel); path=Path(repo)/rel
-        try: digest.update(raw+b"\0"+path.read_bytes())
+        try:
+            content=path.read_bytes(); untracked_hashes[rel]=hashlib.sha256(content).hexdigest(); digest.update(raw+b"\0"+content)
         except OSError: digest.update(raw+b"\0-")
     status=git("status","--porcelain","-z",*mine).stdout.decode(errors="replace")
     dirty=[x[3:] for x in status.split("\0") if len(x)>3]
@@ -9009,7 +9147,7 @@ def _succ_git_snapshot(st, branch=None, repo_override=None):
     base=st.get("repo",{}).get("base") or "main"
     remote=f"origin/{target}" if target and git("rev-parse","--verify","--quiet",f"refs/remotes/origin/{target}").returncode==0 else (f"origin/{base}" if git("rev-parse","--verify","--quiet",f"refs/remotes/origin/{base}").returncode==0 else base)
     unpushed=git("log","--format=%H","--reverse",f"{remote}..{target}").stdout.decode(errors="replace").splitlines() if target and git("rev-parse","--verify","--quiet",target).returncode==0 else []
-    return {"available":True,"head":head,"fingerprint":digest.hexdigest() if diff or untracked else "-","dirty_files":sorted(set(dirty)),"unpushed":unpushed,"base":remote}
+    return {"available":True,"head":head,"fingerprint":digest.hexdigest() if diff or untracked else "-","dirty_files":sorted(set(dirty)),"unpushed":unpushed,"base":remote,"status":status,"untracked_hashes":untracked_hashes}
 
 
 def _succ_relay_count(st, seat, today=None):
@@ -9045,6 +9183,11 @@ def _succ_hit(key, norm):
     """A keyword is said: ASCII words must appear; a Chinese phrase counts when most of its characters appear."""
     key=_succ_normalize(key)
     if not key: return False
+    for words in (("yes","是","对","存在","true"),("no","否","不","没有","false")):  # a yes/no answer counts in either language
+        if key in words:
+            other=("no","否","不","没有","false") if words[0]=="yes" else ("yes","是","对","存在","true")
+            said=lambda ws: any(re.search(rf"(?<![a-z]){re.escape(w)}(?![a-z])",norm) for w in ws)
+            return said(words) and not (key in ("yes","是","对","存在","true") and said(("no","否","不是","false")))
     if not re.search(r"[\u3400-\u9fff]",key): return key in norm
     chars=set(key)
     return sum(c in norm for c in chars)*10>=len(chars)*6
@@ -9059,9 +9202,23 @@ def _succ_quiz_material(rec, st):
         return max(paths,key=lambda p: (0 if p.stem==stem else int(p.stem.rsplit("-",1)[-1]) if p.stem.rsplit("-",1)[-1].isdigit() else -1)) if paths else root/name
     words=latest("words.md")
     if words.exists():
-        for line in words.read_text(encoding="utf-8").splitlines():
+        entries=[]
+        for line in words.read_text(encoding="utf-8").splitlines():  # an entry runs until the next numbered line
+            if re.match(r"(★ )?\[(#|L#|P#)\d+\] ",line) or not entries: entries.append(line)
+            else: entries[-1]+="\n"+line
+        for line in entries:
+            if re.match(r"\[[LP]#\d+\] \[tw:[^\]]*\][^\n]*\n",line):  # the [tw:] header says who and what type, not what
+                line=line.split("] ",1)[0]+"] "+line.split("\n",1)[1]
+            line=" ".join(line.split()) if not line.startswith("★") else line
             m=re.match(r"★ \[#\d+\] (.*)",line)
-            if not m: continue
+            if not m:
+                m=re.match(r"\[[LP]#\d+\] (.*)",line)
+                if m:
+                    text=m.group(1).replace("[REDACTED]"," ").replace("[含打码]"," ").replace("[redacted]"," ")
+                    key=[k for k in _succ_keywords(text) if k.lower()!="redacted"]
+                    if len(key)>=2:
+                        material.append({"question":lab(st,"succ_question_lead",x=key[0]),"keywords":key[1:4]})
+                continue
             text=m.group(1).replace("[REDACTED]"," ").replace("[含打码]"," ").replace("[redacted]"," ")
             key=[k for k in _succ_keywords(text) if k.lower()!="redacted"]
             if key and len(key[0])>2 and re.search(r"[\u3400-\u9fff]",key[0]):  # name the first two characters, ask for the rest
@@ -9081,25 +9238,245 @@ def _succ_quiz_material(rec, st):
         material.append({"question":lab(st,"succ_question_file",path=f.get("path")),"keywords":[lab(st,"succ_yes" if f.get("exists") else "succ_no")]})
     for rid,q in facts.get("requests",{}).items():
         material.append({"question":lab(st,"succ_question_request",id=rid),"keywords":[rid,str(q.get("status",""))]})
-    return material
+    unique={}
+    for item in material:
+        key=(item["question"],tuple(item.get("keywords",[])))
+        unique.setdefault(key,item)
+    return list(unique.values())
+
+
+_BRIDGE_UNVERIFIED=object()
+
+
+def _succ_bridge_remote(local_id, config_dirs):
+    if not local_id: return None
+    saw_bridge=False
+    for config in config_dirs:
+        for bridge in Path(config).glob("bridge-transcript-cse_*.jsonl"):
+            saw_bridge=True
+            try:
+                if str(local_id).encode("utf-8") not in bridge.read_bytes(): continue
+                with bridge.open(encoding="utf-8") as stream:
+                    for line in stream:
+                        if not line.strip(): continue
+                        try: row=json.loads(line)
+                        except ValueError: continue
+                        if isinstance(row,dict) and str(row.get("session_id") or "").strip()==str(local_id).strip():
+                            return "session_"+bridge.stem.removeprefix("bridge-transcript-cse_").removeprefix("session_")
+            except (OSError,UnicodeError): continue
+    # A miss remains unverified while bridge metadata exists.
+    return _BRIDGE_UNVERIFIED if saw_bridge else None
+
+
+def _succ_bridge_locals(remote_session, config_dirs):
+    """Return local session UUIDs claimed by any row in the remote session's bridge."""
+    if not remote_session: return set()
+    suffix=str(remote_session).removeprefix("session_")
+    locals_found=set()
+    for config in config_dirs:
+        bridge=Path(config)/f"bridge-transcript-cse_{suffix}.jsonl"
+        if not bridge.is_file(): continue
+        try:
+            with bridge.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if not line.strip(): continue
+                    try: row=json.loads(line)
+                    except ValueError: continue
+                    local=row.get("session_id") if isinstance(row,dict) else None
+                    if isinstance(local,str) and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}",local.strip()):
+                        locals_found.add(local.strip())
+        except (OSError,UnicodeError): continue
+    return locals_found
+
+
+def _succ_transcript_rows(path, expected_session=None, config_dirs=None):
+    """Read successor records through the shared transcript and platform-result parsers."""
+    raw_export=None
+    try:
+        p=Path(path)
+        rows, _bad = _transcript_rows(p)
+        if expected_session and p.suffix.lower()==".json":
+            raw_export=json.loads(p.read_text(encoding="utf-8"))
+            export_rows=_tool_rows(raw_export,("data","events","items"))
+            if export_rows is not None:
+                rows=_rows_from_events(export_rows)
+    except (OSError, ValueError, UnicodeError):
+        # A saved list_events tool result may be a text-only <other-session>
+        # wrapper, which is not itself JSONL even when the export uses .json.
+        try:
+            raw_export=Path(path).read_text(encoding="utf-8")
+            payload=_tool_rows(raw_export, ("data", "events", "items"))
+        except (OSError, UnicodeError):
+            return []
+        rows=_rows_from_events(payload) if payload is not None else []
+    if len(rows) == 1:
+        page = _tool_rows(rows[0], ("data", "events", "items"))
+        if page is not None:
+            rows=_rows_from_events(page)
+    configs=config_dirs if config_dirs is not None else [Path.home()/".claude",*Path.home().glob(".claude-*")]
+    if expected_session:
+        expected=str(expected_session).strip()
+        p=Path(path)
+        if p.suffix.lower()!=".json":
+            # Local Claude JSONL rows are attributable only through the bridge for
+            # the requested remote session. A filename is never ownership proof.
+            local_ids=_succ_bridge_locals(expected,configs)
+            if not local_ids or not rows:
+                return []
+            # Platform bookkeeping (for example file-history records) has no
+            # dialogue or tool payload and is not an ownership-bearing transcript row.
+            content_rows=[]
+            for row in rows:
+                blocks=_row_blocks(row)
+                if blocks is None:
+                    return []
+                if any(isinstance(block,dict) and block.get("type") in ("text","input_text","tool_use","tool_call","tool_result","tool_output") for block in blocks):
+                    content_rows.append(row)
+            rows=content_rows
+            if not rows:
+                return []
+            for row in rows:
+                owner=row.get("sessionId") or row.get("session_id")
+                if not owner or str(owner).strip() not in local_ids:
+                    return []
+        else:
+            if isinstance(raw_export,str):
+                raw_export=_tool_json(raw_export)
+            wrapper_owners=set()
+            def collect_wrappers(value):
+                if isinstance(value,list):
+                    for item in value: collect_wrappers(item)
+                elif isinstance(value,dict):
+                    ccr=value.get("ccr")
+                    if isinstance(ccr,dict):
+                        sid=ccr.get("id")
+                        if isinstance(sid,str) and sid.strip(): wrapper_owners.add(sid.strip())
+                    for child in value.values(): collect_wrappers(child)
+            collect_wrappers(raw_export)
+            if wrapper_owners:
+                if wrapper_owners!={expected}: return []
+            else:
+                event_rows=_tool_rows(raw_export,("data","events","items"))
+                if not event_rows: return []
+                paired={}
+                def blocks_for(event):
+                    msg=event.get("message")
+                    content=msg.get("content",[]) if isinstance(msg,dict) else event.get("content",[])
+                    return content if isinstance(content,list) else []
+                for event in event_rows:
+                    for block in blocks_for(event):
+                        if not isinstance(block,dict) or block.get("type")!="tool_use": continue
+                        inp=block.get("input")
+                        sid=inp.get("session_id") if isinstance(inp,dict) else None
+                        if isinstance(sid,str) and sid.strip() and block.get("id"):
+                            paired[block["id"]]=sid.strip()
+                for event in event_rows:
+                    owners=set()
+                    sid=event.get("session_id")
+                    if isinstance(sid,str) and sid.strip(): owners.add(sid.strip())
+                    for block in blocks_for(event):
+                        if not isinstance(block,dict): continue
+                        if block.get("type")=="tool_use":
+                            inp=block.get("input")
+                            sid=inp.get("session_id") if isinstance(inp,dict) else None
+                            if isinstance(sid,str) and sid.strip(): owners.add(sid.strip())
+                        elif block.get("type")=="tool_result" and block.get("tool_use_id") in paired:
+                            owners.add(paired[block["tool_use_id"]])
+                    if owners!={expected}: return []
+    stem=Path(path).stem
+    remote=_succ_bridge_remote(stem,configs) if not expected_session and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}",stem) else None
+    if remote is _BRIDGE_UNVERIFIED: return []
+    if remote:
+        local_ids=_succ_bridge_locals(remote,configs)
+        if not local_ids or stem not in local_ids: return []
+        for row in rows:
+            owner=row.get("sessionId") or row.get("session_id")
+            if owner and str(owner).strip() not in local_ids: return []
+    return rows
+
+
+def _succ_zero_tool_window(rows, question, answer_lines):
+    answer_tokens=list(dict.fromkeys(x.strip() for x in answer_lines if x.strip()))
+    def text(row):
+        if _row_role(row)=="tool_result": return ""
+        blocks=_row_blocks(row) or []
+        parts=[str(x.get("text") or x.get("content") or "") for x in blocks if isinstance(x,dict)]
+        for block in blocks:
+            if not isinstance(block,dict): continue
+            if block.get("type")=="tool_use" and block.get("name")=="mcp__claude-code-remote__send_message":
+                inp=block.get("input") or {}
+                if all(token in str(inp.get("message", "")) for token in answer_tokens):
+                    parts.append(str(inp.get("message", "")))
+        return " ".join(parts)
+    qidx=next((i for i,r in enumerate(rows) if question and question in text(r)),None)
+    if qidx is None: return False
+    seen=set(); aidx=None
+    for i in range(qidx+1,len(rows)):
+        body=text(rows[i])
+        seen.update(tok for tok in answer_tokens if tok in body)
+        if answer_tokens and len(seen)==len(answer_tokens):
+            aidx=i; break
+    if aidx is None: return False
+    for row in rows[qidx+1:aidx]:
+        content=_row_blocks(row)
+        if content is None: return False
+        if any(isinstance(block,dict) and block.get("type")=="tool_use" and
+                block.get("name")!="mcp__claude-code-remote__send_message" for block in content): return False
+    return True
+
+
+def _succ_get_session_results(rows):
+    results={}; calls={}
+    for row in rows:
+        content=(row.get("message") or {}).get("content",[])
+        blocks=content if isinstance(content,list) else []
+        for block in blocks:
+            if isinstance(block,dict) and block.get("type")=="tool_use" and "get_session" in str(block.get("name")):
+                inp=block.get("input") or {}; sid=inp.get("session_id") or inp.get("id")
+                if sid: calls[block.get("id")]=sid
+        for block in blocks:
+            if not isinstance(block,dict) or block.get("type")!="tool_result" or block.get("tool_use_id") not in calls: continue
+            raw=_tool_result_text(block.get("content"))
+            value=_tool_json(raw)
+            if value is None: value={"status":raw} if raw else {}
+            if isinstance(value,dict):
+                if isinstance(value.get("ccr"),dict): value=dict(value["ccr"])  # the platform's real shape
+                returned=value.get("session_id") or value.get("sessionId") or value.get("id")
+                requested=calls[block["tool_use_id"]]
+                if returned and str(returned).strip()!=str(requested).strip(): continue
+                if "connection_status" in value: value.setdefault("connected",value.get("connection_status")=="connected")
+                if "archived" not in value and value.get("session_status"):
+                    value["archived"]="ARCHIV" in str(value.get("session_status")).upper()
+                if value.get("status_bucket"): value["status_bucket"]=str(value["status_bucket"]).lower().replace("session_status_bucket_","")
+                value["_record_at"]=row.get("timestamp") or row.get("created_at") or row.get("time")
+                previous=results.get(requested) or {}; current_at=_when(value["_record_at"]); previous_at=_when(previous.get("_record_at"))
+                if requested not in results or (current_at and (not previous_at or current_at>previous_at)): results[requested]=value
+    return results
 
 
 def _pack_session(d, st, hid, rec, a):
     """Extract a handover pack for rec["old_session"] from its record into .teamwork/private/handover/<hid>-<seat>/ (T58 J11).
     Shared by `succ pack` and the archive handover (J2). Returns (pack dir, gaps, files written)."""
     base=d.parent/".teamwork"/"private"/"handover"/f"{hid}-{rec['seat']}"; base.mkdir(parents=True,exist_ok=True)
+    old_files=[p for p in base.iterdir() if p.name!="superseded"]
+    if old_files:  # a re-pack replaces the whole set; the old one is kept aside, never mixed with the new names
+        aside=base/"superseded"/now().replace(":","").replace("+","p"); aside.mkdir(parents=True,exist_ok=True)
+        for p in old_files: p.rename(aside/p.name)
     gaps=[]; rows=[]; paths=[]
     for path in a.transcript or []:
         p=Path(path)
         if p.exists(): paths.append(p)
         else: gaps.append(lab(st,"succ_missing_transcript",path=path))
+    cfg=list(dict.fromkeys([*(_config_dirs() if not a.config_dir else []), *(a.config_dir or [])]))
     if not a.transcript:
-        cfg=list(dict.fromkeys([*(_config_dirs() if not a.config_dir else []), *(a.config_dir or [])]))
-        paths=_find_transcripts(rec.get("old_session"),cfg)
+        discovered=_find_transcripts(rec.get("old_session"),cfg)
+        for p in discovered:
+            rows.extend(_succ_transcript_rows(p,rec.get("old_session"),cfg))
+        if not discovered: gaps.append(lab(st,"succ_no_transcript"))
     skipped_answer_files=0
     for p in paths:
         try:
-            found=[json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+            found=_succ_transcript_rows(p,rec.get("old_session"),cfg)
             child_record=bool(re.search(SUBAGENT_ID_RE, p.stem))
             answer_reference=_succ_answer_path(st,p.as_posix()) or any(_succ_answer_path(st,json.dumps(row,ensure_ascii=False)) for row in found)
             if child_record and answer_reference:
@@ -9111,7 +9488,7 @@ def _pack_session(d, st, hid, rec, a):
             rows += found
         except (OSError,ValueError): gaps.append(lab(st,"succ_unreadable_transcript",path=p))
     if skipped_answer_files: gaps.append(lab(st,"succ_skipped_answers",n=skipped_answer_files))
-    if not rows: gaps.append(lab(st,"succ_no_transcript"))
+    if a.transcript and not rows: sys.exit("pack transcript contains zero readable records; unverified")
     seat_sessions=(st.get("threads",{}).get(rec["seat"]) or {}).get("sessions",[])
     stint=next((x for x in seat_sessions if x.get("session_id")==rec.get("old_session")),None)
     stint_from=_when(stint.get("from")) if stint else None
@@ -9183,7 +9560,7 @@ def _pack_session(d, st, hid, rec, a):
                     if target: file_ops[str(target)]=name
                 if name=="Bash": tool_map[tid]={"command":inp.get("command","")}; commands.append(inp.get("command",""))
             if block.get("type")=="tool_result":
-                raw=str(block.get("content","")); urls.update(re.findall(r"https?://[^\s)\]>]+",raw))
+                raw=_tool_result_text(block.get("content")); urls.update(re.findall(r"https?://[^\s)\]>]+",raw))
                 tid=block.get("tool_use_id")
                 exit_code=block.get("exit_code",block.get("code"))
                 if block.get("is_error") or (isinstance(exit_code,int) and exit_code!=0) or re.search(r"(?:exit(?:ed)?(?: with)? code|status)\s*[:=]?\s*[1-9][0-9]*",raw,re.I):
@@ -9192,29 +9569,32 @@ def _pack_session(d, st, hid, rec, a):
         if _succ_answer_path(st,rawtext):
             row={"type":row.get("type"),"timestamp":row.get("timestamp"),"message":{"content":"[redacted answer key path]"}}
             rawtext=json.dumps(row,ensure_ascii=False)
-        urls.update(re.findall(r"https?://[^\s\"'<>]+",rawtext))
+        urls.update(u.rstrip(").,;]'\"") for u in re.findall(r"https?://[^\s\"'<>]+",rawtext))
     file_facts=[]
     for name,op in sorted(file_ops.items()):
         p=Path(name); p=p if p.is_absolute() else Path(st.get("repo",{}).get("path") or d.parent)/p
         file_facts.append({"path":name,"operation":op,"exists":p.exists()})
     words=[]; peer_words=[]; compact=[]; users=0; peers=0
     for row in rows:
-        msg=row.get("message",{}); content=msg.get("content","")
-        tool_result=any(isinstance(x,dict) and x.get("type")=="tool_result" for x in content) if isinstance(content,list) else False
-        if isinstance(content,list): content=" ".join(str(x.get("text","")) for x in content if isinstance(x,dict))
-        origin=(row.get("origin") or msg.get("origin") or {}).get("kind")
+        role=_row_role(row)
+        content=_row_text(row)
         stamp=_when(row.get("timestamp") or row.get("created_at") or row.get("createdAt") or row.get("time"))
         invalid=row.get("_handover_window")==lab(st,"succ_tests_void")
         if row.get("isCompactSummary") or row.get("type") in ("compact_boundary","summary"):
             compact=[_succ_redact(str(content))[0]]
-        elif compact and row.get("type")=="user" and not invalid: compact.append(_succ_redact(str(content))[0])
-        if row.get("type") != "user" or tool_result: continue
+        elif compact and role=="user" and not invalid: compact.append(_succ_redact(str(content))[0])
+        if role not in ("user","peer"): continue
         if invalid: continue
-        if not row.get("_handover_subagent") and (origin == "human" or (not origin and not str(content).lstrip().startswith("[tw:"))):
+        peer_message=role=="peer"
+        if not row.get("_handover_subagent") and role=="user":
             users+=1; redacted,count=_succ_redact(str(content)); rule=bool(re.search(r"不要|别|改成|永远|记住|必须|always|never|don't|do not",redacted,re.I))
             words.append(f"{'★ ' if rule else ''}[#{users}] {redacted}" + (f" {lab(st,'succ_redacted')}" if count else ""))
-        elif origin != "human" and str(content).lstrip().startswith("[tw:"):
-            peers+=1; peer_words.append(f"[L#{peers}] {_succ_redact(str(content))[0]}")
+        elif peer_message:
+            sender,peer_text=_peer_message(str(content))
+            if sender and sender in {c.get("session_id") for c in rec.get("candidates") or []}: continue  # the candidate's own test traffic
+            leads={st.get("lead",{}).get("session_id")}|{x.get("session_id") for x in st.get("lead",{}).get("sessions") or []}
+            tag="L" if sender is None or sender in leads else "P"
+            peers+=1; peer_words.append(f"[{tag}#{peers}] {_succ_redact(peer_text)[0]}")
     t=st.get("threads",{}).get(rec["seat"],{}); branch=t.get("branch","-")
     snap=_succ_git_snapshot(st,branch,t.get("worktree"))
     open_tasks=[{"id":k,"title":v.get("title"),"done_when":v.get("accept"),"status":v.get("status"),"touches":v.get("touches",[]),"requests":[]} for k,v in st.get("tasks",{}).items() if v.get("owner")==rec["seat"] and v.get("status") not in ("done","dropped")]
@@ -9233,9 +9613,24 @@ def _pack_session(d, st, hid, rec, a):
     if not any(file_ops.values()): gaps.append(lab(st,"succ_no_file_ops"))
     if not commands: gaps.append(lab(st,"succ_no_commands"))
     if not urls: gaps.append(lab(st,"succ_no_urls"))
+    if not words and not peer_words:
+        if rows:
+            gaps.append("No user-authored statements in this seat term; transcript extraction completed with zero eligible user messages.")
+        else:
+            gaps.append("Transcript extraction failed: no readable source rows were available, so user-authored statements could not be assessed.")
     lead_extra = ""
     if rec.get("kind") == "lead":
         rec["cutoff_at"] = now()
+        promise_re=re.compile(r"[^。！？.!?\n]*(?:我会|稍后|完了告诉你|I'll|I will)[^。！？.!?\n]*[。！？.!?]?",re.I)
+        for row in rows:
+            if _row_role(row)!="assistant": continue
+            text=_row_text(row)
+            for match in promise_re.finditer(text):
+                promise=match.group(0).strip()
+                if promise and not any(p.get("source_handover")==hid and p.get("text")==promise for p in st.setdefault("promises",[])):
+                    promises=st["promises"]
+                    pid="P"+str(max([int(re.search(r"\d+",str(p.get("id","P0"))).group(0)) for p in promises if re.search(r"\d+",str(p.get("id","")))] or [0])+1)
+                    promises.append({"id":pid,"text":promise,"confidence":"low","source_handover":hid,"owner":"lead","status":"open","at":now()})
         rec["move_items"] = []
         team = [{"seat":n,"session":t.get("session_id"),"status":t.get("status"),"summary":t.get("summary"),"unmerged_commits":t.get("unmerged_commits",[])} for n,t in st.get("threads",{}).items()]
         lists=[]
@@ -9275,19 +9670,60 @@ def _pack_session(d, st, hid, rec, a):
     env_section = env_heading + ("\n".join(change_rows) if change_rows else "- " + model_lab(st, "change_empty")) + "\n"
     brief=f"# {hid} · {rec['seat']}\n\n{lab(st,'succ_gap')}：{', '.join(gaps) if gaps else lab(st,'succ_none')}\n\n## {lab(st,'succ_current_facts')}\n{lab(st,'succ_old_session')}：{rec.get('old_session')}；{lab(st,'t_branch')}：{branch}；{lab(st,'succ_freeze_head')}：{(rec.get('freeze') or {}).get('head','-')}\n{lab(st,'succ_unpushed')}：{len(snap['unpushed'])}；{lab(st,'succ_dirty')}：{', '.join(snap['dirty_files']) or '-'}\n{lab(st,'succ_tasks')}：{json.dumps(open_tasks,ensure_ascii=False)}\n{lab(st,'succ_requests')}：{json.dumps(related,ensure_ascii=False)}；{lab(st,'succ_leases')}：{', '.join(facts['leases']) or '-'}\n{lab(st,'succ_files_hint')}\n{env_section}{lead_extra}"
     written=[]
-    for name,data in (("BRIEF.md",brief),("words.md","\n".join(words+peer_words)+("\n" if words or peer_words else "")),("compact.md","\n".join(compact)+("\n" if compact else "")),("facts.json",json.dumps(facts,ensure_ascii=False,indent=2))):
+    rule_lines=[line for line in words if line.startswith("★ ")]
+    user_lines=[line for line in words if re.match(r"^\[#\d+\] ",line)]
+    rule_text="\n".join("- "+line for line in rule_lines) if rule_lines else "- No ★ user rules were recorded in words.md."
+    fact_text="- "+user_lines[0] if user_lines else "- No user-authored statement was recorded for this seat term; the transcript contained no eligible human-origin message."
+    unresolved_text="\n".join("- "+str(gap) for gap in gaps) if gaps else "- none"
+    handoff_template="# HANDOFF\n\n## Rules / 规则\n"+rule_text+"\n\n## Only-known-after-reading fact / 只有读过才知道的一条\n"+fact_text+"\n\n## Unresolved / 悬而未决\n"+unresolved_text+"\n"
+    for name,data in (("BRIEF.md",brief),("words.md","\n".join(words+peer_words)+("\n" if words or peer_words else "")),("compact.md","\n".join(compact)+("\n" if compact else "")),("facts.json",json.dumps(facts,ensure_ascii=False,indent=2)),("HANDOFF.md",handoff_template)):
         path=base/name; ix=1
         while path.exists(): path=base/f"{Path(name).stem}-{ix}{Path(name).suffix}"; ix+=1
         path.write_text(data,encoding="utf-8"); written.append(str(path))
     rawdir=base/"raw"; rawdir.mkdir(exist_ok=True); rawfile=rawdir/"old.jsonl"; ix=1
     while rawfile.exists(): rawfile=rawdir/f"old-{ix}.jsonl"; ix+=1
     rawfile.write_text("\n".join(json.dumps(_succ_scrub(row),ensure_ascii=False) for row in rows),encoding="utf-8")
-    file_hashes={str(p.relative_to(base)):hashlib.sha256(p.read_bytes()).hexdigest() for p in base.rglob("*") if p.is_file() and p.name!="MANIFEST.json"}
+    file_hashes={str(p.relative_to(base)):hashlib.sha256(p.read_bytes()).hexdigest() for p in base.rglob("*") if p.is_file() and p.name!="MANIFEST.json" and "superseded" not in p.relative_to(base).parts}
     manifest={"id":hid,"seat":rec["seat"],"old_session":rec.get("old_session"),"candidates":rec.get("candidates"),"freeze":rec.get("freeze"),"cutoff_at":rec.get("cutoff_at"),"files":file_hashes,"gaps":gaps,"user_words":users,"rules":sum(x.startswith("★") for x in words),"compactions":compact_count,"redactions":sum(len(_SUCC_SECRET_RE.findall(json.dumps(x,ensure_ascii=False))) for x in rows)}
     mf=base/"MANIFEST.json"; ix=1
     while mf.exists(): mf=base/f"MANIFEST-{ix}.json"; ix+=1
     mf.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding="utf-8")
     return base, gaps, written
+
+
+def _succ_pack_gate(base):
+    base=Path(base); missing=[]
+    brief=base/"BRIEF.md"; handoff=base/"HANDOFF.md"; manifest=base/"MANIFEST.json"
+    if not brief.is_file() or not re.search(r"(?im)^## .*current facts|^## .*当前事实",brief.read_text(encoding="utf-8") if brief.is_file() else ""):
+        missing.append("BRIEF first facts section")
+    try:
+        mf=json.loads(manifest.read_text(encoding="utf-8"))
+        for name,digest in mf.get("files",{}).items():
+            path=base/name
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=digest: missing.append("MANIFEST checksum: "+name)
+    except (OSError,ValueError):
+        mf={}; missing.append("MANIFEST.json")
+    raw=base/"raw/old.jsonl"; words=base/"words.md"
+    raw_count=sum(1 for line in raw.read_text(encoding="utf-8").splitlines() if line.strip()) if raw.is_file() else 0
+    gaps=mf.get("gaps",[]) if isinstance(mf,dict) else []
+    if raw_count==0 and not gaps: missing.append("original words or documented gap")
+    words_text=words.read_text(encoding="utf-8") if words.is_file() else ""
+    if not words.is_file(): missing.append("words.md")
+    elif not words_text.strip():
+        if not any("No user-authored statements" in str(g) or "Transcript extraction failed" in str(g) for g in gaps):
+            missing.append("words.md empty without user-words gap explanation")
+    handoff_text=handoff.read_text(encoding="utf-8") if handoff.is_file() else ""
+    headings=list(re.finditer(r"(?im)^#{2,4} .+$",handoff_text))
+    if len(headings)<3:
+        missing.append("HANDOFF three sections")
+    else:
+        for i,heading in enumerate(headings[:3]):
+            section=handoff_text[heading.end():headings[i+1].start() if i+1<len(headings) else len(handoff_text)]
+            if not section.strip() or re.search(r"(?i)\bTODO\b|待填|待定|FIXME|XXX",section):
+                missing.append("HANDOFF TODO/empty section: "+heading.group(0).lstrip("# ").strip())
+    if not handoff.is_file() or not re.search(r"(?im)^#{1,4} .*rules|^#{1,4} .*规则",handoff_text):
+        missing.append("HANDOFF rules section")
+    return missing
 
 
 def cmd_succ(a):
@@ -9308,6 +9744,7 @@ def cmd_succ(a):
         n = max([int(k[2:]) for k in hs if re.fullmatch(r"HO[0-9]+", k)] or [0]) + 1; hid = f"HO{n}"
         old = _seat_session(st,seat)
         rec = {"id": hid, "seat": seat, "kind": "lead" if seat == "lead" else "thread", "reason": a.reason, "old_session": old,
+               "lead_session": (st.get("lead") or {}).get("session_id"),
                "candidates": [], "successor": None, "phase": "started", "steps": {"start": now()}}
         hs[hid] = rec; save(d, st, {"ev": "succ-start", "handover": hid, **({"user_said":a.user_said.strip()} if getattr(a,"user_said",None) else {})})
         print(lab(st,"succ_start",seat=seat))
@@ -9322,9 +9759,11 @@ def cmd_succ(a):
                 next_step = next((k for k in ("ack", "moved", "window", "reconciled", "retired")
                                   if k not in x.get("steps", {})), None)
             else:
-                next_step = next((k for k in ("candidate", "freeze", "pack", "verify", "quiz", "seat")
+                next_step = next((k for k in ("candidate", "freeze", "pack", "verify", "quiz", "grade", "seat")
                                   if k not in x.get("steps", {})), "retire")
             row={"id":x["id"],"seat":x["seat"],"phase":x["phase"],"next":next_step}
+            if (x.get("freeze") or {}).get("unreachable"):
+                row["unreachable"]=True; row["unreachable_reason"]=(x.get("freeze") or {}).get("reason","disconnected")
             if x.get("kind")=="lead":
                 row.update(unacked_threads=[n for n in x.get("ack_needed",[]) if n not in x.get("acks",[])],unmoved=sorted(set(x.get("move_items",[]))-set(x.get("moved",[]))))
                 seen=_when(x.get("candidate_seen"))
@@ -9338,6 +9777,7 @@ def cmd_succ(a):
                     if x["phase"] in ("aborted", "retired") else
                     lab(st,"succ_status_row",id=x['id'],seat=x['seat'],phase=x['phase'],next=x['next'] or "-")) for x in out]
             for x in out:
+                if x.get("unreachable"): lines.append(lab(st,"succ_unreachable_next",reason=x.get("unreachable_reason","disconnected")))
                 if x.get("watchdog_stuck"): lines.append(lab(st,"succ_watchdog",minutes=x["candidate_idle_minutes"]))
                 if x.get("unacked_threads"): lines.append(lab(st,"succ_ack_pending",threads=', '.join(x['unacked_threads'])))
                 if x.get("unmoved"): lines.append(lab(st,"succ_move_pending",items=', '.join(x['unmoved'])))
@@ -9346,6 +9786,9 @@ def cmd_succ(a):
     hid = a.handover
     if hid not in hs: sys.exit(lab(st,"succ_unknown_handover"))
     rec = hs[hid]
+    if a.action == "candidate" and getattr(a,"plan",False): a.action="plan-candidate"
+    elif a.action == "candidate" and getattr(a,"cleared",False): a.action="cleared"
+    elif a.action == "candidate" and getattr(a,"discard",False): a.action="discard"
     seated_only = {"ack", "moved", "reconciled", "retired"}
     before_seat = {"candidate", "screened", "freeze", "pack", "verify", "quiz", "grade", "ping", "seat", "abort"}
     if a.action in seated_only and rec.get("phase") != "seated":
@@ -9356,10 +9799,15 @@ def cmd_succ(a):
         candidates = [x for x in rec.get("candidates", []) if not x.get("void")]
         sid = getattr(a, "candidate", None)
         if isinstance(sid, str): sid = sid.strip()
+        if a.action == "grade" and sid is None:
+            quiz_candidate=(rec.get("quiz") or {}).get("candidate")
+            if quiz_candidate and any(x.get("session_id")==quiz_candidate for x in candidates): sid=quiz_candidate
         if sid is None and len(candidates) == 1: sid = candidates[0].get("session_id")
         if sid is None or not any(x.get("session_id") == sid for x in candidates):
             sys.exit(lab(st, "succ_candidate_required"))
         a.candidate = sid
+    if a.action in ("retire-check","archived") and not a.caller:
+        sys.exit(f"succ {a.action} requires --caller <session id>")
     if a.action in ("candidate", "seat") and getattr(a, "value", None) is not None:
         a.value = a.value.strip()
     if a.action == "candidate" and getattr(a, "session", None) is not None:
@@ -9367,7 +9815,36 @@ def cmd_succ(a):
     if a.action == "ping":
         if rec.get("kind") != "lead" or not a.candidate_seen: sys.exit(lab(st,"succ_lead_ping"))
         rec["candidate_seen"] = a.candidate_seen; _succ_save(d,st,rec,"ping"); return
+    if a.action == "ack" and a.caller:
+        cfg=a.config_dir or [str(Path.home()/".claude"),*map(str,Path.home().glob(".claude-*"))]
+        paths=_primary_transcript_paths([a.from_transcript] if a.from_transcript else _find_transcripts(a.caller,cfg))
+        rows=[row for path in paths for row in _succ_transcript_rows(path)]
+        found=set()
+        for row in rows:
+            if _row_role(row) not in ("user", "peer"): continue
+            txt=_row_text(row)
+            for match in re.finditer(r"\[tw:[^\]]+\]\s+ACK\s+([a-z0-9-]+)\s*->\s*lead\b",txt,re.I):
+                if match.group(1) in st.get("threads",{}): found.add(match.group(1))
+        rec["acks"]=sorted(set(rec.get("acks",[]))|found); rec["acks_source"]={"caller":a.caller,"transcript":paths,"at":now()}; _succ_save(d,st,rec,"ack")
+        print(json.dumps({"acks":rec["acks"],"missing":sorted(set(rec.get("ack_needed",[]))-set(rec["acks"]))},ensure_ascii=False)); return
     if a.action == "ack":
+        if getattr(a,"triggers",None) is not None:
+            if rec.get("kind")!="lead": sys.exit(lab(st,"succ_ack_usage"))
+            if a.from_transcript:
+                rows=_succ_transcript_rows(a.from_transcript); result=None
+                trigger_ids={b.get("id") for row in rows for b in ((row.get("message") or {}).get("content") if isinstance((row.get("message") or {}).get("content"),list) else []) if isinstance(b,dict) and b.get("type")=="tool_use" and "list_triggers" in str(b.get("name"))}
+                for row in reversed(rows):
+                    content=(row.get("message") or {}).get("content",[])
+                    blocks=content if isinstance(content,list) else []
+                    for b in blocks:
+                        if not isinstance(b,dict): continue
+                        if b.get("type")=="tool_result" and b.get("tool_use_id") in trigger_ids: result=_tool_result_text(b.get("content")); break
+                    if result is not None: break
+                if result is None: sys.exit("no list_triggers tool_result in transcript")
+                rec["trigger_snapshot"]={"source":a.from_transcript,"result":result,"at":now()}; rec.setdefault("move_items",[]).append("trigger-snapshot")
+                _succ_save(d,st,rec,"ack"); print("recorded most recent list_triggers result"); return
+            if a.triggers:
+                rec["trigger_snapshot"]={"source":a.triggers,"result":Path(a.triggers).read_text(encoding="utf-8"),"at":now()}; _succ_save(d,st,rec,"ack"); return
         thread=getattr(a,"thread",None)
         if rec.get("kind")!="lead" or thread not in st.get("threads",{}): sys.exit(lab(st,"succ_ack_usage"))
         rec.setdefault("acks",[]); rec["acks"]=sorted(set(rec["acks"]+[thread])); _succ_save(d,st,rec,"ack"); return
@@ -9392,34 +9869,148 @@ def cmd_succ(a):
         if sid == (st.get("lead") or {}).get("session_id") or any(t.get("session_id") == sid for n,t in st.get("threads",{}).items() if n != rec["seat"]) or any(c["session_id"] == sid for h in hs.values() if h is not rec and _ho_open(h) for c in h.get("candidates", [])):
             sys.exit(lab(st,"succ_candidate_occupied"))
         rec.setdefault("candidates", []).append({"session_id": sid, "at": now()}); rec["phase"]="candidate"; rec.setdefault("steps",{})["candidate"]=now(); _succ_save(d,st,rec,"candidate"); return
+    if a.action == "plan-candidate":
+        thread=st.get("threads",{}).get(rec.get("seat"),{})
+        snap=_succ_git_snapshot(st,thread.get("branch"),thread.get("worktree"))
+        rec["candidate_snapshot"]={**snap,"status":snap.get("status","")}
+        rec.setdefault("steps",{})["plan-candidate"]=now(); _succ_save(d,st,rec,"plan-candidate")
+        title=f"{rec['seat']} (successor)"; tag=f"teamwork-candidate:{rec['seat']}"
+        print(json.dumps({"handover":hid,"title":title,"tags":[tag],"permission_mode":"inherit seat","read_only_until_accepted":True,"snapshot":rec["candidate_snapshot"]},ensure_ascii=False,indent=2)); return
+    if a.action == "cleared":
+        cand=next((x for x in rec.get("candidates",[]) if x.get("session_id")==a.value),None)
+        if not cand: sys.exit(lab(st,"succ_candidate_required"))
+        cand["cleared_at"]=now(); rec.setdefault("steps",{})["cleared"]=now(); _succ_save(d,st,rec,"cleared"); return
+    if a.action == "discard":
+        sid=(a.value or "").strip(); cand=next((x for x in rec.get("candidates",[]) if x.get("session_id")==sid and not x.get("void")),None)
+        if not cand: sys.exit(lab(st,"succ_candidate_required"))
+        if rec.get("successor")==sid or rec.get("phase")=="seated" or rec.get("verify") or rec.get("quiz",{}).get("graded_at"):
+            sys.exit("cannot discard a candidate that has started handover work")
+        snap=rec.get("candidate_snapshot") or {}; repo=Path(st.get("repo",{}).get("path") or d.parent); head=snap.get("head")
+        if not head or head=="-": sys.exit("candidate snapshot has no git head; nothing restored")
+        def git(*args): return subprocess.run(["git","-C",str(repo),*args],capture_output=True,text=True)
+        current=git("status","--porcelain","-z")
+        baseline=set(snap.get("dirty_files",[])); baseline_untracked=set(snap.get("untracked_hashes",{})); changed=[]; skipped=[]; preserved=[]
+        if current.returncode==0:
+            for row in current.stdout.split("\0"):
+                rel=row[3:] if len(row)>3 else ""
+                if not rel or rel in baseline: continue
+                tracked=git("ls-files","--error-unmatch","--",rel)
+                if tracked.returncode==0:
+                    result=git("checkout",head,"--",rel)
+                    (changed if result.returncode==0 else skipped).append(rel)
+                elif rel not in baseline_untracked:
+                    source=Path(repo)/rel
+                    destination=d/"private"/str(rec.get("seat") or "seat")/"tmp"/hid/"discarded"/rel
+                    try:
+                        destination.parent.mkdir(parents=True,exist_ok=True)
+                        if source.is_file():
+                            if destination.exists():
+                                skipped.append(rel+" (discard destination already exists)")
+                            else:
+                                shutil.move(str(source),str(destination)); preserved.append(rel)
+                        elif source.is_dir():
+                            skipped.append(rel+" (directory left untouched)")
+                        else: skipped.append(rel+" (untracked path unavailable)")
+                    except OSError as exc: skipped.append(rel+f" (move failed: {exc})")
+                else: skipped.append(rel+" (snapshot untracked file left untouched)")
+        else: skipped.append("git status unavailable")
+        cand.update(discarded_at=now(),void=True,discard_restore=changed,discard_preserved=preserved,discard_skipped=skipped)
+        _succ_save(d,st,rec,"discard")
+        print("restored: "+(", ".join(changed) or "none")+"\npreserved: "+(", ".join(preserved) or "none")+"\nuntouched: "+(", ".join(skipped) or "none")+"\n丢弃后要不要归档等用户定（问题 3）")
+        return
     if a.action == "screened":
         sc = st.get("screens", {}).get(a.screen)
         cand = next((x for x in rec.get("candidates",[]) if x["session_id"] == a.session), None)
         if not cand or not sc or sc.get("session_id") != a.session or sc.get("seat") != rec.get("seat"): sys.exit(lab(st,"succ_screen_mismatch"))
         if (rec.get("kind") == "lead" or (st.get("threads", {}).get(rec.get("seat")) or {}).get("critical")) and sc.get("level") != "strict": sys.exit(lab(st,"succ_screen_strict"))
-        cand["screen"] = a.screen; _succ_save(d,st,rec,"candidate"); return
+        cand.update(screen=a.screen,verdict=sc.get("verdict"),score=sc.get("score"),max=sc.get("max"),items=sc.get("items"),veto=sc.get("veto"),accepted_by_rule=sc.get("verdict")=="pass"); _succ_save(d,st,rec,"candidate"); return
     if a.action == "freeze":
         if rec.get("freeze"): sys.exit(lab(st, "succ_already_frozen"))
         if (st.get("write_lock") or {}).get("relead"): sys.exit(lab(st, "succ_relead_start"))
         evidence = a.stopped or ""
-        if not rec.get("old_session") or rec["old_session"] not in evidence: sys.exit(lab(st,"succ_freeze_evidence"))
+        unreachable=bool(a.unreachable)
+        if not unreachable and (not rec.get("old_session") or rec["old_session"] not in evidence): sys.exit(lab(st,"succ_freeze_evidence"))
         seat_thread=st.get("threads",{}).get(rec["seat"]) or {}
         snap=_succ_git_snapshot(st,seat_thread.get("branch"),seat_thread.get("worktree"))
-        rec.update(phase="frozen", freeze={"at":now(),"head":snap["head"],"dirty_fingerprint":snap["fingerprint"],"evidence":evidence,"dirty_files":snap["dirty_files"],"unpushed":snap["unpushed"]})
+        rec.update(phase="frozen", freeze={"at":now(),"head":snap["head"],"dirty_fingerprint":snap["fingerprint"],"evidence":evidence,"dirty_files":snap["dirty_files"],"unpushed":snap["unpushed"],"unreachable":unreachable,**({"reason":a.reason or "disconnected"} if unreachable else {})})
         if rec.get("kind") == "lead": st["write_lock"] = {"ho": hid, "since": now(), "old_session": rec.get("old_session")}
         _succ_save(d,st,rec,"freeze")
-        print(lab(st,"succ_freeze",id=hid,seat=rec["seat"])); return
+        if unreachable: print(lab(st,"succ_freeze_unreachable",id=hid,reason=(rec.get("freeze") or {}).get("reason","disconnected")))
+        else: print(lab(st,"succ_freeze",id=hid,seat=rec["seat"]))
+        return
     if a.action == "pack":
         if not rec.get("freeze"): sys.exit(lab(st, "succ_step_phase", id=hid, phase=rec.get("phase"), step="pack"))
+        if a.from_transcript:
+            a.transcript=list(a.transcript or [])+[a.from_transcript]
         base, gaps, written = _pack_session(d, st, hid, rec, a)
+        raw=Path(base)/"raw/old.jsonl"
+        if not raw.is_file() or not any(line.strip() for line in raw.read_text(encoding="utf-8").splitlines()):
+            sys.exit("old session transcript not found; provide --transcript <jsonl> or --from-transcript <list_events export>")
+        missing=_succ_pack_gate(base)
+        if missing: sys.exit("退回重做 / return for rework: "+", ".join(missing))
+        summary=[]
+        for name in ("BRIEF.md","words.md","HANDOFF.md"):
+            p=base/name
+            if p.is_file():
+                cleaned,hits=_succ_redact(p.read_text(encoding="utf-8")); cleaned,hits2=_succ_scrub(cleaned),0
+                summary.append(f"## {name}\n"+cleaned+(("\n[redactions applied]" if hits else "")))
+        (base/"CANDIDATE-SUMMARY.md").write_text("\n\n".join(summary)+"\n",encoding="utf-8")
+        written.append(str(base/"CANDIDATE-SUMMARY.md"))
+        manifest_path=base/"MANIFEST.json"
+        manifest=json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["files"]={str(p.relative_to(base)):hashlib.sha256(p.read_bytes()).hexdigest()
+                            for p in base.rglob("*") if p.is_file() and p.name!="MANIFEST.json" and "superseded" not in p.relative_to(base).parts}
+        manifest_path.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding="utf-8")
+        missing=_succ_pack_gate(base)
+        if missing: sys.exit("退回重做 / return for rework: "+", ".join(missing))
         rec.setdefault("pack_files", []).extend(written)
-        rec.update(phase="packed",pack_dir=str(base)); _succ_save(d,st,rec,"pack"); print(lab(st,"succ_pack_line",path=base/'BRIEF.md',gap=lab(st,'succ_gap'),n=len(gaps))); return
+        rec.update(phase="packed",pack_dir=str(base)); _succ_save(d,st,rec,"pack"); print(lab(st,"succ_pack_line",path=base/'BRIEF.md',gap=lab(st,'succ_gap'),n=len(gaps)))
+        receipt_sections="\n".join("## "+name+"\n..." for name in _SUCC_RECEIPT_SECTIONS)
+        print('Candidate receipt template (copy and fill):\n'+json.dumps({"tasks": [], "branch": "", "head": "", "rules": [], "requests": [], "only_read_fact": "none — 原因：填写没有用户原话可引用的原因", "unresolved": [], "sections": receipt_sections},ensure_ascii=False))
+        return
     if a.action == "verify":
         if not rec.get("pack_dir"): sys.exit(lab(st, "succ_step_phase", id=hid, phase=rec.get("phase"), step="verify"))
         if a.self:
-            print(lab(st,"succ_verify_self")); return
+            pack=Path(rec.get("pack_dir","")); handoff=pack/"HANDOFF.md"; words=pack/"words.md"
+            handoff_text=handoff.read_text(encoding="utf-8") if handoff.is_file() else ""
+            words_text=words.read_text(encoding="utf-8") if words.is_file() else ""
+            mf_path=pack/"MANIFEST.json"
+            try: mf=json.loads(mf_path.read_text(encoding="utf-8"))
+            except (OSError,ValueError): mf={}
+            t=st.get("threads",{}).get(rec["seat"],{}); snap=_succ_git_snapshot(st,t.get("branch"),t.get("worktree"))
+            has_user_words=bool(re.search(r"(?m)^(?:★ )?\[#\d+\] ",words_text))
+            three_sections=len(list(re.finditer(r"(?im)^#{2,4} .+$",handoff_text)))>=3
+            explicit_no_quotes=not has_user_words and any("No user-authored statements" in str(g) for g in mf.get("gaps",[]))
+            self_checks={
+                "tasks":True,
+                "done_when":True,
+                "branch":bool(t.get("branch")),
+                "head":bool(snap.get("head")),
+                "freeze_fingerprint":snap.get("fingerprint")==((rec.get("freeze") or {}).get("dirty_fingerprint","-")),
+                "rules":True,
+                "requests":True,
+                "pack_integrity":not _succ_pack_gate(pack),
+                "handoff_rules":bool(re.search(r"(?im)^#{1,4} .*rules|^#{1,4} .*规则",handoff_text)),
+                "only_read_fact_section":bool(re.search(r"(?im)^#{1,4} .*?(?:Only-known-after-reading fact|只有读过才知道的一条)",handoff_text)),
+                "unresolved_section":bool(re.search(r"(?im)^#{1,4} .*?(?:Unresolved|悬而未决)",handoff_text)),
+                "only_read_fact":has_user_words or explicit_no_quotes,
+                "unresolved":three_sections,
+            }
+            print("\n".join(lab(st,"succ_verify_line",name=k,result=lab(st,"succ_check_pass" if v else "succ_check_fail")) for k,v in self_checks.items())); return
+        if getattr(a,"accept_receipt",None):
+            a.receipt=a.accept_receipt
+            if not a.caller: sys.exit("verify --accept requires --caller <handover lead or current lead>; candidate self-check uses --self")
+            if any(x.get("session_id")==a.caller and not x.get("void") for x in rec.get("candidates",[])): sys.exit("candidate cannot run verify --accept; use --self")
+            if a.caller not in {rec.get("lead_session"),(st.get("lead") or {}).get("session_id")}:
+                sys.exit("verify --accept caller must be this handover's lead or current lead")
         if not a.receipt or not Path(a.receipt).is_file(): sys.exit(lab(st, "succ_verify_receipt"))
-        result=json.loads(Path(a.receipt).read_text(encoding="utf-8")); t=st.get("threads",{}).get(rec["seat"],{}); current=_succ_git_snapshot(st,t.get("branch"),t.get("worktree")); actual=current["head"]
+        receipt_raw=Path(a.receipt).read_text(encoding="utf-8")
+        result=json.loads(receipt_raw); t=st.get("threads",{}).get(rec["seat"],{}); current=_succ_git_snapshot(st,t.get("branch"),t.get("worktree")); actual=current["head"]
+        def receipt_strings(value):
+            if isinstance(value,dict): return [str(k) for k in value]+[s for v in value.values() for s in receipt_strings(v)]
+            if isinstance(value,list): return [s for v in value for s in receipt_strings(v)]
+            return [value] if isinstance(value,str) else []
+        receipt_content=receipt_raw+"\n"+"\n".join(receipt_strings(result))
         expected={k:v for k,v in st.get("tasks",{}).items() if v.get("owner")==rec["seat"] and v.get("status") not in ("done","dropped")}; expected_tasks=sorted(expected)
         required_rules=[]
         words_path=max(Path(rec.get("pack_dir","")).glob("words*.md"),key=lambda p:(0 if p.name=="words.md" else int(p.stem.rsplit("-",1)[-1]) if p.stem.rsplit("-",1)[-1].isdigit() else -1),default=Path(rec.get("pack_dir",""),"words.md"))
@@ -9439,19 +10030,45 @@ def cmd_succ(a):
         receipt_reqs=result.get("requests",[]); req_ids=set(receipt_reqs.keys()) if isinstance(receipt_reqs,dict) else set(receipt_reqs)
         req_status=not isinstance(receipt_reqs,dict) or all(receipt_reqs.get(r)==st["requests"][r].get("status") or (isinstance(receipt_reqs.get(r),dict) and receipt_reqs[r].get("status")==st["requests"][r].get("status")) for r in related)
         freeze_fp=(rec.get("freeze") or {}).get("dirty_fingerprint","-"); frozen_ok=current["fingerprint"]==freeze_fp
+        handoff_path=Path(rec.get("pack_dir",""))/"HANDOFF.md"
+        handoff_text=handoff_path.read_text(encoding="utf-8") if handoff_path.is_file() else ""
+        candidate_sections=str(result.get("sections") or "")
+        candidate_sections_ok=_succ_receipt_sections_ok(candidate_sections)
+        unique_fact=str(result.get("only_read_fact") or result.get("read_only_fact") or "").strip()
+        unresolved=result.get("unresolved",result.get("open_questions"))
+        words_text=words_path.read_text(encoding="utf-8") if words_path.is_file() else ""
+        fact_norm=_succ_normalize(unique_fact)
         checks={"tasks":task_ids==expected_tasks,"done_when":all(accepts.values()),"branch":(result.get("branch") or "")==(t.get("branch") or ""),"head":result.get("head")==actual,"freeze_fingerprint":frozen_ok,"rules":set(required_rules)<=rule_ids,"requests":set(related)<=req_ids and req_status}
-        rec["verify"]={"receipt":result,"checks":checks,"task_accepts":accepts,"passed":all(checks.values()),"candidate":a.candidate}; rec.setdefault("steps",{})["verify"]=now(); rec["phase"]="verified" if all(checks.values()) else rec["phase"]
-        _succ_save(d,st,rec,"verify")
+        fact_heading=bool(re.search(r"(?im)^#{1,4} .*?(?:Only-known-after-reading fact|只有读过才知道的一条)",receipt_content))
+        unresolved_heading=bool(re.search(r"(?im)^#{1,4} .*?(?:Unresolved|悬而未决)",receipt_content))
+        has_user_words=bool(re.search(r"(?m)^(?:★ )?\[#\d+\] ",words_text))
+        explicit_none=bool(re.match(r"(?i)^none(?:\b|\s|—|-)",unique_fact))
+        no_quote_explanation=bool(re.search(r"没有用户原话|没有任何用户原话|no user(?:-authored)? (?:quotes?|statements?)",receipt_content,re.I))
+        only_fact_ok=(bool(fact_norm and fact_norm in _succ_normalize(words_text) and fact_norm in _succ_normalize(candidate_sections))
+                      or (not has_user_words and explicit_none and no_quote_explanation and candidate_sections_ok))
+        checks.update({"pack_integrity":not _succ_pack_gate(rec.get("pack_dir","")),"handoff_rules":candidate_sections_ok and bool(re.search(r"(?im)^#{1,4} .*rules|^#{1,4} .*规则",candidate_sections)),"only_read_fact_section":bool(re.search(r"(?im)^#{1,4} .*?(?:Only-known-after-reading fact|只有读过才知道的一条)",candidate_sections)),"unresolved_section":bool(re.search(r"(?im)^#{1,4} .*?(?:Unresolved|悬而未决)",candidate_sections)),"only_read_fact":only_fact_ok,"unresolved":isinstance(unresolved,(list,str)) and unresolved is not None})
+        rec["verify"]={"receipt":result,"checks":checks,"task_accepts":accepts,"passed":all(checks.values()),"candidate":a.candidate}
+        if all(checks.values()):
+            rec.setdefault("steps",{})["verify"]=now(); rec["phase"]="verified"
+        else:
+            rec.setdefault("steps",{}).pop("verify",None); rec["phase"]="packed"
+        _succ_save(d,st,rec,"verify",record_step=all(checks.values()))
         if not frozen_ok: print(lab(st,"succ_freeze_changed"))
-        print("\n".join(lab(st,"succ_verify_line",name=k,result=lab(st,"succ_check_pass" if v else "succ_check_fail")) for k,v in checks.items())); return
+        print("\n".join(lab(st,"succ_verify_line",name=k,result=lab(st,"succ_check_pass" if v else "succ_check_fail")) for k,v in checks.items()))
+        if not all(checks.values()): sys.exit(1)
+        return
     if a.action == "quiz":
+        if not a.caller: sys.exit("quiz requires --caller <handover lead or current lead>")
+        if any(x.get("session_id")==a.caller for x in rec.get("candidates",[])): sys.exit("candidate cannot run quiz")
+        if a.caller not in {rec.get("lead_session"),(st.get("lead") or {}).get("session_id" )}:
+            sys.exit("quiz caller must be this handover's lead or current lead")
         if not rec.get("pack_dir"): sys.exit(lab(st, "succ_step_phase", id=hid, phase=rec.get("phase"), step="quiz"))
         material=_succ_quiz_material(rec,st)
         keydir=_keys_dir(st); keydir.mkdir(parents=True,exist_ok=True); usedfile=keydir/f"{hid}-used.json"
         used=json.loads(usedfile.read_text(encoding="utf-8")) if usedfile.exists() else {"questions":[]}
         old=set(used.get("questions",[])); chosen=[]
         for item in material:
-            fingerprint=hashlib.sha256(item["question"].encode()).hexdigest()
+            fingerprint=hashlib.sha256((item["question"]+"\0"+"\0".join(item.get("keywords",[]))).encode()).hexdigest()
             if fingerprint in old: continue
             chosen.append((fingerprint,item))
             if len(chosen)==10: break
@@ -9464,26 +10081,66 @@ def cmd_succ(a):
         if len(chosen)<10: print(lab(st,"succ_quiz_short",n=len(chosen)),file=sys.stderr)
         print("\n".join(lab(st,"succ_quiz_question",n=i+1,question=x[1]["question"]) for i,x in enumerate(chosen))); return
     if a.action == "grade":
-        if not rec.get("quiz",{}).get("key_file") or rec.get("quiz",{}).get("graded_at"): sys.exit(lab(st, "succ_grade_usage"))
+        if not a.caller: sys.exit("grade requires --caller; rerun with --caller <handover lead or current lead>")
+        if any(x.get("session_id")==a.caller for x in rec.get("candidates",[])): sys.exit("candidate cannot run grade")
+        if a.caller not in {rec.get("lead_session"),(st.get("lead") or {}).get("session_id" )}:
+            sys.exit("grade caller must be this handover's lead or current lead")
+        if not rec.get("quiz",{}).get("key_file") or (rec.get("quiz",{}).get("graded_at") and rec.get("quiz",{}).get("tool_check")!="unverified"): sys.exit(lab(st, "succ_grade_usage"))
         if not a.answers or not rec.get("quiz",{}).get("key_file"): sys.exit(lab(st,"succ_grade_usage"))
         if a.candidate != rec["quiz"].get("candidate"):
             sys.exit(lab(st,"succ_candidate_required"))
-        answers=Path(a.answers).read_text(encoding="utf-8").splitlines(); items=json.loads(Path(rec["quiz"]["key_file"]).read_text(encoding="utf-8"))["items"]
-        rows=[]; score=0
+        try:
+            answers=Path(a.answers).read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            sys.exit(f"cannot read answers file {a.answers}: {exc.strerror or exc}")
+        items=json.loads(Path(rec["quiz"]["key_file"]).read_text(encoding="utf-8"))["items"]
+        rows=[]; score=0; objective_total=0; subjective_items=[]
         for i,item in enumerate(items):
             answer=_succ_normalize(answers[i]) if i<len(answers) else ""
+            if item.get("subjective"):
+                subjective_items.append((i,item,answers[i] if i<len(answers) else "")); continue
             keys=[k for k in item["keywords"] if k]
             correct=sum(_succ_hit(k,answer) for k in keys)*2>len(keys); score+=int(correct)
+            objective_total+=1
             rows.append(lab(st,"succ_grade_line",n=i+1,result=lab(st,"succ_grade_pass" if correct else "succ_grade_fail")))
-        passed=len(items)>=3 and len(items)-score<=len(items)//10  # 10 questions: one may be wrong; fewer questions: none may
-        rec["quiz"].update(score=score,passed=passed,graded_at=now(),candidate=a.candidate); rec.setdefault("steps",{})["grade"]=now(); rec["phase"]="graded" if passed else rec["phase"]
-        _succ_save(d,st,rec,"grade"); print("\n".join(rows)+"\n"+lab(st,"succ_final_grade",score=score,total=len(items),result=lab(st,"succ_check_pass" if passed else "succ_check_fail")) + ("\n"+lab(st,"succ_grade_short") if len(items)<3 else "")); return
+        subjective_status="主观题未判" if subjective_items and not os.environ.get("TW_GRADER_CMD") else "none"
+        if subjective_items and os.environ.get("TW_GRADER_CMD"):
+            try:
+                payload={"items":[x[1] for x in subjective_items],"answers":[x[2] for x in subjective_items]}
+                judged=subprocess.run(shlex.split(os.environ["TW_GRADER_CMD"]),input=json.dumps(payload,ensure_ascii=False),capture_output=True,text=True,timeout=120)
+                if judged.returncode==0:
+                    try:
+                        result=json.loads(judged.stdout); subscore=float(result.get("score",0)); maxscore=float(result.get("max",len(subjective_items)))
+                        subpass=bool(result.get("passed")) if "passed" in result else subscore>=maxscore*.7
+                    except ValueError:
+                        subscore=float(re.search(r"-?\d+(?:\.\d+)?",judged.stdout).group(0)); maxscore=float(len(subjective_items)); subpass=subscore>=maxscore*.7
+                    score+=int(subscore); objective_total+=int(maxscore); subjective_status=f"external score {subscore:g}/{maxscore:g}"; rows.append(f"Subjective: {subjective_status}")
+                else: subjective_status="主观题未判（grader command failed）"
+            except (OSError,ValueError,AttributeError,subprocess.TimeoutExpired): subjective_status="主观题未判（grader unavailable）"
+        cfg=a.config_dir or [str(Path.home()/".claude"),*map(str,Path.home().glob(".claude-*"))]
+        paths=[a.from_transcript] if a.from_transcript else _find_transcripts(a.candidate,cfg)
+        parsed=[_succ_transcript_rows(p,a.candidate,cfg) for p in paths]
+        transcript_rows=[row for group in parsed for row in group]
+        no_tools=_succ_zero_tool_window(transcript_rows,items[0]["question"] if items else "",answers)
+        tool_check="passed" if no_tools else "unverified"
+        score_pass=objective_total>=2 and objective_total-score<=objective_total//10
+        passed=score_pass and no_tools and bool(a.caller)
+        rec["quiz"].update(score=score,objective_total=objective_total,passed=passed,graded_at=now(),candidate=a.candidate,subjective=subjective_status,zero_tool_calls=no_tools,tool_check=tool_check)
+        if passed:
+            rec.setdefault("steps",{})["grade"]=now(); rec["phase"]="graded"
+        else:
+            rec.setdefault("steps",{}).pop("grade",None); rec["phase"]="quiz"
+        _succ_save(d,st,rec,"grade",record_step=passed); print("\n".join(rows)+"\n"+lab(st,"succ_final_grade",score=score,total=objective_total,result=lab(st,"succ_check_pass" if score_pass else "succ_check_fail"))+f"\nZero tool calls: {tool_check}\n{subjective_status}" + ("\n"+lab(st,"succ_grade_short") if objective_total<3 else ""))
+        if not score_pass or not passed: sys.exit(1)
+        return
     if a.action == "seat":
         if rec.get("phase")=="aborted": sys.exit(lab(st,"succ_aborted_seat"))
         sid=(a.session or "").strip()
-        candidate = next((x for x in rec.get("candidates", []) if x.get("session_id") == sid), {})
         if rec.get("kind") == "lead" and _screen_failed(st, sid): sys.exit(lab(st, "critical_screen_block"))
         if rec.get("kind") == "thread" and (st.get("threads",{}).get(rec.get("seat")) or {}).get("critical") and _screen_failed(st, sid): sys.exit(lab(st, "critical_screen_block"))
+        shared_missing=_succ_handover_gate(st,hid,rec.get("seat"),sid)
+        if shared_missing: sys.exit(lab(st,"succ_seat_missing",steps=", ".join(shared_missing)))
+        candidate = next((x for x in rec.get("candidates", []) if x.get("session_id") == sid), {})
         missing=[name for name,ok in (("candidate",any(x["session_id"]==sid for x in rec.get("candidates",[]))),("freeze",bool(rec.get("freeze"))),
                  ("pack",bool(rec.get("pack_dir"))),("verify",bool((rec.get("verify") or {}).get("passed"))),("quiz",bool((rec.get("quiz") or {}).get("passed")))) if not ok]
         if (rec.get("verify") or {}).get("candidate") != sid: missing.append("verify")
@@ -9492,6 +10149,8 @@ def cmd_succ(a):
         if not (freeze_at and pack_at and verify_at and freeze_at < pack_at < verify_at): missing.append("verify")
         if not (pack_at and quiz_at and grade_at and pack_at < quiz_at < grade_at): missing.append("quiz")
         if missing: sys.exit(lab(st,"succ_seat_missing",steps=", ".join(dict.fromkeys(missing))))
+        _pack_missing=_succ_pack_gate(rec.get("pack_dir") or "")
+        if _pack_missing: sys.exit("退回重做 / return for rework: "+", ".join(_pack_missing))
         if rec.get("kind") == "lead":
             screen = st.get("screens", {}).get(candidate.get("screen"), {})
             if _screen_failed(st, sid): sys.exit(lab(st, "critical_screen_block"))
@@ -9506,6 +10165,7 @@ def cmd_succ(a):
             rec["ack_needed"] = sorted(n for n,t in st.get("threads",{}).items() if t.get("session_id") and t.get("status") != "archived")
             rec.update(successor=sid,phase="seated"); _succ_save(d,st,rec,"seat")
             card=lab(st,"succ_seat_card",sid=sid,screen=_verdict_word(st,screen.get('verdict')),score=rec['quiz'].get('score'),total=rec['quiz'].get('question_count'),threads=len(rec['ack_needed']),requests=sum(1 for x in st.get('requests',{}).values() if x.get('status') in ('open','dispatched','held')),questions=sum(1 for x in st.get('questions',[]) if not x.get('answered_at')))
+            checks=(rec.get("verify") or {}).get("checks",{}); card+="\n"+lab(st,"succ_card_acceptance",accepted=sum(bool(v) for v in checks.values()),checks=len(checks))
             card += "\n" + model_lab(st, "takeover_hint")
             if a.json: print(json.dumps({"handover":rec,"thread":None,"lead":st["lead"]},ensure_ascii=False))
             else: print(card)
@@ -9514,8 +10174,10 @@ def cmd_succ(a):
         thread=argparse.Namespace(action="reseat",name=rec["seat"],session=sid,kind=None,cloud_reason=None,branch=None,status=None,reason=f"{hid}: {rec['reason']}",critical=None,waiting_for=None,stuck_on=None,summary=None,mode=None,model=None,owns=None,focus=None,from_status=False,disconnected=False,roster_sent=False,handover=hid)
         capture=io.StringIO()
         with contextlib.redirect_stdout(capture): cmd_thread(thread)
-        st=load(d); rec=st["handovers"][hid]; rec.update(successor=sid,phase="seated"); _succ_save(d,st,rec,"seat")
-        card=lab(st,"succ_thread_card",seat=rec['seat'],old=rec.get('old_session') or '-',sid=sid)
+        st=load(d); rec=st["handovers"][hid]
+        if rec.get("phase")!="seated": rec.update(successor=sid,phase="seated"); _succ_save(d,st,rec,"seat")
+        screen=st.get("screens",{}).get(candidate.get("screen"),{}); checks=(rec.get("verify") or {}).get("checks",{})
+        card=lab(st,"succ_thread_card",seat=rec['seat'],old=rec.get('old_session') or '-',sid=sid)+"\n"+lab(st,"succ_card_scores",screen=screen.get("score","-"),screen_total=screen.get("max","-"),score=rec.get("quiz",{}).get("score","-"),total=rec.get("quiz",{}).get("question_count","-"),accepted=sum(bool(x) for x in checks.values()),checks=len(checks))
         if a.json: print(json.dumps({"handover":rec,"thread":st.get("threads",{}).get(rec["seat"]),"lead":st.get("lead")},ensure_ascii=False))
         else: print(card)
         return
@@ -9529,6 +10191,102 @@ def cmd_succ(a):
         ar=st.get("archive",{}).get(rec.get("old_session"),{})
         if not ar.get("archived_at") or ar.get("check")=="failed": sys.exit(lab(st,"succ_retire_needs_archive"))
         rec["phase"]="retired"; _succ_save(d,st,rec,"retire"); return
+    if a.action == "retire-check":
+        if rec.get("phase")!="seated" or rec.get("successor")!=(st.get("threads",{}).get(rec.get("seat")) or {}).get("session_id"):
+            sys.exit("retire-check requires accepted seated successor")
+        if not a.caller: sys.exit("retire-check requires --caller")
+        if a.caller!=(st.get("lead") or {}).get("session_id"):
+            sys.exit("retire-check caller must be the current lead")
+        if a.caller==rec.get("old_session"):
+            sys.exit("old session cannot sign its own archive ticket")
+        if a.caller==rec.get("successor"):
+            sys.exit("successor cannot sign its own archive ticket")
+        thread=st.get("threads",{}).get(rec.get("seat"),{}); current=_succ_git_snapshot(st,thread.get("branch"),thread.get("worktree"))
+        old_paths=list(a.transcript or [])
+        if not old_paths: sys.exit("retire-check needs the old session transcript to check A7")
+        cfg=a.config_dir or [str(Path.home()/".claude"),*map(str,Path.home().glob(".claude-*"))]
+        old_parsed=[_succ_transcript_rows(path,rec.get("old_session"),cfg) for path in old_paths]
+        if not old_parsed or any(not rows for rows in old_parsed): sys.exit("retire-check transcript contains zero readable records or belongs to another session; unverified")
+        old_rows=[row for group in old_parsed for row in group]
+        caller_paths=_primary_transcript_paths([a.from_transcript] if a.from_transcript else _find_transcripts(a.caller,cfg))
+        caller_parsed=[_succ_transcript_rows(path,a.caller,cfg) for path in caller_paths]
+        caller_missing=not caller_parsed or any(not rows for rows in caller_parsed)
+        caller_rows=[row for group in caller_parsed for row in group] if not caller_missing else []
+        freeze_at=_when((rec.get("freeze") or {}).get("at"))
+        post_freeze={"human":[],"peer_forwarded":[],"peer_pending":[]}; writes=[]; bash_writes=[]; missing_timestamps=[]
+        for row in old_rows:
+            if row.get("type") not in ("user","assistant","peer"):
+                continue
+            blocks=_row_blocks(row)
+            if blocks is None: sys.exit("retire-check transcript contains non-message content fields; unverified")
+            raw_stamp=row.get("timestamp") or row.get("created_at") or row.get("createdAt") or row.get("time")
+            stamp=_when(raw_stamp)
+            if not stamp:
+                missing_timestamps.append(row.get("uuid") or row.get("type") or "row")
+                continue
+            if not freeze_at or stamp<=freeze_at: continue
+            role=_row_role(row)
+            when=row.get("timestamp") or row.get("created_at") or row.get("time") or "unknown"
+            if role == "user": post_freeze["human"].append(when)
+            if role == "peer":
+                _sender,peer_text=_peer_message(_row_text(row))
+                needle=" ".join(peer_text.split())
+                forwarded=bool(needle and any(
+                    isinstance(b,dict) and b.get("type")=="tool_use" and "send_message" in str(b.get("name")) and
+                    (b.get("input") or {}).get("session_id")==rec.get("successor") and
+                    needle in " ".join(str((b.get("input") or {}).get("message","")).split())
+                    for caller_row in caller_rows for b in (_row_blocks(caller_row) or [])))
+                post_freeze["peer_forwarded" if forwarded else "peer_pending"].append(when)
+            if any(isinstance(b,dict) and b.get("type")=="tool_use" and b.get("name") in ("Edit","Write","NotebookEdit") for b in blocks):
+                writes.append(row.get("timestamp") or row.get("created_at") or row.get("time") or "unknown")
+            for block in blocks:
+                if not isinstance(block,dict) or block.get("type")!="tool_use" or block.get("name")!="Bash": continue
+                command=str((block.get("input") or {}).get("command") or "")
+                patterns=(r"\bgit\s+(?:commit|push)\b",r">>?",r"\btee\b",r"\bsed\s+-[^\n]*i",r"\b(?:mv|cp|rm)\b")
+                if any(re.search(pattern,command) for pattern in patterns): bash_writes.append(command)
+        if missing_timestamps: sys.exit("retire-check failed A7: transcript rows lack timestamps; unverified: "+", ".join(map(str,missing_timestamps[:5])))
+        if post_freeze["human"] or post_freeze["peer_pending"] or writes or bash_writes:
+            sys.exit("retire-check failed A7: post-freeze messages remain; human="+
+                     (", ".join(map(str,post_freeze["human"])) or "none")+"; peer_forwarded="+
+                     (", ".join(map(str,post_freeze["peer_forwarded"])) or "none")+"; peer_pending="+
+                     (", ".join(map(str,post_freeze["peer_pending"])) or "none")+"; writes="+
+                     (", ".join(map(str,writes)) or "none")+"; Bash writes="+
+                     (" | ".join(bash_writes) or "none"))
+        if caller_missing: sys.exit("retire-check caller transcript contains zero readable records or belongs to another session; unverified")
+        caller_results=_succ_get_session_results(caller_rows)
+        succ=caller_results.get(rec.get("successor")) or {}
+        seat_at=_when((rec.get("steps") or {}).get("seat")); result_at=_when(succ.get("_record_at"))
+        if not seat_at or not result_at or result_at<=seat_at:
+            sys.exit("retire-check failed: successor get_session record is not newer than seat step; unverified")
+        if not (succ.get("connected") is True or str(succ.get("status") or "").lower()=="connected") or str(succ.get("status_bucket") or "").lower()=="failed":
+            sys.exit("retire-check failed: caller record does not show connected successor")
+        expected_tag=f"teamwork-thread:{rec.get('seat')}"; tags=succ.get("tags",[])
+        if succ.get("title")!=thread.get("title") or expected_tag not in tags:
+            sys.exit("retire-check failed A10: successor title or seat tag does not match")
+        ticket={"id":hashlib.sha256(f"{hid}:{a.caller}:{now()}".encode()).hexdigest()[:16],"session_id":rec.get("old_session"),"issuer":a.caller,"expires_at":(_when(now())+dt.timedelta(minutes=15)).isoformat(timespec="seconds"),"used":False,
+                "a7":{"human":post_freeze["human"],"peer_forwarded":post_freeze["peer_forwarded"],"peer_pending":post_freeze["peer_pending"],"writes":writes}}
+        rec["retire_ticket"]=ticket; _succ_save(d,st,rec,"retire-check"); print(json.dumps(ticket,ensure_ascii=False)); return
+    if a.action == "archived":
+        if not a.caller: sys.exit("archived requires --caller")
+        ticket=rec.get("retire_ticket") or {}
+        if not ticket.get("used") or ticket.get("session_id")!=rec.get("old_session") or ticket.get("issuer")!=a.caller:
+            sys.exit("archived requires the one-use release ticket to be consumed by its issuer")
+        cfg=a.config_dir or [str(Path.home()/".claude"),*map(str,Path.home().glob(".claude-*"))]
+        paths=_primary_transcript_paths([a.from_transcript] if a.from_transcript else _find_transcripts(a.caller,cfg))
+        session_results=_succ_get_session_results([row for path in paths for row in _succ_transcript_rows(path)])
+        old_result=session_results.get(rec.get("old_session")) or {}
+        if not (old_result.get("archived") or str(old_result.get("status") or old_result.get("session_status") or "").lower()=="archived"):
+            sys.exit("get_session record does not confirm the old session is archived")
+        active_ids={x.get("session_id") for x in st.get("threads",{}).values() if x.get("session_id")}
+        active_ids.add((st.get("lead") or {}).get("session_id"))
+        active_ids.add(rec.get("successor"))
+        missing_status=sorted(sid for sid in active_ids if sid and sid!=rec.get("old_session") and sid not in session_results)
+        if missing_status: sys.exit("get_session records missing for active sessions: "+", ".join(missing_status))
+        if any((session_results.get(sid) or {}).get("archived") or str((session_results.get(sid) or {}).get("status") or "").lower()=="archived" for sid in active_ids if sid and sid!=rec.get("old_session")):
+            sys.exit("get_session record shows an active seat or successor archived")
+        ar=st.setdefault("archive",{}).setdefault(rec.get("old_session"),{})
+        ar.update(archived_at=now(),seat=rec.get("seat"),category="replaced",result="archive-guard release ticket")
+        rec["retire_ticket"]=None; rec["phase"]="retired"; _succ_save(d,st,rec,"archived"); print("archived "+str(rec.get("old_session"))); return
 
 
 def cmd_spawn_refused(a):
@@ -11143,8 +11901,10 @@ def cmd_bash_guard(a):
             cmd = a.command
         else:
             ev = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
-            if not isinstance(ev, dict) or ev.get("tool_name") not in ("Bash", None):
-                return
+            if not isinstance(ev, dict): return
+            if ev.get("tool_name") == "mcp__claude-code-remote__archive_session":
+                return cmd_archive_guard(a, ev)
+            if ev.get("tool_name") not in ("Bash", None): return
             ti = ev.get("tool_input")
             cmd = ti.get("command") if isinstance(ti, dict) else None
         if not isinstance(cmd, str):
@@ -11168,6 +11928,126 @@ def cmd_bash_guard(a):
     if hit:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": hit[0],
                                                  "permissionDecisionReason": (f"teamwork: {lab(policy_state or {'prefs': {}}, 'sensitive_guard')}" if hit[1] == "sensitive" else f"teamwork: big decision ({hit[1]})")}}))
+
+
+def _archive_guard_log(exc):
+    try:
+        path=Path(os.environ.get("TW_GUARD_LOG") or (Path.home()/".cache/teamwork/guard-errors.jsonl"))
+        path.parent.mkdir(parents=True,exist_ok=True)
+        with path.open("a",encoding="utf-8") as f:
+            f.write(json.dumps({"at":now(),"type":type(exc).__name__,"message":str(exc)[:200],"guard":"archive-guard"},ensure_ascii=False)+"\n")
+    except Exception: pass
+
+
+def _archive_guard_projects(cwd):
+    root=Path(cwd)
+    if not root.is_dir(): return []
+    found=set()
+    current=root
+    while True:
+        state=current/".teamwork"/"state.json"
+        if state.is_file(): found.add(state.parent)
+        if current.parent.name.endswith("-worktrees"):
+            owner=current.parent.parent/current.parent.name[:-len("-worktrees")]
+            if (owner/".teamwork"/"state.json").is_file(): found.add(owner/".teamwork")
+        if current.parent==current: break
+        current=current.parent
+    for pattern in ("*/.teamwork/state.json","*/*/.teamwork/state.json"):
+        found.update(p.parent for p in root.glob(pattern) if p.is_file())
+    return sorted(found)
+
+
+def _archive_guard_caller(local_id):
+    if not local_id: return None
+    dirs=[]
+    if os.environ.get("CLAUDE_CONFIG_DIR"): dirs.append(Path(os.environ["CLAUDE_CONFIG_DIR"]))
+    dirs += [Path.home()/".claude",*Path.home().glob(".claude-*")]
+    return _succ_bridge_remote(str(local_id).strip(),dirs)
+
+
+def cmd_archive_guard(a, event=None):
+    """Archive-session PreToolUse hook. Project-local errors fail closed."""
+    target=None; printed=False; unreadable=False; teamwork_found=False
+    try:
+        if event is None: event=json.loads(sys.stdin.buffer.read().decode("utf-8","replace") or "{}")
+        if not isinstance(event,dict): return
+        tool=event.get("tool_input") if isinstance(event.get("tool_input"),dict) else {}
+        target=str(tool.get("session_id") or tool.get("sessionId") or tool.get("id") or "").strip()
+        local=str(tool.get("caller_session_id") or tool.get("local_session_id") or event.get("session_id") or "").strip()
+        caller=_archive_guard_caller(local)
+        states=[]
+        projects=_archive_guard_projects(event.get("cwd") or os.getcwd())
+        teamwork_found=bool(projects)
+        if caller is _BRIDGE_UNVERIFIED and target and teamwork_found:
+            print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
+                              "permissionDecisionReason":"teamwork archive-guard: caller session mapping is unverified"}}))
+            printed=True
+            return
+        if not teamwork_found: return
+        for team in projects:
+            try:
+                st=load(team)
+                if not isinstance(st.get("lead"),dict) or not isinstance(st.get("threads"),dict):
+                    raise ValueError("state.json missing lead/threads structure")
+                states.append((team,st))
+            except (OSError,ValueError,UnicodeError,TypeError) as exc:
+                _archive_guard_log(exc)
+                unreadable=True
+        if unreadable:
+            print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
+                              "permissionDecisionReason":"teamwork 看板读不出来/处理出错，先修好 / board unreadable or guard error"}},ensure_ascii=False))
+            printed=True
+            return
+        deny={}
+        valid_tickets=[]
+        for team,st in states:
+            lead=str((st.get("lead") or {}).get("session_id") or "").strip()
+            if lead: deny.setdefault(lead,"lead / lead")
+            for history in (st.get("lead") or {}).get("sessions",[]):
+                if isinstance(history,dict):
+                    sid=str(history.get("session_id") or "").strip()
+                    if sid: deny.setdefault(sid,"lead history / lead history")
+            for seat,thread in st.get("threads",{}).items():
+                if isinstance(thread,dict) and str(thread.get("session_id") or "").strip() and thread.get("status") not in ("archived","resolved","planned"):
+                    sid=str(thread["session_id"]).strip()
+                    archive=st.get("archive",{}).get(sid,{})
+                    if archive.get("verified_at") and not archive.get("archived_at") and archive.get("check")!="failed":
+                        continue
+                    deny.setdefault(sid,f"在座会话（{seat}）/ active seat session ({seat})")
+            for ho in st.get("handovers",{}).values():
+                if ho.get("phase") in ("aborted","retired"): continue
+                for cand in ho.get("candidates",[]):
+                    if cand.get("void"): continue
+                    sid=str(cand.get("session_id") or "").strip()
+                    if sid: deny.setdefault(sid,"候选会话 / candidate session")
+                successor=str(ho.get("successor") or "").strip()
+                if successor: deny.setdefault(successor,"继任会话 / successor session")
+                archive=st.get("archive",{}).get(ho.get("old_session"),{})
+                if archive.get("verified_at") and not archive.get("archived_at") and archive.get("check")!="failed":
+                    continue
+                ticket=ho.get("retire_ticket")
+                if isinstance(ticket,dict) and not ticket.get("used") and ticket.get("session_id"):
+                    expiry=_when(ticket.get("expires_at"))
+                    if expiry and expiry>=_when(now()): valid_tickets.append((team,st,ho,ticket))
+            if caller: deny[str(caller).strip()]="调用者自己 / caller session itself"
+        if target in deny:
+            decision="deny"
+            reason=f"teamwork archive-guard: {deny[target]}"
+        else:
+            issued=next((x for x in valid_tickets if x[3].get("session_id")==target and caller and x[3].get("issuer")==caller),None)
+            if not issued: return
+            team,st,ho,ticket=issued
+            ticket.update(used=True,used_at=now(),used_by=local,used_by_session=caller)
+            save(team,st,{"ev":"succ-retire-ticket-used","handover":ho.get("id"),"ticket":ticket.get("id")})
+            decision="allow"
+            reason="teamwork archive-guard: 已签发的退休许可 / valid retirement ticket"
+        print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":decision,"permissionDecisionReason":reason}})); printed=True
+    except BaseException as exc:  # noqa: BLE001 - contain project-local failures and fail closed
+        _archive_guard_log(exc)
+        if not printed and teamwork_found:
+            print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
+                              "permissionDecisionReason":"teamwork 看板读不出来/处理出错，先修好 / board unreadable or guard error"}},ensure_ascii=False))
+        return
 
 
 def main():
@@ -11228,12 +12108,14 @@ def main():
     x.set_defaults(f=cmd_lead)
 
     x = s.add_parser("succ", help="record, verify and complete a session handover")
-    x.add_argument("action", choices=["start","candidate","screened","freeze","pack","verify","quiz","grade","seat","abort","status","retired","ping","ack","moved","window","reconciled"])
+    x.add_argument("action", choices=["start","candidate","screened","freeze","pack","verify","quiz","grade","seat","abort","status","retired","retire-check","archived","ping","ack","moved","window","reconciled"])
     x.add_argument("handover", nargs="?"); x.add_argument("value", nargs="?")
     x.add_argument("extra", nargs="?"); x.add_argument("--screen")
     x.add_argument("--reason"); x.add_argument("--stopped"); x.add_argument("--receipt"); x.add_argument("--answers"); x.add_argument("--candidate")
-    x.add_argument("--transcript", action="append"); x.add_argument("--config-dir", action="append"); x.add_argument("--user-said")
-    x.add_argument("--triggers"); x.add_argument("--subscriptions"); x.add_argument("--candidate-seen")
+    x.add_argument("--transcript", action="append"); x.add_argument("--from-transcript"); x.add_argument("--config-dir", action="append"); x.add_argument("--user-said")
+    x.add_argument("--caller"); x.add_argument("--unreachable",action="store_true"); x.add_argument("--accept",dest="accept_receipt")
+    x.add_argument("--triggers",nargs="?",const=""); x.add_argument("--subscriptions"); x.add_argument("--candidate-seen")
+    x.add_argument("--plan",action="store_true"); x.add_argument("--cleared",action="store_true"); x.add_argument("--discard",action="store_true")
     x.add_argument("--thread"); x.add_argument("--trigger"); x.add_argument("--subscription"); x.add_argument("--none", action="store_true"); x.add_argument("--why")
     x.add_argument("--count", type=int); x.add_argument("--missing")
     x.add_argument("--self", action="store_true"); x.add_argument("--json", action="store_true")
@@ -11259,6 +12141,7 @@ def main():
     x.add_argument("--from-status", action="store_true",
                    help="this update comes from a report the thread sent (tw-status block or message): resets stuck timer")
     x.add_argument("--disconnected", action="store_true", help="mark the current session disconnected; status updates clear it")
+    x.add_argument("--handover", help="accepted HO<n> required to reseat during a recorded successor handover")
     cg = x.add_mutually_exclusive_group(); cg.add_argument("--critical", dest="critical", action="store_true"); cg.add_argument("--not-critical", dest="critical", action="store_false"); x.set_defaults(critical=None)
     x.set_defaults(f=cmd_thread)
 
@@ -11588,6 +12471,7 @@ def main():
                      "decisions (removals, history rewrites, discards, shutdowns), deny wiping / or ~, else silent")
     x.add_argument("--command", help="check this command line instead of reading the hook event on stdin")
     x.set_defaults(f=cmd_bash_guard)
+    s.add_parser("archive-guard", help=argparse.SUPPRESS).set_defaults(f=lambda a: (print("tw.py archive-guard is deprecated; use bash-guard", file=sys.stderr), cmd_archive_guard(a))[1])
     x = s.add_parser("guard", help="fail if private words/paths (.teamwork/PRIVATE.md) are in commits or files")
     x.add_argument("--repo", help="git checkout to scan (default: current folder)")
     x.add_argument("--base", help="scan commits base..ref (default: origin/<base branch>)")

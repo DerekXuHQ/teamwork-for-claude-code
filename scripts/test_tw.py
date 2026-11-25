@@ -7804,8 +7804,12 @@ class SeatSwap(TwCase):
                           {"session_id": "s2", "from": "2025-02-01T00:00:00-05:00", "to": today, "reason": "HO2: change"},
                           {"session_id": "s-new", "from": today}]
         (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
-        sig = json.loads(self.tw("signals", "api", "--json").stdout)
+        transcript=self.dir/"relay-signals.jsonl"
+        transcript.write_text(json.dumps({"type":"user","timestamp":today,"message":{"content":"hello"}}),encoding="utf-8")
+        sig = json.loads(self.tw("signals", "api", "--transcript", str(transcript), "--json").stdout)
         self.assertEqual(sig["relay_count_today"], 2)
+        bare = json.loads(self.tw("signals", "api", "--json").stdout)  # no record: still JSON, ledger facts, no colour
+        self.assertEqual((bare["relay_count_today"], bare["color"]), (2, None))
         rows = json.loads(self.tw("archive", "candidates", "--json").stdout)
         self.assertEqual(next(x for x in rows if x["session_id"] == "s1")["reason"], "HO1 换下的会话，新会话已汇报")
 
@@ -8369,11 +8373,13 @@ class ScreenShadow2(TwCase):
         screens["screens"]["SC9"] = {"session_id":" session_next ", "verdict":"fail"}
         self.assertTrue(mod._screen_failed(screens, "session_next"))
         self.tw("succ", "abort", "HO1", "--reason", "end")
+        transcript=self.dir/"signal-labels.jsonl"
+        transcript.write_text(json.dumps({"type":"user","timestamp":dt.datetime.now().astimezone().isoformat(),"message":{"content":"hello"}}),encoding="utf-8")
         self.tw("prefs", "--set", "language=en")
-        english = json.loads(self.tw("signals", "lead", "--json").stdout)
+        english = json.loads(self.tw("signals", "lead", "--transcript", str(transcript), "--json").stdout)
         self.assertEqual(english["color_label"], "green")
         self.tw("prefs", "--set", "language=zh")
-        chinese = json.loads(self.tw("signals", "lead", "--json").stdout)
+        chinese = json.loads(self.tw("signals", "lead", "--transcript", str(transcript), "--json").stdout)
         self.assertEqual(chinese["color_label"], "绿")
 
 
@@ -8471,6 +8477,692 @@ class LeadBatch5(TwCase):
         self.tw("prefs", "--set", "language=zh")
         self.tw("notice", "add", "--kind", "needs-user", "--note", "确认登录设备")
         self.assertIn("这一步要你本人来点：确认登录设备", self.tw("board").stdout)
+
+
+class T72ScreenAutomationSignalsStats(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.keys = self.dir.parent / (self.dir.name + "-keys")
+        self.keys.mkdir()
+        self.env["TW_KEYS_DIR"] = str(self.keys)
+        subprocess.run(["git", "init", "-q"], cwd=self.dir, check=True)
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("prefs", "--set", "screen_autograde=false")
+
+    def test_p5_veto_needs_a_second_run_of_the_grader(self):
+        """T72 field run: the same reply graded P5=1 then P5=0 (pass, then fail by veto). A veto is final for the
+        critical seats, so it holds only when a second run agrees; both runs are kept for the stats card."""
+        self.tw("thread","add","ui","--session","session_test_veto")
+        sid=json.loads(self.tw("screen","ask","ui","--session","session_test_veto","--json").stdout)["screen"]
+        answers=self.dir/"veto-answer.txt"; answers.write_text("逐题作答：先停下来说明报错。",encoding="utf-8")
+        flip=self.dir/"flip"; line0="P1=2 P2=2 P3=2 P4=2 P5=0 P6=2"; line1="P1=2 P2=2 P3=2 P4=2 P5=1 P6=2"
+        self.env["TW_GRADER_CMD"]=f'if [ -f "{flip}" ]; then echo "{line1}"; else touch "{flip}"; echo "{line0}"; fi'
+        self.tw("screen","grade",sid,"--answers",str(answers))
+        rec=self.state()["screens"][sid]
+        self.assertEqual((rec["scores"]["P5"],rec["veto"],rec["verdict"]),(1,False,"pass"))
+        self.assertEqual([r["P5"] for r in rec["grader_runs"]],[0,1])
+        sid2=json.loads(self.tw("screen","ask","ui","--session","session_test_veto","--retake","--json").stdout)["screen"]
+        self.env["TW_GRADER_CMD"]=f'echo "{line0}"'
+        self.tw("screen","grade",sid2,"--answers",str(answers))
+        rec=self.state()["screens"][sid2]
+        self.assertEqual((rec["veto"],rec["verdict"]),(True,"fail"))  # both runs say 0: the veto holds
+
+    def test_00_dispatch_ready_auto_grades_and_board_shows_language(self):
+        self.tw("thread", "add", "ui", "--session", "session_test1")
+        self.tw("plan", "approve", "--user-said", "approved")
+        self.tw("task", "add", "T1", "--title", "做页面", "--owner", "ui", "--accept", "页面完成")
+        dispatched = self.tw("task-msg", "T1", "--dispatch", "--json")
+        payload = json.loads(dispatched.stdout)
+        self.assertEqual(payload["screen"]["screen"], "SC1")
+        self.assertTrue(payload["message"].startswith("[screen SC1]"))
+        self.assertIn("先答体检，答完再看下面的任务", payload["message"])
+        self.assertEqual(self.state()["screens"]["SC1"]["status"], "asked")
+        self.env["TW_GRADER_CMD"] = "cat >/dev/null; printf 'P1=2 P2=2 P3=2 P4=2 P5=2 P6=2\\n'"
+        config = self.dir / "grader-config"
+        project = config / "projects" / "test-project"
+        project.mkdir(parents=True)
+        self.env["CLAUDE_CONFIG_DIR"] = str(config)
+        (config / "bridge-transcript-cse_test1.jsonl").write_text(json.dumps({"session_id":"local1"})+"\n",encoding="utf-8")
+        transcript = project / "local1.jsonl"
+        transcript.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in [
+            {"type":"user","timestamp":dt.datetime.now().astimezone().isoformat(),"message":{"content":"[screen SC1]"}},
+            {"type":"assistant","timestamp":dt.datetime.now().astimezone().isoformat(),"message":{"content":[{"type":"text","text":"我会先查任务清单，再逐项回答中文问题。"},{"type":"tool_use","name":"git status","input":{"short":True}},{"type":"tool_result","content":"clean"}]}}
+        ]) + "\n", encoding="utf-8")
+        self.tw("prefs", "--set", "screen_autograde=true")
+        ready=self.tw("ready")
+        self.assertIn("已在后台给 1 个体检打分",ready.stderr)
+        deadline=time.time()+8
+        while time.time()<deadline and self.state()["screens"]["SC1"].get("status")!="graded": time.sleep(.05)
+        graded=self.state()["screens"]["SC1"]
+        self.assertEqual(graded["grader"], "cmd")
+        self.assertEqual(graded["answer_source"], "session")
+        self.assertEqual(graded["lang_penalty"], 0)
+        self.assertIn("体检：过（12/12）", self.tw("board").stdout)
+
+    def test_events_rows_and_tool_evidence_extraction(self):
+        data = {"data": [{"kind": "assistant", "data": {"assistant": {"message": {
+            "role": "assistant", "content": [{"type": "text", "text": "检查结果"},
+                {"type": "tool_use", "name": "read", "input": {"path": "x"}},
+                {"type": "tool_result", "content": "ok"}]}}}}]}
+        rows = __import__("tw")._rows_from_events(data)
+        self.assertEqual(len(rows), 1)
+        answer = __import__("tw")._extract_screen_answer([{"type":"user","message":{"content":"[screen SC1]"}},*rows],"SC1")
+        self.assertIn("tool_use read", answer)
+        self.assertIn("tool_result", answer)
+
+    def test_origin_controls_user_row_role(self):
+        tw=__import__("tw")
+        def row(text, origin_marker):
+            return {"type":"user", **origin_marker, "message":{"role":"user","content":text}}
+        self.assertEqual(tw._row_role(row("human words", {"origin":{"kind":"human"}})),"user")
+        self.assertEqual(tw._row_role(row("<agent-message>peer", {"origin":{"kind":"human"}})),"peer")
+        self.assertEqual(tw._row_role(row("[tw:T] TASK", {"origin":{"kind":"task-notification"}})),"peer")
+        self.assertEqual(tw._row_role(row("report", {"origin":{"body":"report"}})),"other")
+        self.assertEqual(tw._row_role(row("[tw:T] TASK", {})),"peer")
+        self.assertEqual(tw._row_role(row("[Request interrupted by user]", {"origin":{"kind":"human"}})),"other")
+        self.assertEqual(tw._row_role(row("<task-notification>done", {"origin":{"kind":"task-notification"}})),"other")
+
+    def test_tool_rows_unwraps_platform_tool_shapes(self):
+        tw=__import__("tw"); rows=[{"id":"s1"}]
+        shapes=[
+            ({"ccr":{"data":rows}},("data",)),
+            ({"data":rows},("data",)),
+            ([{"type":"text","text":json.dumps({"data":rows})}],("data",)),
+            (rows,("data",)),
+            ({"sessions":rows},("sessions",)),
+            ({"a":{"b":{"c":{"data":rows}}}},("data",)),
+        ]
+        for raw, keys in shapes: self.assertEqual(tw._tool_rows(raw,keys),rows)
+        self.assertIsNone(tw._tool_rows({"unknown":{"items":rows}}))
+
+    def test_save_and_patch_state_share_save_lock_helper(self):
+        from unittest.mock import patch
+        tw=__import__("tw"); ledger=self.dir/".teamwork"
+        real=tw._with_save_lock
+        with patch.object(tw,"_with_save_lock",wraps=real) as lock:
+            tw.save(ledger,tw.load(ledger),{"ev":"lock-test"})
+            self.assertTrue(tw._patch_state(ledger,"lock_test",lambda current,latest:True,{"ev":"lock-test"}))
+        self.assertEqual(lock.call_count,2)
+
+    def test_grade_and_signals_accept_events_json(self):
+        self.tw("thread", "add", "api", "--session", "session_test_events")
+        self.tw("screen", "ask", "api", "--session", "session_test_events")
+        events={"data":[
+            {"kind":"user","data":{"user":{"message":{"role":"user","content":"[screen SC1]"}}}},
+            {"kind":"assistant","data":{"assistant":{"message":{"role":"assistant","content":[{"type":"text","text":"我先核对项目资料，再逐题回答。"},{"type":"tool_use","name":"read","input":{"file":"README"}},{"type":"tool_result","content":"checked"}]}}}}
+        ]}
+        event_file=self.dir/"events.json"; event_file.write_text(json.dumps(events,ensure_ascii=False),encoding="utf-8")
+        self.env["TW_GRADER_CMD"]="cat >/dev/null; printf 'P1=2 P2=2 P3=2 P4=2 P5=2 P6=2\\n'"
+        graded=json.loads(self.tw("screen","grade","SC1","--events",str(event_file),"--json").stdout)
+        self.assertEqual(graded["answer_source"],"events")
+        signals=json.loads(self.tw("signals","api","--events",str(event_file),"--json").stdout)
+        self.assertEqual(signals["transcript"],True)
+
+    def test_missing_answer_does_not_mutate_and_sweep_lists_pending(self):
+        self.tw("thread", "add", "api", "--session", "session_test2")
+        self.tw("screen", "ask", "api", "--session", "session_test2")
+        before = self.state()["screens"]["SC1"].copy()
+        self.assertNotEqual(self.tw("screen", "grade", "SC1", ok=False).returncode, 0)
+        self.assertEqual(self.state()["screens"]["SC1"], before)
+        result = json.loads(self.tw("screen", "sweep", "--json").stdout)
+        self.assertEqual(result["cloud"], [{"screen":"SC1","seat":"api"}])
+        self.assertEqual(self.tw("ready").stderr,"")
+
+    def test_language_penalty_and_stats_read_only(self):
+        self.tw("thread", "add", "api", "--session", "session_test3")
+        self.tw("screen", "ask", "api", "--session", "session_test3")
+        answer_file = self.dir / "answers.txt"
+        answer_file.write_text("I checked the files and the current branch before answering every question.",encoding="utf-8")
+        scores=",".join(f"P{i}=2" for i in range(1,7))
+        self.tw("screen","record","SC1","--scores",scores,"--answers",str(answer_file))
+        rec=self.state()["screens"]["SC1"]
+        self.assertEqual(rec["lang_penalty"],2)
+        self.assertIn("语言 -2",self.tw("board").stdout)
+        before=(self.dir/".teamwork"/"state.json").read_text()
+        replay=self.dir/"replay"; replay.mkdir(); (replay/"sample.jsonl").write_text(json.dumps({"type":"user","message":{"content":"all good"}}),encoding="utf-8")
+        out=self.dir/"stats-card.txt"
+        card=self.tw("screen","stats","--replay",str(replay),"--out",str(out)).stdout
+        self.assertIn("样本不足",card)
+        self.assertIn("sample.jsonl",out.read_text(encoding="utf-8"))
+        self.assertEqual((self.dir/".teamwork"/"state.json").read_text(),before)
+
+    def test_compaction_creates_half_quiz_and_yellow_retake(self):
+        self.tw("thread","add","api","--session","session_test_compact")
+        events=self.dir/"compact.jsonl"
+        events.write_text(json.dumps({"type":"summary","isCompactSummary":True,"timestamp":dt.datetime.now().astimezone().isoformat(),"message":{"content":"summary"}}),encoding="utf-8")
+        empty=self.tw("signals","api","--transcript",str(events)).stdout
+        self.assertIn("还没有可出题",empty)
+        self.tw("memory","--standing","汇报一律用中文写给用户")
+        first=self.tw("signals","api","--transcript",str(events)).stdout
+        state=self.state(); quiz=state["signals"]["api"]["half_quiz"]
+        self.assertIn("半份测验",first)
+        self.assertIn("“汇报”",first)  # the question names the first word of the rule ...
+        self.assertNotIn("中文写给用户",first)  # ... and never gives the answer away
+        key=json.loads(next(self.keys.rglob(f"api-{quiz['id']}.json")).read_text(encoding="utf-8"))
+        self.assertTrue(key["questions"][0]["keywords"])
+        self.assertNotIn(str(self.keys),json.dumps(self.state(),ensure_ascii=False))  # no key path in the ledger
+        first_p7=state["signals"]["api"]["last_p7"]
+        self.tw("signals","api","--transcript",str(events))
+        self.assertNotEqual(self.state()["signals"]["api"]["last_p7"],first_p7)
+
+    def test_signals_window_observation_red_and_relay_limit(self):
+        self.tw("thread","add","api","--session","session_test4")
+        transcript=self.dir/"signals.jsonl"
+        old=(dt.datetime.now().astimezone()-dt.timedelta(hours=2)).isoformat()
+        recent=(dt.datetime.now().astimezone()-dt.timedelta(minutes=1)).isoformat()
+        self.tw("prefs","--set","observe_minutes=180")
+        transcript.write_text("\n".join(json.dumps(x,ensure_ascii=False) for x in [
+            {"type":"user","timestamp":old,"message":{"content":"wrong again"}},
+            {"type":"assistant","timestamp":recent,"message":{"content":[{"type":"tool_result","is_error":True,"content":"error"}]}},
+            {"type":"assistant","timestamp":recent,"message":{"content":[{"type":"tool_use","name":"retry","input":{}}]}}
+        ]),encoding="utf-8")
+        result=json.loads(self.tw("signals","api","--transcript",str(transcript),"--json").stdout)
+        self.assertEqual(result["color"],"yellow")  # one silent retry is a candidate, not a red
+        self.assertEqual(result["counts"]["bypass_error"],1)
+        self.assertEqual(result["counts"]["dissatisfaction"],0)
+        self.assertGreater(self.state()["observations"]["api"]["bypass"],0)
+        st=self.state(); st["handovers"]={"HO1":{"seat":"api","phase":"seated","steps":{"seat":dt.datetime.now().astimezone().isoformat()}},"HO2":{"seat":"api","phase":"retired","steps":{"seat":dt.datetime.now().astimezone().isoformat()}}}
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        self.assertNotEqual(self.tw("succ","start","api","--reason","signals red",ok=False).returncode,0)
+        self.assertEqual(self.tw("succ","start","api","--reason","signals red","--user-said","replace api").returncode,0)
+        log_rows=[json.loads(x) for x in (self.dir/".teamwork"/"log.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(log_rows[-1]["user_said"],"replace api")
+        all_result=self.tw("signals","--all","--json")
+        self.assertEqual(json.loads(all_result.stdout)[0]["seat"],"api")
+
+    def test_real_record_shape_answer_signals_and_events(self):
+        """Rows as Claude Code writes them: attachments and reminders around the prompt, one row per content block,
+        tool results stored as user rows. Found by the T72 field run, where all of this was read as the answer."""
+        tw=__import__("tw"); t=dt.datetime.now().astimezone().isoformat()
+        rows=[{"type":"attachment","timestamp":t,"attachment":{"text":"<system-reminder>English instructions here</system-reminder>"}},
+              {"type":"user","timestamp":t,"message":{"role":"user","content":"[screen SC1]\nP1: 练习"}},
+              {"type":"user","timestamp":t,"isMeta":True,"message":{"role":"user","content":"<system-reminder>Some long English reminder text that is not the answer at all</system-reminder>"}},
+              {"type":"assistant","timestamp":t,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"let me check git"}]}},
+              {"type":"assistant","timestamp":t,"message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"git branch"}}]}},
+              {"type":"user","timestamp":t,"message":{"role":"user","content":[{"type":"tool_result","content":"* main"}]}},
+              {"type":"assistant","timestamp":t,"message":{"role":"assistant","content":[{"type":"text","text":"不是 develop，查了 git branch，只有 main。已完成核对。"}]}},
+              {"type":"user","timestamp":t,"message":{"role":"user","content":"下一件事"}}]
+        answer=tw._extract_screen_answer(rows,"SC1")
+        self.assertIn("只有 main",answer); self.assertIn("[tool_use Bash",answer); self.assertIn("* main",answer)
+        self.assertNotIn("reminder",answer); self.assertNotIn("下一件事",answer)
+        words=tw._extract_screen_answer(rows,"SC1",text_only=True)
+        self.assertEqual(tw._language_penalty({"prefs":{"language":"zh"}},words),(0,[]))
+        self.assertEqual([tw._row_role(r) for r in rows],["other","peer","other","assistant","assistant","tool_result","assistant","user"])
+        self.tw("thread","add","api","--session","session_test_shape")
+        path=self.dir/"shape.jsonl"; path.write_text("\n".join(json.dumps(r,ensure_ascii=False) for r in rows),encoding="utf-8")
+        result=json.loads(self.tw("signals","api","--transcript",str(path),"--json").stdout)
+        self.assertEqual(result["counts"]["unsupported_done"],0)  # "已完成" right after a tool run in the same turn
+        self.assertEqual(result["color"],"green")
+        events={"ccr":{"data":[{"created_at":t,"user":{"internal_anthropic_catchall":{"message":r["message"]}}} if r["type"]=="user" else
+                               {"created_at":t,"assistant":{"internal_anthropic_catchall":{"message":r["message"]}}}
+                               for r in rows if r["type"] in ("user","assistant") and not r.get("isMeta")],"has_more":False}}
+        self.assertEqual(len(tw._rows_from_events(events)),6)  # the page wrapper of list_events is unwrapped
+        self.assertIn("只有 main",tw._extract_screen_answer(tw._rows_from_events(events),"SC1"))
+        self.assertEqual(tw._screen_score_line("tokens used 12\nP2=1, P1=2\n", ["P1","P2"]),{"P1":2,"P2":1})
+        self.assertIsNone(tw._screen_score_line("P1=2", ["P1","P2"]))
+
+    def test_lead_task_arrives_as_meta_cross_session_row(self):
+        """A real rc thread gets the lead's TASK (and so the screen) as a user row with isMeta and a
+        cross-session-message wrapper (seen in the T72 rc probe): it is where the answer starts, never a complaint."""
+        tw=__import__("tw"); t=dt.datetime.now().astimezone().isoformat()
+        wrap='<cross-session-message from-session="session_x">\n[tw:T] TASK lead -> ui T1\n[screen SC1]\nP1: 不对，又错了\n</cross-session-message>'
+        rows=[{"type":"queue-operation","timestamp":t,"content":wrap},
+              {"type":"user","isMeta":True,"timestamp":t,"message":{"role":"user","content":wrap}},
+              {"type":"assistant","timestamp":t,"message":{"role":"assistant","content":[{"type":"text","text":"P1：他要的是分析。"}]}}]
+        self.assertEqual(tw._row_role(rows[1]),"peer")
+        self.assertEqual(tw._extract_screen_answer(rows,"SC1"),"P1：他要的是分析。")
+        self.tw("thread","add","ui","--session","session_test_meta")
+        path=self.dir/"meta.jsonl"; path.write_text("\n".join(json.dumps(r,ensure_ascii=False) for r in rows),encoding="utf-8")
+        result=json.loads(self.tw("signals","ui","--transcript",str(path),"--json").stdout)
+        self.assertEqual(result["counts"]["dissatisfaction"],0)
+
+    def test_local_cli_session_record_found_by_its_id(self):
+        tw=__import__("tw"); root=Path(tempfile.mkdtemp()); sid="0b8f2c1e-1111-4222-8333-944455556666"
+        (root/"projects"/"-tmp-x").mkdir(parents=True); rec=root/"projects"/"-tmp-x"/f"{sid}.jsonl"; rec.write_text("{}\n",encoding="utf-8")
+        self.assertEqual(tw._find_transcripts(f"session_{sid}",[str(root)]),[rec])
+        self.assertEqual(tw._find_transcripts("session_01NotAUuid",[str(root)]),[])
+
+    def test_manual_language_english_and_no_session_dispatch(self):
+        self.tw("thread","add","ui")
+        self.tw("plan","approve","--user-said","approved")
+        self.tw("task","add","T2","--title","plain task","--owner","ui")
+        result=self.tw("task-msg","T2","--dispatch","--json")
+        self.assertIsNone(json.loads(result.stdout)["screen"])
+        self.tw("prefs","--set","language=en")
+        self.assertEqual(__import__("tw")._screen_label(self.state(),"ui"),"")
+
+    def test_compact_rows_language_unset_events_wrappers_and_numeric_times(self):
+        tw=__import__("tw")
+        summary={"type":"user","isCompactSummary":True,"message":{"role":"user","content":"compact"}}
+        self.assertEqual(tw._row_role(summary),"other")
+        self.tw("thread","add","api","--session","session_flags")
+        events=[{"type":"user","timestamp":1700000000,"isCompactSummary":True,"internal_anthropic_catchall":{"message":{"role":"user","content":"summary"}}}]
+        rows=tw._rows_from_events([{"type":"text","text":json.dumps(events)}])
+        self.assertEqual(len(rows),1); self.assertTrue(rows[0]["isCompactSummary"])
+        self.assertEqual(tw._row_role(rows[0]),"other")
+        st=self.state(); result,_=tw._signals_analyze(self.dir/".teamwork",st,"api",rows,persist=False)
+        self.assertEqual(result["counts"]["compact"],1)
+        self.assertIsNotNone(tw._when(1700000000000)); self.assertIsNone(tw._when("not-a-time"))
+        self.assertEqual(tw._language_penalty({"prefs":{"language":""}},"English text"),(0,["language_unset"]))
+        self.assertEqual(tw._screen_score_line("P1=<0-2> P2=<0-2>\nP2=1, P1=2",["P1","P2"]),{"P1":2,"P2":1})
+        empty=self.dir/"empty-events.json"; empty.write_text("[]",encoding="utf-8")
+        self.assertIn("事件里没有可读的消息",self.tw("signals","api","--events",str(empty),ok=False).stderr)
+
+    def test_failed_grader_keeps_provisional_and_sweep_can_retry(self):
+        self.tw("thread","add","api","--session","session_retry")
+        self.tw("screen","ask","api","--session","session_retry")
+        answers=self.dir/"retry-answer.txt"; answers.write_text("逐题核对后回答。",encoding="utf-8")
+        self.env["TW_GRADER_CMD"]="exit 2"
+        failed=self.tw("screen","grade","SC1","--answers",str(answers),ok=False)
+        rec=self.state()["screens"]["SC1"]
+        self.assertEqual(rec["status"],"unscored"); self.assertEqual(rec["attempts"],2)
+        self.assertNotIn("graded_at",rec); self.assertEqual(rec["provisional"],"pass"); self.assertIn("why",rec)
+        self.assertIn("打分暂不可用，已排队补考",self.tw("board").stdout)
+        self.env["TW_GRADER_CMD"]="printf 'P1=2 P2=2 P3=2 P4=2 P5=2 P6=2\\n'"
+        graded=json.loads(self.tw("screen","grade","SC1","--answers",str(answers),"--json").stdout)
+        self.assertEqual(graded["status"],"graded"); self.assertEqual(graded["attempts"],3)
+        self.assertNotIn("provisional",graded); self.assertNotIn("why",graded)
+        self.assertNotEqual(failed.returncode,0)
+
+    def test_compaction_quiz_dedup_grading_and_red_on_second_failure(self):
+        self.tw("thread","add","api","--session","session_quiz")
+        self.tw("memory","--standing","汇报一律用中文写给用户")
+        stamp=dt.datetime.now().astimezone().isoformat()
+        path=self.dir/"quiz.jsonl"
+        event={"type":"summary","isCompactSummary":True,"uuid":"compact-1","timestamp":stamp,"message":{"content":"summary"}}
+        path.write_text(json.dumps(event,ensure_ascii=False),encoding="utf-8")
+        first=self.tw("signals","api","--transcript",str(path)).stdout
+        quiz=self.state()["signals"]["api"]["half_quiz"]["id"]
+        second=self.tw("signals","api","--transcript",str(path)).stdout
+        self.assertIn(quiz,second); self.assertEqual(self.state()["signals"]["api"]["half_quiz"]["id"],quiz)
+        key=json.loads(next(self.keys.rglob(f"api-{quiz}.json")).read_text(encoding="utf-8"))
+        answers=self.dir/"wrong-answers.txt"; answers.write_text("错答\n"*len(key["questions"]),encoding="utf-8")
+        one=self.tw("signals","quiz",quiz,"api","--answers",str(answers)).stdout
+        self.assertIn("汇报一律用中文写给用户",one)
+        two=self.tw("signals","quiz",quiz,"api","--answers",str(answers)).stdout
+        self.assertIn("标红",two); self.assertEqual(self.state()["signals"]["api"]["red_reason"],"压缩后测验两次不过")
+        self.assertIn("半份测验",first)
+
+    def test_observation_starts_after_screen_and_keeps_scanning_after_first_done(self):
+        self.tw("thread","add","api","--session","session_observe")
+        self.tw("prefs","--set","observe_minutes=20")
+        t=dt.datetime.now().astimezone(); stamps=[(t+dt.timedelta(seconds=i)).isoformat() for i in range(9)]
+        path=self.dir/"observation.jsonl"
+        rows=[
+            {"type":"user","timestamp":stamps[0],"message":{"content":"[screen SC1] please answer"}},
+            {"type":"user","timestamp":stamps[1],"message":{"content":"Now do the task"}},
+            {"type":"assistant","timestamp":stamps[2],"message":{"content":[{"type":"tool_result","is_error":True,"content":"error"}]}},
+            {"type":"assistant","timestamp":stamps[3],"message":{"content":[{"type":"tool_use","name":"retry","input":{}}]}},
+            {"type":"user","timestamp":stamps[4],"message":{"content":"Check completion"}},
+            {"type":"assistant","timestamp":stamps[5],"message":{"content":"已完成"}},
+            {"type":"assistant","timestamp":stamps[6],"message":{"content":[{"type":"tool_use","name":"verify","input":{}}]}},
+            {"type":"assistant","timestamp":stamps[7],"message":{"content":"又已完成"}},
+        ]
+        path.write_text("\n".join(json.dumps(x,ensure_ascii=False) for x in rows),encoding="utf-8")
+        self.tw("signals","api","--transcript",str(path))
+        obs=self.state()["observations"]["api"]
+        self.assertEqual(obs["bypass"],1); self.assertFalse(obs["first_done_evidence"])
+
+    def test_observation_starts_when_task_arrives_as_cross_session_peer(self):
+        tw=__import__("tw"); self.tw("thread","add","api","--session","session_peer_observe")
+        t=dt.datetime.now().astimezone(); stamps=[(t+dt.timedelta(seconds=i)).isoformat() for i in range(5)]
+        rows=[
+            {"type":"user","isMeta":True,"timestamp":stamps[0],"message":{"content":"<cross-session-message>[tw:T9] TASK lead -> api T9</cross-session-message>"}},
+            {"type":"user","timestamp":stamps[1],"message":{"content":"开始处理任务"}},
+            {"type":"assistant","timestamp":stamps[2],"message":{"content":[{"type":"tool_result","is_error":True,"content":"error"}]}},
+            {"type":"assistant","timestamp":stamps[3],"message":{"content":[{"type":"tool_use","name":"retry","input":{}}]}},
+        ]
+        result,_=tw._signals_analyze(self.dir/".teamwork",self.state(),"api",rows,persist=False)
+        self.assertEqual(tw._row_role(rows[0]),"peer")
+        self.assertEqual(result["observation"]["bypass"],1)
+
+    def test_completion_evidence_and_error_bypass_stop_at_peer_turn(self):
+        tw=__import__("tw"); self.tw("thread","add","api","--session","session_peer_boundary")
+        t=dt.datetime.now().astimezone(); stamps=[(t+dt.timedelta(seconds=i)).isoformat() for i in range(7)]
+        rows=[
+            {"type":"user","timestamp":stamps[0],"message":{"content":"开始处理"}},
+            {"type":"assistant","timestamp":stamps[1],"message":{"content":[{"type":"tool_use","name":"read","input":{}}]}},
+            {"type":"user","isMeta":True,"timestamp":stamps[2],"message":{"content":"[tw:T9] TASK lead -> api T9"}},
+            {"type":"assistant","timestamp":stamps[3],"message":{"content":"已完成"}},
+            {"type":"assistant","timestamp":stamps[4],"message":{"content":[{"type":"tool_result","is_error":True,"content":"error"}]}},
+            {"type":"user","isMeta":True,"timestamp":stamps[5],"message":{"content":"[tw:T10] TASK lead -> api T10"}},
+            {"type":"assistant","timestamp":stamps[6],"message":{"content":[{"type":"tool_use","name":"retry","input":{}}]}},
+        ]
+        result,_=tw._signals_analyze(self.dir/".teamwork",self.state(),"api",rows,persist=False)
+        self.assertFalse(result["observation"]["first_done_evidence"])
+        self.assertEqual(result["observation"]["bypass"],0)
+
+    def test_signal_filters_threshold_denied_fix_breaks_and_all_missing(self):
+        self.tw("thread","add","api","--session","session_signal")
+        self.tw("prefs","--set","signals_red_at=2")
+        path=self.dir/"signal-rules.jsonl"
+        rows=[
+            {"type":"user","message":{"content":"不要用 --force"}},
+            {"type":"assistant","message":{"content":[{"type":"text","text":"已修好但回归了；我会用 --force"}]}},
+            {"type":"user","message":{"content":"[tw:proj] 不对，这只是 lead 消息"}},
+            {"type":"user","message":{"content":"[screen SC2] 傻"}},
+            {"type":"user","message":{"content":"<agent-message>wrong again</agent-message>"}},
+            {"type":"user","message":{"content":"这不对外"}},
+        ]
+        path.write_text("\n".join(json.dumps(x,ensure_ascii=False) for x in rows),encoding="utf-8")
+        result=json.loads(self.tw("signals","api","--transcript",str(path),"--json").stdout)
+        self.assertEqual(result["counts"]["dissatisfaction"],0)
+        self.assertEqual(result["counts"]["denied_again"],1)
+        self.assertEqual(result["counts"]["fix_breaks"],1)
+        self.assertEqual(result["color"],"red")
+        all_rows=json.loads(self.tw("signals","--all","--json").stdout)
+        self.assertIsNone(all_rows[0]["color"])
+
+    def test_retake_screen_affects_stats_not_current_screen_judgement(self):
+        self.tw("thread","add","api","--session","session_retake")
+        self.tw("screen","ask","api","--session","session_retake")
+        good=",".join(f"P{i}=2" for i in range(1,7)); bad=",".join(f"P{i}=0" for i in range(1,7))
+        self.tw("screen","record","SC1","--scores",good)
+        self.tw("screen","ask","api","--session","session_retake","--retake")
+        self.tw("screen","record","SC2","--scores",bad)
+        self.assertTrue(self.state()["screens"]["SC2"]["retake"])
+        self.assertNotIn("未体检",self.tw("board").stdout)
+        self.assertFalse(__import__("tw")._screen_failed(self.state(),"session_retake"))
+        card=self.tw("screen","stats").stdout
+        self.assertIn("同一张卡测两次",card); self.assertIn("12",card)
+
+    def test_background_grade_patches_latest_ledger_after_task_add(self):
+        self.tw("thread","add","ui","--session","session_parallel")
+        self.tw("plan","approve","--user-said","approved")
+        self.tw("task","add","T8","--title","existing work","--owner","ui")
+        self.tw("task-msg","T8","--dispatch")
+        config=self.dir/"grader-config"; project=config/"projects"/"test-project"; project.mkdir(parents=True)
+        self.env["CLAUDE_CONFIG_DIR"]=str(config)
+        (config/"bridge-transcript-cse_parallel.jsonl").write_text(json.dumps({"session_id":"local_parallel"})+"\n",encoding="utf-8")
+        t=dt.datetime.now().astimezone().isoformat()
+        (project/"local_parallel.jsonl").write_text("\n".join(json.dumps(x) for x in [
+            {"type":"user","timestamp":t,"message":{"content":"[screen SC1]"}},
+            {"type":"assistant","timestamp":t,"message":{"content":"先逐项核对后回答全部题目。"}},
+        ])+"\n",encoding="utf-8")
+        self.env["TW_GRADER_CMD"]="sleep 3; echo P1=2 P2=2 P3=2 P4=2 P5=2 P6=2"
+        self.tw("prefs","--set","screen_autograde=true")
+        started=time.monotonic(); ready=self.tw("ready")
+        self.assertLess(time.monotonic()-started,1.0,ready.stderr)
+        self.assertIn("已在后台给 1 个体检打分",ready.stderr)
+        self.tw("task","add","T9","--title","during grading","--owner","ui")
+        deadline=time.time()+12
+        while time.time()<deadline:
+            state=self.state()
+            if state["screens"]["SC1"].get("status")=="graded": break
+            time.sleep(.05)
+        self.assertEqual(state["screens"]["SC1"]["status"],"graded")
+        self.assertIn("T9",state["tasks"])
+        self.assertIn("体检：过",self.tw("board").stdout)
+
+    def test_unified_row_roles_boundaries_and_user_only_dissatisfaction(self):
+        tw=__import__("tw")
+        peer={"type":"user","isMeta":True,"message":{"content":"<cross-session-message>[tw:T] TASK\n[screen SC1]\nwrong"}}
+        complaint={"type":"user","message":{"content":"还是不对啊"}}
+        self.assertEqual(tw._row_role(peer),"peer")
+        self.assertEqual(tw._row_role(complaint),"user")
+        self.assertEqual(tw._extract_screen_answer([peer,{"type":"assistant","message":{"content":"answer"}},complaint],"SC1"),"answer")
+        self.assertTrue(tw._is_dissatisfied("还是不对")); self.assertTrue(tw._is_dissatisfied("结果不对啊"))
+        for text in ("不对外","不对称","不对劲","run the tests again"):
+            self.assertFalse(tw._is_dissatisfied(text),text)
+        for text in ("wrong","wrong again","not again","how many times"):
+            self.assertTrue(tw._is_dissatisfied(text),text)
+        rows=[{"type":"user","timestamp":dt.datetime.now().astimezone().isoformat(),"message":{"content":"[tw:project] TASK"}},
+              {"type":"assistant","timestamp":dt.datetime.now().astimezone().isoformat(),"message":{"content":[{"type":"tool_use","name":"read"}]}}]
+        self.tw("thread","add","api","--session","session_tw_start")
+        tw._signals_analyze(self.dir/".teamwork",self.state(),"api",rows,persist=False)
+        self.assertEqual(tw._row_role(rows[0]),"peer")
+
+    def test_signal_quiz_sticky_red_survives_recompute_and_correct_answer_clears(self):
+        self.tw("thread","add","api","--session","session_sticky")
+        self.tw("memory","--standing","汇报一律用中文写给用户")
+        path=self.dir/"compact-sticky.jsonl"
+        path.write_text(json.dumps({"type":"summary","isCompactSummary":True,"timestamp":dt.datetime.now().astimezone().isoformat(),"message":{"content":"summary"}}),encoding="utf-8")
+        self.tw("signals","api","--transcript",str(path))
+        quiz=self.state()["signals"]["api"]["half_quiz"]["id"]
+        key=json.loads(next(self.keys.rglob(f"api-{quiz}.json")).read_text(encoding="utf-8"))
+        wrong=self.dir/"wrong.json"; wrong.write_text("错答\n"*len(key["questions"]),encoding="utf-8")
+        self.tw("signals","quiz",quiz,"api","--answers",str(wrong)); self.tw("signals","quiz",quiz,"api","--answers",str(wrong))
+        self.assertEqual(self.state()["signals"]["api"]["sticky"][-1]["kind"],"quiz_red")
+        recomputed=json.loads(self.tw("signals","api","--transcript",str(path),"--json").stdout)
+        self.assertEqual(recomputed["color"],"red")
+        correct=self.dir/"correct.json"
+        correct.write_text(json.dumps([x["fact"] for x in key["questions"]],ensure_ascii=False),encoding="utf-8")
+        self.tw("signals","quiz",quiz,"api","--answers",str(correct))
+        self.assertFalse(self.state()["signals"]["api"].get("sticky"))
+
+    def test_signals_missing_and_unknown_seat_do_not_write(self):
+        self.tw("thread","add","api","--session","session_missing")
+        before=(self.dir/".teamwork"/"state.json").read_bytes()
+        result=self.tw("signals","api")
+        self.assertIn("只算了台账",result.stdout)
+        self.assertEqual((self.dir/".teamwork"/"state.json").read_bytes(),before)
+        self.assertNotEqual(self.tw("signals","typo","--json",ok=False).returncode,0)
+        self.assertNotIn("typo",self.state().get("signals",{}))
+
+    def test_config_dir_glob_and_multi_transcript_merge(self):
+        tw=__import__("tw"); home=Path(tempfile.mkdtemp())
+        config=home/".claude-work"; project=config/"projects"/"p"; project.mkdir(parents=True)
+        session="session_11111111-1111-4111-8111-111111111111"
+        (config/f"bridge-transcript-cse_{session.removeprefix('session_')}.jsonl").write_text(json.dumps({"session_id":"one"})+"\n"+json.dumps({"session_id":"two"})+"\n",encoding="utf-8")
+        (project/"one.jsonl").write_text("\n".join(json.dumps(row) for row in [
+            {"type":"user","timestamp":"2026-11-24T10:00:00+00:00","message":{"content":"first"}},
+            {"type":"user","message":{"content":"untimed first"}},
+            {"type":"user","message":{"content":"untimed second"}},
+        ])+"\n",encoding="utf-8")
+        (project/"two.jsonl").write_text(json.dumps({"type":"user","timestamp":"2026-11-24T10:00:01+00:00","message":{"content":"second"}})+"\n",encoding="utf-8")
+        from unittest.mock import patch
+        with patch.dict(os.environ,{"HOME":str(home)},clear=False):
+            self.assertIn(str(config),tw._config_dirs())
+            rows,found=tw._session_rows(session)
+        self.assertTrue(found); self.assertEqual([tw._row_text(x) for x in rows],["first","untimed first","untimed second","second"])
+
+    def test_subagent_sidechain_does_not_replace_primary_screen_answer_or_signal(self):
+        self.tw("thread","add","api","--session","session_agent_fixture")
+        self.tw("screen","ask","api","--session","session_agent_fixture")
+        config=self.dir/"agent-config"; project=config/"projects"/"fixture"; project.mkdir(parents=True)
+        (config/"bridge-transcript-cse_agent_fixture.jsonl").write_text(json.dumps({"session_id":"local-fixture"})+"\n",encoding="utf-8")
+        stamp=dt.datetime.now().astimezone().isoformat()
+        (project/"local-fixture.jsonl").write_text(json.dumps({"type":"user","timestamp":stamp,"message":{"content":"[screen SC1]"}})+"\n"+
+            json.dumps({"type":"assistant","timestamp":stamp,"message":{"content":"主记录完整作答全部题目，核对后给出最终结果。"}})+"\n",encoding="utf-8")
+        sub=project/"local-fixture"/"subagents"; sub.mkdir(parents=True)
+        (sub/"agent-fixture.jsonl").write_text(json.dumps({"type":"user","isSidechain":True,"timestamp":stamp,"message":{"content":"上次结果不对"}})+"\n",encoding="utf-8")
+        self.env["CLAUDE_CONFIG_DIR"]=str(config)
+        prompt=self.dir/"grader-input.txt"
+        self.env["TW_GRADER_CMD"]=f'cat > "{prompt}"; echo P1=2 P2=2 P3=2 P4=2 P5=2 P6=2'
+        self.tw("screen","grade","SC1")
+        self.assertIn("主记录完整作答全部题目",prompt.read_text(encoding="utf-8"))
+        signal=json.loads(self.tw("signals","api","--json").stdout)
+        self.assertEqual(signal["counts"]["dissatisfaction"],0)
+
+    def test_rebuild_restores_quiz_sticky_red_after_compaction_and_two_failures(self):
+        self.tw("thread","add","api","--session","session_rebuild_sticky")
+        self.tw("memory","--standing","汇报一律用中文写给用户")
+        transcript=self.dir/"compact-rebuild.jsonl"
+        transcript.write_text(json.dumps({"type":"summary","isCompactSummary":True,"uuid":"compact-rebuild",
+            "timestamp":dt.datetime.now().astimezone().isoformat(),"message":{"content":"summary"}}),encoding="utf-8")
+        self.tw("signals","api","--transcript",str(transcript))
+        quiz=self.state()["signals"]["api"]["half_quiz"]["id"]
+        key=json.loads(next(self.keys.rglob(f"api-{quiz}.json")).read_text(encoding="utf-8"))
+        wrong=self.dir/"wrong-rebuild.txt"; wrong.write_text("错答\n"*len(key["questions"]),encoding="utf-8")
+        self.tw("signals","quiz",quiz,"api","--answers",str(wrong)); self.tw("signals","quiz",quiz,"api","--answers",str(wrong))
+        self.tw("rebuild","--apply","--force")
+        rebuilt=self.state()["signals"]["api"]
+        self.assertEqual(rebuilt["color"],"red")
+        self.assertEqual(rebuilt["sticky"][-1]["kind"],"quiz_red")
+        self.assertIn("quizzes",rebuilt)
+        self.assertIn("api",self.state()["observations"])
+
+    def test_row_role_reminders_interruptions_tool_results_and_dissatisfaction_edges(self):
+        tw=__import__("tw")
+        self.assertEqual(tw._row_role({"type":"user","message":{"content":[{"type":"tool_result","content":"ok"},{"type":"text","text":"<system-reminder>note</system-reminder>"}]}}),"tool_result")
+        for text in ("<task-notification>done", "[Request interrupted by user: stop"):
+            self.assertEqual(tw._row_role({"type":"user","message":{"content":text}}),"other")
+        for text in ("傻瓜", "傻瓜式流程", "nothing wrong", "not wrong", "我说过的那个方案很好"):
+            self.assertFalse(tw._is_dissatisfied(text),text)
+        self.assertTrue(tw._is_dissatisfied("我说过这个"))
+
+    def test_lead_relay_json_is_conditional_and_contains_bilingual_prompt(self):
+        self.tw("lead","--session","session_relay")
+        transcript=self.dir/"relay.jsonl"; transcript.write_text("",encoding="utf-8")
+        result=json.loads(self.tw("signals","lead","--transcript",str(transcript),"--json").stdout)
+        self.assertNotIn("lead_relay",result)
+        st=self.state(); st["lead"]["sessions"][-1]["from"]=(dt.datetime.now().astimezone()-dt.timedelta(hours=13)).isoformat()
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        result=json.loads(self.tw("signals","lead","--transcript",str(transcript),"--json").stdout)
+        self.assertIsInstance(result["lead_relay"],str)
+        self.assertTrue(result["lead_relay"])
+
+    def test_quota_uses_one_main_config_directory(self):
+        from unittest.mock import patch
+        import argparse, contextlib, io
+        self.tw("thread","add","api","--session","session_quota_config")
+        tw=__import__("tw")
+        seen=[]
+        class Reader:
+            @staticmethod
+            def read_quota(dirs,codex,current): seen.extend(dirs); return {"notes":[]}
+            @staticmethod
+            def tier(result,prefs,current): return "unknown",[]
+            @staticmethod
+            def num(value): return None
+        with patch.object(tw,"quota_reader",Reader),patch.object(tw,"find_dir",return_value=self.dir/".teamwork"),patch.dict(os.environ,{"CLAUDE_CONFIG_DIR":str(self.dir/"only-config")},clear=False):
+            (self.dir/"only-config").mkdir()
+            with contextlib.redirect_stdout(io.StringIO()):
+                tw.cmd_quota(argparse.Namespace(due=False,weekly=False,config_dir=None,codex_dir=None,json=True))
+        self.assertEqual(seen,[str(self.dir/"only-config")])
+
+    def test_patch_state_none_is_noop_and_conflict_retries_latest_state(self):
+        from unittest.mock import patch
+        tw=__import__("tw"); ledger=self.dir/".teamwork"
+        before=self.state()["rev"]
+        self.assertIsNone(tw._patch_state(ledger,"test_value",lambda current,latest:None,{"ev":"test-noop"}))
+        self.assertEqual(self.state()["rev"],before)
+        real=tw._save_locked; calls={"n":0}
+        def conflict_once(d,st,event=None):
+            calls["n"]+=1
+            if calls["n"]==1:
+                disk=json.loads((d/"state.json").read_text(encoding="utf-8")); disk["rev"]+=1
+                (d/"state.json").write_text(json.dumps(disk),encoding="utf-8")
+                raise SystemExit("ledger changed")
+            return real(d,st,event)
+        with patch.object(tw,"_save_locked",side_effect=conflict_once):
+            result=tw._patch_state(ledger,"test_value",lambda current,latest:{"ok":True},{"ev":"test-retry"})
+        self.assertTrue(result); self.assertEqual(self.state()["test_value"],{"ok":True}); self.assertEqual(calls["n"],2)
+
+    def test_screen_show_reprints_questions_without_answer_key(self):
+        self.tw("thread","add","api","--session","session_screen_show")
+        self.tw("screen","ask","api","--session","session_screen_show")
+        prompt=self.tw("screen","show","SC1").stdout
+        self.assertTrue(prompt.startswith("[screen SC1]\n"))  # the record lookup starts at this marker
+        key=json.loads(next(self.keys.rglob("SC1.json")).read_text(encoding="utf-8"))
+        for item,question in key["questions"].items(): self.assertIn(f"{item}: {question}",prompt)
+        self.assertNotIn(next(iter(key["answers"].values())),prompt)
+
+    def test_grade_race_returns_already_graded_without_score_output(self):
+        from unittest.mock import patch
+        self.tw("thread","add","api","--session","session_grade_race")
+        self.tw("screen","ask","api","--session","session_grade_race")
+        answers=self.dir/"race-answer.txt"; answers.write_text("逐题完整回答。",encoding="utf-8")
+        self.env["TW_GRADER_CMD"]="echo P1=2 P2=2 P3=2 P4=2 P5=2 P6=2"
+        tw=__import__("tw")
+        with patch.dict(os.environ,{"TW_GRADER_CMD":self.env["TW_GRADER_CMD"],"TW_KEYS_DIR":str(self.keys)}),patch.object(tw,"_patch_state",return_value=None):
+            ok,result=tw._screen_grade(self.dir/".teamwork",self.state(),"SC1",answers.read_text(),"answers")
+        self.assertFalse(ok); self.assertEqual(result,"already graded")
+
+    def test_automatic_grade_applies_lead_and_nonlead_notices_and_sweep_ready_hint(self):
+        self.tw("thread","add","api","--session","session_auto_notice")
+        self.tw("screen","ask","api","--session","session_auto_notice")
+        answers=self.dir/"notice-answer.txt"; answers.write_text("逐题作答。",encoding="utf-8")
+        self.env["TW_GRADER_CMD"]="echo P1=0 P2=0 P3=0 P4=0 P5=0 P6=0"
+        failed=self.tw("screen","grade","SC1","--answers",str(answers),ok=True)
+        self.assertIn("api",failed.stderr)
+        tw=__import__("tw")
+        tw._screen_grade_notice(self.dir/".teamwork",self.state(),"SC1",self.state()["screens"]["SC1"],background=True)
+        ready=self.tw("ready")
+        self.assertIn("api",ready.stderr)
+        self.assertNotIn("api",self.tw("ready").stderr)
+        self.tw("lead","--session","session_auto_lead")
+        self.tw("opening","--json")
+        st=self.state(); st["lead_trials"]=[{"screen":"SC0"}]; st["lead_first_message"]="retained first request"
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        self.env["TW_GRADER_CMD"]="echo P1=2 P2=2 P3=2 P4=2 P5=2 P6=2 P7=2"
+        grade=self.tw("screen","grade","SC2","--answers",str(answers))
+        self.assertEqual(self.state()["lead_trials"],[])
+        self.assertNotIn("lead_first_message",self.state())
+        self.assertEqual(grade.stderr,"")
+
+    def test_screen_cli_grader_text_via_and_stats_asked_bucket(self):
+        self.tw("thread","add","api","--session","session_cli")
+        self.tw("screen","ask","api","--session","session_cli")
+        answers=self.dir/"answers-cli"; answers.write_text("逐题核对后回答。",encoding="utf-8")
+        self.env["TW_GRADER_CMD"]="printf 'P1=2 P2=2 P3=2 P4=2 P5=2 P6=2\\n'"
+        self.tw("screen","grade","SC1","--answers",str(answers),"--via","auto")
+        self.assertEqual(self.state()["screens"]["SC1"]["grader"],"cmd")
+        self.assertIn("未打分 0",self.tw("screen","stats").stdout)
+        self.tw("screen","ask","api","--session","session_cli","--retake")
+        self.tw("screen","record","SC2","--scores",",".join(f"P{i}=2" for i in range(1,7)),"--grader","gpt-6-luna")
+        self.assertEqual(self.state()["screens"]["SC2"]["grader"],"gpt-6-luna")
+        self.tw("screen","ask","api","--session","session_cli","--retake")
+        self.assertIn("未打分 1",self.tw("screen","stats").stdout)
+
+    def test_ready_reports_cloud_screen_without_starting_sweep(self):
+        self.tw("thread","add","api","--session","session_cloud")
+        self.tw("screen","ask","api","--session","session_cloud")
+        self.tw("prefs","--set","screen_autograde=true")
+        ready=self.tw("ready")
+        self.assertIn("本机找不到 api 的对话记录",ready.stderr)
+        self.assertIn("TW screen grade SC1 --events <list_events 结果文件>",ready.stderr)
+        self.assertNotIn("已在后台给",ready.stderr)
+
+    def test_sweep_reports_scored_failed_unanswered_and_no_record_separately(self):
+        self.tw("thread","add","api","--session","session_sweep_unanswered")
+        self.tw("screen","ask","api","--session","session_sweep_unanswered")
+        self.tw("thread","add","ui","--session","session_sweep_failed")
+        self.tw("screen","ask","ui","--session","session_sweep_failed")
+        self.tw("thread","add","test","--session","session_sweep_cloud")
+        self.tw("screen","ask","test","--session","session_sweep_cloud")
+        config=self.dir/"sweep-config"; project=config/"projects"/"test-project"; project.mkdir(parents=True)
+        self.env["CLAUDE_CONFIG_DIR"]=str(config)
+        for session,local in (("session_sweep_unanswered","local_unanswered"),("session_sweep_failed","local_failed")):
+            (config/f"bridge-transcript-cse_{session.removeprefix('session_')}.jsonl").write_text(json.dumps({"session_id":local})+"\n",encoding="utf-8")
+        stamp=dt.datetime.now().astimezone().isoformat()
+        (project/"local_unanswered.jsonl").write_text(json.dumps({"type":"user","timestamp":stamp,"message":{"content":"no screen answer"}})+"\n",encoding="utf-8")
+        (project/"local_failed.jsonl").write_text("\n".join(json.dumps(row,ensure_ascii=False) for row in [
+            {"type":"user","timestamp":stamp,"message":{"content":"[screen SC2]"}},
+            {"type":"assistant","timestamp":stamp,"message":{"content":"逐题仔细作答。"}},
+        ])+"\n",encoding="utf-8")
+        self.env["TW_GRADER_CMD"]="exit 2"
+        result=json.loads(self.tw("screen","sweep","--json").stdout)
+        self.assertEqual(result["scored"],0)
+        self.assertEqual([item["screen"] for item in result["failed"]],["SC2"])
+        self.assertEqual(result["unanswered"],["SC1"])
+        self.assertEqual([item["screen"] for item in result["no_record"]],["SC3"])
+
+    def test_signal_text_bad_lines_lead_key_and_session_helper(self):
+        tw=__import__("tw"); self.tw("thread","add","api","--session","session_signal_text")
+        st=self.state(); st["lead"]["session_id"]="session_signal_lead"
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        self.assertEqual(tw._seat_session(st,"api"),"session_signal_text")
+        self.assertEqual(tw._seat_session(st,"lead"),"session_signal_lead")
+        path=self.dir/"signal-text.jsonl"
+        path.write_text(json.dumps({"type":"user","timestamp":dt.datetime.now().astimezone().isoformat(),"message":{"content":"傻"}},ensure_ascii=False)+"\nnot-json\n",encoding="utf-8")
+        result=json.loads(self.tw("signals","lead","--transcript",str(path),"--json").stdout)
+        self.assertNotIn("lead_relay",result)
+        self.assertEqual(result["bad_lines"],1)
+        text=self.tw("signals","lead","--transcript",str(path)).stdout
+        self.assertIn("今天这个席位已接力 0 次，上限 2",text)
+        self.assertIn("跳过 1 行坏记录",text)
+
+    def test_failed_grade_why_is_redacted_home_shortened_and_bounded(self):
+        self.tw("thread","add","api","--session","session_why")
+        self.tw("screen","ask","api","--session","session_why")
+        answers=self.dir/"why-answer.txt"; answers.write_text("逐题作答。",encoding="utf-8")
+        self.env["TW_GRADER_CMD"]='python3 -c "import pathlib; print(\'failed at \'+str(pathlib.Path.home())+\' \'+\'x\'*260); raise SystemExit(2)"'
+        self.tw("screen","grade","SC1","--answers",str(answers),ok=False)
+        why=self.state()["screens"]["SC1"]["why"]
+        self.assertIn("~",why)
+        self.assertNotIn(str(Path.home()),why)
+        self.assertLessEqual(len(why),200)
 
 
 if __name__ == "__main__":

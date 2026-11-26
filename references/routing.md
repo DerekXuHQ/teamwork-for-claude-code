@@ -1,5 +1,7 @@
 # Routing work by model and quota
 
+Task routing uses explicit `--route` first, then `--no-scripts` (Claude by hand), then the current quota tier, then work kind: `docs-zh`, `review2`, and `research` suggest Fable; `plan` and `debug-hard` suggest Opus; `review1`, `code`, `test`, `read`, `docs-en`, and `merge` suggest GPT. Unknown kinds default to GPT. At `burn-fable`, Chinese docs, second reviews, and research continue to Fable; code-like work stays GPT-first. At `save` and `lead-only`, execution stays GPT.
+
 Who does what when a project has Claude seats (the lead and its threads) and a GPT executor (Codex, through the
 codex plugin), and how the split changes as the Claude weekly quota fills. The lead decides; threads follow the
 lead's latest `INFO` tier. Only the lead reads the quota (`TW quota`).
@@ -52,6 +54,8 @@ asks. When nothing is running (no task dispatched, working or in review, no thre
 (new tier, what changes) and sends every thread one `INFO` with the tier and the routing change (`TW info`).
 Threads never read the quota themselves.
 
+At `quota_burn_at` (70% by default), `ready` reports the effective check-in and quota/document refresh intervals. `slow_factor` multiplies both (2 by default; 3 at `lead-only`). Stuck and waiting-on-you notices keep their own timing. The first `quota` or `ready` run after a tier transition prints one notice. `quota --weekly` compares Fable and Opus using tokens, then minutes, then same-kind rework rate; it reports insufficient data only when every measure has fewer than three pairs.
+
 ## 3. Switching up when a model does badly
 
 Move the same piece of work one step up (GPT → Fable → Opus) when any of these holds, and say so in the report
@@ -82,7 +86,7 @@ The aim is more work on GPT without more redo. The lead looks at the redo count 
 
 Threads add one line to DONE: `models: <type>=<model>:ok|redo ...` (types: `code, test, read, review1, review2,
 docs-en, docs-zh, research, debug-hard, plan, merge`). The lead records each with
-`TW model-log --task T<n> --type <type> --model gpt|fable|opus --result ok|redo --why "<one line>"`.
+`TW model-log --task T<n> --type <type> --model gpt|fable|opus --result ok|redo --why "<one line>" [--tokens N|--minutes N]`; include tokens or minutes when known.
 
 `TW model-log --summary` adds a (type, model) to the deny list after at least 3 tries with 2 redos among the
 last 3 (`proposed` in its JSON); from then on that work goes straight to the next model. Putting GPT's big categories (`code`, `test`) on

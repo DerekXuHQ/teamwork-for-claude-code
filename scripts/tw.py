@@ -16,6 +16,7 @@ Stdlib only. `tw.py <command> -h` for details.
 import argparse
 import contextlib
 import copy
+import csv as csvmod
 import hashlib
 import html
 import datetime as dt
@@ -32,6 +33,7 @@ import os
 import re
 import shutil
 import shlex
+import socket
 import struct
 import subprocess
 import sys
@@ -164,7 +166,7 @@ LABELS = {
         "no_threads": "(no threads yet)",
         "t_created": "created", "t_updated": "updated", "t_reported": "reported", "t_closed": "closed",
         "t_where": "where", "t_thread": "thread", "t_session": "session", "t_branch": "branch", "t_log": "log",
-        "completed": "Completed {n}: {names}", "waiting_for": "waiting for {why}",
+        "completed": "Completed {n}: {names}", "stop_none": "none recorded", "stop_codex": "stop this project's Codex runs by hand", "standby": "On standby {n} (in their seat, turn ended, ready for work): {names}", "waiting_for": "waiting for {why}",
         "wait_permission": "your approval", "wait_user": "you", "wait_peer": "a peer", "wait_other": "an update",
         "stuck_cleanup": "temporary file cleanup", "stuck_guard": "a safety check", "stuck_permission": "approval",
         "stuck_silent": "no reply", "stuck_other": "an issue", "nudge_recent": "Already nudged once: tell the user which thread is stuck",
@@ -184,11 +186,12 @@ LABELS = {
         "selfcheck_reminder": "Lead: check that every request the user made this round was recorded with req add.",
         "heard_unrecorded": "Heard but not recorded", "recorded_not_dispatched": "Recorded but not dispatched",
         "dispatched_no_reply": "Dispatched without reply", "replied_not_reported": "Replied but not reported",
-        "promises_open": "Unfulfilled promises", "no_items": "(none)", "in_round": "In this version", "rc_unassigned": "{req}: open, but no task or feature carries it", "rc_pair": "{req}: check the record against the user's words — said: {original} / recorded: {record}", "rc_no_req": "{feature}: no request it comes from", "rc_landed_open": "{feature} landed, but {req} is still open", "rc_done_unreported": "{task} is done, but {req} is not reported yet",
+        "promises_open": "Unfulfilled promises", "no_items": "(none)", "in_round": "In this version", "rc_unassigned": "{req}: open, but no task or feature carries it", "rc_pair": "{req}: check the record against the user's words — said: {original} / recorded: {record}", "rc_no_req": "{feature}: no request it comes from", "rc_landed_open": "{feature} landed, but {req} is still open", "rc_done_unreported": "{task} is done, but {req} is not reported yet", "rc_empty_features": "Development project has no feature list: TW feature add ...",
         "still_working": "Still in progress", "missed": "Not started", "feature_status": "{status}",
         "original_pair": "Original ↔ record", "feature_no_req": "Feature {feature} has no source request",
         "feature_planned": "planned", "feature_building": "building", "feature_landed": "landed", "feature_dropped": "dropped",
         "card_done": "Done", "card_doing": "In progress", "card_waiting": "Waiting on you", "ledger": "Ledger",
+        "quota_tier_normal": "normal", "quota_tier_burn-fable": "save Fable", "quota_tier_lead-only": "lead only", "quota_simulated": "quota: simulated {pct}% · tier {tier}",
         "docs": "Documents", "intro": "Recorded {requests} requests and {features} features. Board sections: {sections}. See: {where}.",
         "standing": "Standing: {text}", "guard_errors": "bash-guard had {n} errors in the last 7 days and allowed the command",
         "card_compare": "Comparison", "card_plan": "New plan", "card_read": "Material read", "card_delivered": "Delivery",
@@ -200,6 +203,27 @@ LABELS = {
         "decided_question_source": "answered question {n}", "decided_decision_source": "decision {n}",
         "decided_memory_source": "MEMORY.md line {n}", "decided_state_source": "saved decision",
         "card_grant": "standing grant: merge used {n} times",
+        "board_as_of": "As of {time} ({date})", "possibly_stale": "possibly stale",
+        "nothing_changed": "nothing changed since {time}", "card_more": "+{n} more (TW card --all)",
+        "features_done": "Features done", "features_not_done": "Features not done yet",
+        "version_notice": "{n} sessions still on an older version: {sessions}; each switches after its current turn ends",
+        "feature_moved": "(moved from {phase})", "grant_counts": "standing grants: {counts}", "grant_counts_sep": ", ",
+        "lead_seat_title": "lead", "opening_current": "  current: {current}; last elsewhere: {last}", "opening_unset": "None", "opening_no_last": "None", "opening_last": "{value} (said: \"{text}\")", "opening_unanswered": "unanswered_now: {keys}", "opening_all_answered": "unanswered_now: ", "opening_unanswered_list": "unanswered_now: {keys}", "selfcheck_ledger_files": "state.json and BOARD.md", "selfcheck_fix_sep": "; fix: ", "selfcheck_item_mode": "mode", "selfcheck_item_session": "session", "selfcheck_item_model": "model", "selfcheck_item_effort": "effort", "selfcheck_item_seats": "seats", "selfcheck_item_gpt": "GPT", "selfcheck_item_version": "version", "selfcheck_item_ledger": "ledger", "selfcheck_item_hooks": "hooks", "selfcheck_item_spawn": "spawn", "selfcheck_item_features": "features", "selfcheck_item_opening": "opening", "selfcheck_item_screening": "screening", "selfcheck_item_opened_by": "opened_by", "selfcheck_item_guard_errors": "guard_errors", "selfcheck_item_gpt_probe": "GPT probe", "language_list_sep": ", ",
+        "grant_count_merge": "merge {n}", "grant_count_archive": "archive {n}", "grant_count_schedule": "schedule {n}",
+        "selfcheck_tested": "tested-ok", "selfcheck_failed": "failed", "selfcheck_untested": "not-tested ({why})",
+        "selfcheck_recorded": "recorded",
+        "selfcheck_session_missing": "lead session not set", "selfcheck_model_detail": "served {served}, configured {configured} (fallback)", "selfcheck_effort_detail": "effort {effort}, wanted {wanted}", "selfcheck_seats_detail": "{used} of {max} seats used", "selfcheck_hooks_detail": "SessionStart context and PreToolUse bash-guard", "selfcheck_hooks_missing": "required hooks not found", "selfcheck_hooks_fix": "run install.py --link --project <folder> --served <served folder> (dry run, then --apply)",
+        "selfcheck_model_fix": "check configured and served model", "selfcheck_effort_fix": "match active effort to requested effort", "selfcheck_mode_fix": "switch this session's mode away from Auto and back in the mode menu under the message box, then tell the lead",
+        "selfcheck_spawn_fix": "open one probe thread (step 2) and record it", "spawn_ok": "probe thread opened", "spawn_refused": "probe thread refused", "spawn_untested": "untested",
+        "selfcheck_first_auto": "I am the lead of {project}, auto is in effect (teamwork {version})", "selfcheck_first_desktop": "I am the lead of {project}, on the desktop: I open threads in the turn you send a message (teamwork {version})", "selfcheck_first_unknown": "I am the lead of {project}; I could not read this session's mode: check it says Auto in the mode menu under the message box (teamwork {version})", "selfcheck_first_switch": "I am the lead of {project}; please switch this session to auto once: {fix} (teamwork {version})", "selfcheck_first_none": "No teamwork project here: run /teamwork in the project folder (teamwork {version})",
+        "ready_kind_code": "code", "ready_kind_unknown": "other", "ready_kind_docs_zh": "Chinese documents", "ready_kind_docs_en": "English documents", "ready_kind_test": "test", "ready_kind_read": "read", "ready_kind_review1": "first review", "ready_kind_review2": "second review", "ready_kind_research": "research", "ready_kind_plan": "planning", "ready_kind_debug-hard": "hard debugging", "ready_kind_merge": "merge",
+        "unapproved_leads": "These {n} leads need you to pick Auto once: {projects}",
+        "grant_recorded": "recorded standing grant use: {grant}",
+        "feature_import_counts": "added {added}, updated {updated}, unchanged {unchanged}",
+        "feature_import_error": "feature import: {reason}", "feature_row_name": "feature rows require name",
+        "grant_usage": "prefs --grant-use schedule|archive --what <text>",
+        "grant_missing": "{grant} is not in standing_grants; record the user's authorization first",
+        "doc_missing": "unknown document {kind}",
         "package_unreadable": "This package cannot be read here; open it and check it manually",
         "chain_recorded": "recorded", "chain_dispatched": "dispatched", "chain_accepted": "accepted",
         "chain_review": "review", "chain_merged": "merged", "chain_reported": "reported",
@@ -211,6 +235,38 @@ LABELS = {
         "nav_title_fixes": "title fixes", "nav_lead_state": "lead", "nav_needs_you": "You: ",
         "nav_reason_test": "completed or review-ready test session", "nav_reason_old_seat": "old seat for {thread}",
         "nav_reason_resolved": "thread resolved", "nav_no_directory": "no directory yet",
+        "doc_refreshed": "refreshed {age}",
+        "doc_age_minutes": "{n} minutes ago", "doc_age_hours": "{n} hours ago", "doc_age_days": "{n} days ago",
+        "dev_features_missing": "development projects need a features list",
+        "feature_unknown": "unknown feature {id}", "feature_invalid_status": "invalid feature status: {status}",
+        "feature_add_name": "feature add requires a name",
+        "version_other_computer": "another computer ({host}) last ran {version}; older: run release.py publish there",
+        "version_computer_newer": "another computer ({host}) is newer at {version}", "version_incomparable": "cannot compare (one side is a live clone)", "version_incomparable_sessions": "Cannot compare versions for {sessions} (one side is a live clone)",
+        "version_newer_detail": "newer release {version} available",
+        "version_edge_detail": "; unreleased changes: this is the live clone, not a release",
+        "version_detail": "{version}{edge}",
+        "version_fix": "say which version you run, and run release.py publish on the older computer",
+        "mode_not_supplied": "permission mode was not supplied by the caller",
+        "mode_recorded_detail": "recorded; not tested this turn",
+        "mode_opened_elsewhere": "lead opened by another session",
+        "mode_opened_elsewhere_detail": "this lead was opened by another session: the user must still pick Auto on a trusted device",
+        "mode_opened_self": "opened by this session",
+        "mode_trusted_fix": "the user must still pick Auto on a trusted device",
+        "features_count": "{n} feature(s) recorded", "features_not_required": "not required for this project",
+        "feature_fix": "TW feature add ... (dev projects keep a features list)",
+        "feature_move_fix": "refresh the feature id and try again",
+        "wrap_refresh_doc": "refresh board doc: paste BOARD.md into {link}",
+        "selfcheck_input_missing": "required input was not available",
+        "selfcheck_model_input_missing": "model and served model were not both supplied",
+        "selfcheck_effort_input_missing": "requested effort was not supplied",
+        "selfcheck_seats_fix": "reduce active sessions or raise the seat limit with the account owner",
+        "selfcheck_gpt_missing": "codex executable unavailable",
+        "selfcheck_gpt_fix": "install or repair the codex CLI",
+        "selfcheck_gpt_version_failed": "codex --version exited {code}",
+        "selfcheck_gpt_version_error": "codex --version could not complete: {error}",
+        "selfcheck_gpt_probe_missing": "codex unavailable",
+        "selfcheck_gpt_probe_fix": "rerun selfcheck --gpt-probe",
+        "doc_age_unknown": "unknown",
         "archive_idle_note": "show to the user first", "archive_disconnected_note": "candidate only; wait for the user",
         "archive_verified": "Verified and archived", "archive_verify_first": "Stop the session, verify by session ID, then archive it",
         "archive_restorable": "The lead can restore this with the platform tool",
@@ -372,9 +428,25 @@ LABELS = {
         "sensitive_guard": "sensitive tier: you said you want to review this kind of command",
         "decided_warning": "This may already be decided: {items}; check decided first",
         "decided_none": "no matches", "quota_due": "due", "quota_idle": "not due · idle: nothing is running", "quota_trigger_off": "Turn the quota timer off: the team is idle (set {id} enabled=false, then prefs --set quota_trigger_on=false)", "quota_trigger_on": "Turn the quota timer on: work is running or ready to send out (set {id} enabled=true, then prefs --set quota_trigger_on=true)", "quota_not_due": "not due · {minutes} minutes remaining",
+        "sweep_no_match": "sweep matched {matched} of {total} sessions: check the file is list_sessions output for this project", "sweep_permission": "{thread} is waiting for your approval", "sweep_failed": "{thread} failed", "sweep_fallback": "{thread} configured {configured} but served {served}", "sweep_interrupt": "{thread} turn interrupted", "sweep_done": "{thread} turn ended (noticed {seconds} seconds after it ended)",
+        "sweep_cloud": "{thread} is waiting for your approval (cloud)", "sweep_deliverable": "{thread} reported a deliverable whose message did not reach the lead: added to the board",
+        "sprint_started": "Sprint to {until}: hard deadline; deliver the usable version at the deadline", "sprint_board": "Sprint in progress, deadline {until} ({minutes} minutes left)", "sprint_ended": "Sprint ended at {until}; open work aligned to {sha}",
+        "sprint_misaligned": "Not aligned: {items}",
+        "beta_card": "Beta {version}\nGet it: {link}\nTry:\n{tries}\nAfter trying it, tell me what is wrong.", "stop_all": "Stop checklist: quota trigger {quota}; sweep timers {sweep}; Codex runs {codex}. No processes were stopped.",
+        "req_reported_heading": "Reported · awaiting your confirmation ({n})", "req_reported_summary": "{n} reported; reply 'confirm these' to fold them", "thread_waiting_heading": "Threads waiting on the lead", "req_reported_more": "+{n} more (TW req list --status reported)",
+        "feature_missing": "missing in ledger: {name}", "feature_extra": "not in file: {id} {name}", "feature_status_diff": "status differs: {name} file={file} ledger={ledger}", "feature_phase_diff": "phase differs: {name} file={file} ledger={ledger}",
+        "beta_no_new": "No new landed features; use --try to list what to test", "beta_no_link": "(no download link yet)", "beta_feedback_saved": "Feedback saved for beta {version}.",
         "package_ok": "ok", "package_missing": "missing: {items}", "package_empty": "empty files: {items}",
         "package_bad": "package is corrupt or incomplete", "path_missing": "path not found",
-        "route_fable": "gpt, with Claude handling fable",
+        "route_fable": "gpt, with Claude handling fable", "route_no_scripts": "Claude by hand (precise)",
+        "desktop_open": "Open these during the user's next message (desktop lead): {threads}", "desktop_queued": "Open when you send a message: {threads}",
+        "route_slow": "Quota at {pct}%: check in every {checkin} minutes and refresh quota and documents every {quota} minutes; stuck and waiting-on-you notices stay unchanged",
+        "pace_board": "Pace: check in every {checkin} minutes; quota and document refresh every {quota} minutes",
+        "route_docs-zh": "Chinese docs → suggested Fable", "route_review2": "second review → suggested Fable", "route_research": "research → suggested Fable",
+        "route_plan": "planning → suggested Opus", "route_debug-hard": "hard debugging → suggested Opus",
+        "route_gpt": "{kind} → suggested GPT",
+        "sweep_trigger_off": "Turn the sweep timer off: the team is idle (set {id} enabled=false, then prefs --set sweep_trigger_on=false)", "sweep_trigger_on": "Turn the sweep timer on: work is running or ready to send out (set {id} enabled=true, then prefs --set sweep_trigger_on=true)",
+        "sprint_until_required": "--until needs HH:MM or an ISO date/time", "sprint_no_active": "sprint end needs an active sprint", "beta_feedback_required": "beta feedback --text needs the user's feedback", "beta_version_required": "beta --version <tag-or-sha>", "thread_default_action": "thread defaults must stay reversible and internal", "req_confirm_words": "req confirm requires --user-said", "req_confirm_ids": "req confirm --all or req confirm R1 [R2 ...] --user-said <user words>", "req_confirm_reported": "only reported requests can be confirmed: {ids}",
         "succ_gap": "gaps", "succ_none": "none", "succ_current_facts": "Current facts", "succ_old_session": "Old session",
         "succ_unpushed": "Unpushed commits", "succ_dirty": "Uncommitted changes", "succ_requests": "Related requests", "succ_leases": "Leases",
         "succ_yes": "yes", "succ_no": "no", "succ_grade_usage": "grade requires quiz and --answers file",
@@ -506,7 +578,7 @@ LABELS = {
         "no_threads": "（还没有线程）",
         "t_created": "创建", "t_updated": "更新", "t_reported": "回报", "t_closed": "关闭",
         "t_where": "落到哪里", "t_thread": "线程", "t_session": "会话", "t_branch": "分支", "t_log": "日志",
-        "completed": "已完成 {n} 个：{names}", "waiting_for": "在等{why}",
+        "completed": "已完成 {n} 个：{names}", "stop_none": "未记录", "stop_codex": "请手动停止本项目的 Codex 运行", "standby": "待命 {n} 个（在座，本轮已结束，可以接活）：{names}", "waiting_for": "在等{why}",
         "wait_permission": "你点批准", "wait_user": "你回复", "wait_peer": "同伴", "wait_other": "进展",
         "stuck_cleanup": "清理临时文件", "stuck_guard": "被安全判断拦下", "stuck_permission": "等批准",
         "stuck_silent": "没有回音", "stuck_other": "其他问题", "nudge_recent": "已经催过一次：直接告诉用户哪个线程卡在哪",
@@ -525,11 +597,12 @@ LABELS = {
         "selfcheck_reminder": "负责人自查：本轮用户说过的事是否都已用 req add 记入台账。",
         "heard_unrecorded": "听到没记", "recorded_not_dispatched": "记了没派",
         "dispatched_no_reply": "派了没回", "replied_not_reported": "回了没报",
-        "promises_open": "没兑现的承诺", "no_items": "（无）", "in_round": "进了这一版", "rc_unassigned": "{req}：还没派，也没有功能或任务接它", "rc_pair": "{req}：请核对原话和记录——原话：{original} / 记录：{record}", "rc_no_req": "{feature}：找不到它来自哪条请求", "rc_landed_open": "{feature} 已落地，但 {req} 还开着", "rc_done_unreported": "{task} 做完了，但 {req} 还没回报",
+        "promises_open": "没兑现的承诺", "no_items": "（无）", "in_round": "进了这一版", "rc_unassigned": "{req}：还没派，也没有功能或任务接它", "rc_pair": "{req}：请核对原话和记录——原话：{original} / 记录：{record}", "rc_no_req": "{feature}：找不到它来自哪条请求", "rc_landed_open": "{feature} 已落地，但 {req} 还开着", "rc_done_unreported": "{task} 做完了，但 {req} 还没回报", "rc_empty_features": "开发项目还没有功能清单：TW feature add ...",
         "still_working": "还在做", "missed": "没赶上", "feature_status": "{status}",
         "original_pair": "原话 ↔ 记录", "feature_no_req": "功能 {feature} 没有关联来源请求",
         "feature_planned": "计划中", "feature_building": "开发中", "feature_landed": "已落地", "feature_dropped": "已放弃",
         "card_done": "做完了", "card_doing": "在做", "card_waiting": "等你", "ledger": "台账",
+        "quota_tier_normal": "正常", "quota_tier_burn-fable": "节省 Fable", "quota_tier_lead-only": "仅 lead", "quota_simulated": "额度模拟 {pct}% · 等级 {tier}",
         "docs": "文档", "intro": "已记下 {requests} 件事、{features} 个功能。看板栏目：{sections}。查看：{where}。",
         "standing": "长期要求：{text}", "guard_errors": "bash-guard 近 7 天出错 {n} 次，已照常放行",
         "card_compare": "对照分析", "card_plan": "新方案", "card_read": "素材已读", "card_delivered": "交付",
@@ -590,10 +663,63 @@ LABELS = {
         "nav_title_fixes": "标题待修", "nav_lead_state": "主控", "nav_needs_you": "要你：",
         "nav_reason_test": "测试会话已完成或待复核", "nav_reason_old_seat": "{thread} 的旧席位",
         "nav_reason_resolved": "线程已解决", "nav_no_directory": "尚无会话目录",
+        "doc_refreshed": "{age}更新",
+        "doc_age_minutes": "{n} 分钟前", "doc_age_hours": "{n} 小时前", "doc_age_days": "{n} 天前",
+        "dev_features_missing": "开发项目需要功能清单",
+        "feature_unknown": "未知功能 {id}", "feature_invalid_status": "功能状态无效：{status}",
+        "feature_add_name": "添加功能时必须提供名称",
+        "version_other_computer": "另一台电脑（{host}）上次运行的是 {version}，较旧：在那里运行 release.py publish",
+        "version_computer_newer": "另一台电脑（{host}）运行的是较新版本 {version}", "version_incomparable": "无法比较（一边是 live clone）", "version_incomparable_sessions": "无法比较 {sessions} 的版本（一边是 live clone）",
+        "version_newer_detail": "有较新的版本 {version}",
+        "version_edge_detail": "；包含尚未发布的更改，这是 live clone",
+        "version_detail": "{version}{edge}",
+        "version_fix": "说明当前运行的版本，并在旧电脑上运行 release.py publish",
+        "mode_not_supplied": "调用方没有提供权限模式",
+        "mode_recorded_detail": "已记录，本轮未实测",
+        "mode_opened_elsewhere": "lead 由另一会话打开",
+        "mode_opened_elsewhere_detail": "这个 lead 由另一会话打开：用户仍需在可信设备上选择 Auto",
+        "mode_opened_self": "由本会话打开",
+        "mode_trusted_fix": "用户仍需在可信设备上选择 Auto",
+        "features_count": "已记录 {n} 个功能", "features_not_required": "此项目不需要功能清单",
+        "feature_fix": "运行 TW feature add ...（开发项目要维护功能清单）",
+        "feature_move_fix": "核对功能 ID 后重试",
+        "wrap_refresh_doc": "刷新看板文档：把 BOARD.md 粘贴到 {link}",
+        "selfcheck_input_missing": "缺少必需输入",
+        "selfcheck_model_input_missing": "未同时提供模型和实际服务模型",
+        "selfcheck_effort_input_missing": "未提供要求的思考强度",
+        "selfcheck_seats_fix": "减少活动会话，或请账户负责人提高席位上限",
+        "selfcheck_gpt_missing": "找不到 codex 可执行程序",
+        "selfcheck_gpt_fix": "安装或修复 codex CLI",
+        "selfcheck_gpt_version_failed": "codex --version 退出码为 {code}",
+        "selfcheck_gpt_version_error": "codex --version 未能完成：{error}",
+        "selfcheck_gpt_probe_missing": "codex 不可用",
+        "selfcheck_gpt_probe_fix": "重新运行 selfcheck --gpt-probe",
+        "doc_age_unknown": "未知",
         "archive_idle_note": "先列给用户看", "archive_disconnected_note": "只列候选，等你定",
         "archive_verified": "已核实并归档", "archive_verify_first": "先停手、按会话 ID 核实，再归档",
         "archive_restorable": "lead 可用平台工具恢复",
         "open_session_tests": "开会话的实测情况：已验证（iPhone 开局选自动、认可过的 lead 开出的线程）；按记录推断（网页上中途切换）；待测（手机中途切换、Android、手机上和桌面 lead 聊时开线程、线程是否挂在桌面 lead 下可折叠）",
+        "board_as_of": "截至 {time}（{date}）", "possibly_stale": "可能已过期",
+        "nothing_changed": "自 {time} 后没有变化", "card_more": "另有 {n} 项（TW card --all）",
+        "features_done": "已完成的功能", "features_not_done": "尚未完成的功能",
+        "version_notice": "还有 {n} 个会话使用旧版本：{sessions}；各会话当前轮结束后会切换",
+        "feature_moved": "（从 {phase} 移动）", "grant_counts": "长期授权：{counts}", "grant_counts_sep": "、",
+        "lead_seat_title": "主控", "opening_current": "  现在：{current}；别的项目上次选的：{last}", "opening_unanswered_list": "还没回答：{keys}", "selfcheck_ledger_files": "state.json 和 BOARD.md", "selfcheck_fix_sep": "；怎么弄：", "selfcheck_item_mode": "模式", "selfcheck_item_session": "会话", "selfcheck_item_model": "模型", "selfcheck_item_effort": "思考强度", "selfcheck_item_seats": "名额", "selfcheck_item_gpt": "GPT", "selfcheck_item_version": "版本", "selfcheck_item_ledger": "台账", "selfcheck_item_hooks": "钩子", "selfcheck_item_spawn": "能开线程", "selfcheck_item_features": "功能清单", "selfcheck_item_opening": "开局设定", "selfcheck_item_screening": "开局体检", "selfcheck_item_opened_by": "开局来源", "selfcheck_item_guard_errors": "钩子报错", "selfcheck_item_gpt_probe": "GPT 探测", "language_list_sep": "、",
+        "grant_count_merge": "合并 {n} 次", "grant_count_archive": "归档 {n} 次", "grant_count_schedule": "排期 {n} 次",
+        "selfcheck_tested": "实测通过", "selfcheck_failed": "未通过", "selfcheck_untested": "未测：{why}",
+        "selfcheck_recorded": "已记录（未实测）",
+        "selfcheck_session_missing": "尚未登记 lead 会话", "selfcheck_model_detail": "实际服务 {served}，配置 {configured}（发生回退）", "selfcheck_effort_detail": "当前思考强度 {effort}，要求 {wanted}", "selfcheck_seats_detail": "已用 {used}/{max} 个席位", "selfcheck_hooks_detail": "已找到 SessionStart context 和 PreToolUse bash-guard", "selfcheck_hooks_missing": "没有找到必需的 hooks", "selfcheck_hooks_fix": "运行 install.py --link --project <folder> --served <served folder>（先 dry run，再 --apply）",
+        "selfcheck_model_fix": "核对配置模型与实际服务模型", "selfcheck_effort_fix": "把实际思考强度调到要求的级别", "selfcheck_mode_fix": "在消息框下方的模式菜单把本会话切离 Auto 后再切回，并告诉 lead",
+        "selfcheck_spawn_fix": "打开一个探测线程（步骤 2）并记录结果", "spawn_ok": "探测线程已打开", "spawn_refused": "探测线程被拒绝", "spawn_untested": "尚未实测",
+        "selfcheck_first_auto": "我是 {project} 的 lead，托管已生效（teamwork {version}）", "selfcheck_first_desktop": "我是 {project} 的 lead，使用桌面端；你发消息的这一轮我会打开线程（teamwork {version}）", "selfcheck_first_unknown": "我是 {project} 的 lead；无法读取本会话的模式，请检查消息框下方的模式菜单是否为 Auto（teamwork {version}）", "selfcheck_first_switch": "我是 {project} 的 lead；请把本会话切换到 auto 一次：{fix}（teamwork {version}）", "selfcheck_first_none": "当前文件夹没有 teamwork 项目：在项目文件夹运行 /teamwork（teamwork {version}）",
+        "ready_kind_code": "写代码", "ready_kind_unknown": "其他", "ready_kind_docs_zh": "中文稿", "ready_kind_docs_en": "英文稿", "ready_kind_test": "测试", "ready_kind_read": "阅读", "ready_kind_review1": "一审", "ready_kind_review2": "二审", "ready_kind_research": "研究", "ready_kind_plan": "规划", "ready_kind_debug-hard": "疑难调试", "ready_kind_merge": "合并",
+        "unapproved_leads": "以下 {n} 个 lead 需要你各自在可信设备上选择一次 Auto：{projects}",
+        "grant_recorded": "已记录长期授权使用：{grant}",
+        "feature_import_counts": "新增 {added}，更新 {updated}，未变化 {unchanged}",
+        "feature_import_error": "功能导入失败：{reason}", "feature_row_name": "功能数据行必须有 name",
+        "grant_usage": "用法：prefs --grant-use schedule|archive --what <text>",
+        "grant_missing": "{grant} 未列入 standing_grants；请先记录用户授权",
+        "doc_missing": "未知文档类型 {kind}",
         "handover_prompt_hint": "新会话的 append_system_prompt 用 `handover <t> --prompt` 的完整输出，不要只给文件位置。",
         "primary_review_gate": "主产出还没有在真实产物上验证。主产出：{primary}。先在真实产物上跑主产出冒烟。",
         "primary_done_gate": "{primary}：done 只认主产出 seen；pending-real 需要 --user-said。",
@@ -682,7 +808,7 @@ LABELS = {
         "screen_p4_base": "这个项目的 base 分支是什么？说明你在哪查的。",
         "screen_p4_commit": "最新提交号的前七位是什么？说明你在哪查的。",
         "opening_recommended": "（推荐）",
-        "opening_current": "  现在：{current}；别的项目上次选的：{last}", "opening_unset": "没设", "opening_no_last": "没有",
+        "opening_unset": "没设", "opening_no_last": "没有",
         "opening_all_answered": "三问都答过了",
         "opening_last": "{value}（原话「{text}」）", "opening_unanswered": "还没回答：{keys}",
         "opening_change": "以后想改，说一句话就行；lead 会跑：prefs --set {pref}={value} --user-said \"<你的话>\"",
@@ -716,9 +842,25 @@ LABELS = {
         "sensitive_guard": "敏感档：这类命令你说过要看一眼",
         "decided_warning": "这件可能已经定过：{items}，先看 decided", "decided_none": "没有命中",
         "quota_due": "该查额度了", "quota_idle": "不用查 · 空闲：没有活在跑", "quota_trigger_off": "关掉额度定时：团队空闲（把 {id} 设成 enabled=false，再 prefs --set quota_trigger_on=false）", "quota_trigger_on": "打开额度定时：有活在跑或可以派（把 {id} 设成 enabled=true，再 prefs --set quota_trigger_on=true）", "quota_not_due": "还没到时间 · 还剩 {minutes} 分钟",
+        "sweep_no_match": "巡检匹配到 {matched}/{total} 个会话：请检查文件是否为本项目的 list_sessions 输出", "sweep_permission": "{thread} 在等你批准", "sweep_failed": "{thread} 执行失败", "sweep_fallback": "{thread} 配置模型 {configured}，实际使用 {served}", "sweep_interrupt": "{thread} 本轮中断", "sweep_done": "本轮结束后 {seconds} 秒发现：{thread}",
+        "sweep_cloud": "{thread} 在等你批准（云端）", "sweep_deliverable": "{thread} 报了交付，但消息没送到 lead：已自动记上看板",
+        "sprint_started": "冲刺到 {until}：硬截止，到点交当前可用版本", "sprint_board": "冲刺中，截止 {until}（还剩 {minutes} 分钟）", "sprint_ended": "冲刺结束：开放工作已对齐到 {sha}",
+        "sprint_misaligned": "没对齐：{items}",
+        "beta_card": "Beta {version}\n获取方式：{link}\n试试：\n{tries}\n试完回我一句哪里不对。", "stop_all": "停止清单：额度定时器 {quota}；巡检定时器 {sweep}；Codex 运行未记录；请手动停止本项目的 Codex 运行。本命令没有停止任何进程。",
+        "req_reported_heading": "已回报·待你确认（{n}）", "req_reported_summary": "{n} 件已回报，回一句「这些都确认」就收起", "thread_waiting_heading": "线程在等 lead", "req_reported_more": "另有 {n} 件（TW req list --status reported）",
+        "feature_missing": "台账缺少：{name}", "feature_extra": "文件缺少：{id} {name}", "feature_status_diff": "状态不同：{name} 文件={file} 台账={ledger}", "feature_phase_diff": "阶段不同：{name} 文件={file} 台账={ledger}",
+        "beta_no_new": "没有新落地的功能；按 --try 填写要试的", "beta_no_link": "（还没有下载链接）", "beta_feedback_saved": "Beta {version} 的反馈已保存。",
         "package_ok": "齐全", "package_missing": "缺少：{items}", "package_empty": "空文件：{items}",
         "package_bad": "包坏了或不完整", "path_missing": "找不到这个路径",
-        "route_fable": "gpt，Claude 侧给 fable",
+        "route_fable": "gpt，Claude 侧给 fable", "route_no_scripts": "Claude 手写（精细活）",
+        "desktop_open": "等你发一句话我就开（桌面 lead）：{threads}", "desktop_queued": "等你发一句话我就开：{threads}",
+        "route_slow": "额度到 {pct}%：每 {checkin} 分钟巡检，每 {quota} 分钟刷新额度和文档；卡住和等你的提醒照常",
+        "pace_board": "节奏：每 {checkin} 分钟巡检；额度和文档每 {quota} 分钟刷新",
+        "route_docs-zh": "中文稿 → 建议 Fable", "route_review2": "二审 → 建议 Fable", "route_research": "研究 → 建议 Fable",
+        "route_plan": "规划 → 建议 Opus", "route_debug-hard": "疑难调试 → 建议 Opus",
+        "route_gpt": "{kind} → 建议 GPT",
+        "sweep_trigger_off": "关掉巡检定时：团队空闲（把 {id} 设成 enabled=false，再 prefs --set sweep_trigger_on=false）", "sweep_trigger_on": "打开巡检定时：有活在跑或可以派（把 {id} 设成 enabled=true，再 prefs --set sweep_trigger_on=true）",
+        "sprint_until_required": "--until 需要 HH:MM 或 ISO 日期时间", "sprint_no_active": "没有进行中的 sprint", "beta_feedback_required": "beta feedback --text 需要用户反馈", "beta_version_required": "beta --version <tag-or-sha>", "thread_default_action": "线程默认动作必须可撤回且只在内部准备", "req_confirm_words": "req confirm 需要 --user-said", "req_confirm_ids": "req confirm --all 或 req confirm R1 [R2 ...] --user-said <用户原话>", "req_confirm_reported": "只能确认已回报的请求：{ids}",
         "succ_gap": "缺口", "succ_none": "无", "succ_current_facts": "当前事实", "succ_old_session": "旧会话",
         "succ_unpushed": "未推送提交", "succ_dirty": "未提交改动", "succ_requests": "关联请求", "succ_leases": "租约",
         "succ_yes": "是", "succ_no": "否", "succ_grade_usage": "grade 需要 quiz 和 --answers 文件", "succ_aborted_seat": "已取消的交接不能上座",
@@ -807,6 +949,7 @@ MODEL_STATUS_LABELS = {
            "check_msg_test_warning": "warning unsupported-without-test: say how it was tested",
            "change_unknown": "(previous value not recorded)", "change_empty": "No tracked environment changes recorded",
            "model_switched": "{initial} is unsuitable for {kind}; switched to {model}", "model_no_higher": "{initial} is unsuitable for {kind} and no higher model is available; kept it", "needs_user": "This step needs you to click it yourself: ", "boundary_hint": "Record the boundary too (--boundary: what it does not mean)", "pref_prefix": "Preference: ", "pref_boundary": " (boundary: does not mean {b})", "old_link": "old version, do not use", "big_picture_receipt": "A receipt between sessions should not start with the big-picture header", "never_raise_hit": 'Hits a never-raise topic: {hit}. If the user\'s words allow it, use --override "<their words>"', "lead_relay": "Consider a new lead (succ start lead); the ledger, board and feature list carry over as they are", "weekly": "This week: Fable used {fable} times, GPT {gpt} times, {redo} redone and thrown away", "model_up": "{model} is back", "gpt_default_q": "Default: if you do not answer within {minutes} minutes, Claude takes over P0 work and lower-priority work waits for GPT", "gpt_deny_q": "Put GPT's {kind} work on the unsuitable list?", "model_escalated": "{model} does poorly at {kind}; switched to {next}. Reason: 2 of the last 3 were redone", "tk_head": "Taking over: {project} — {goal}; {n} threads", "tk_none": "none", "tk_more": "{n} more {what}, see board", "tk_thread": "{seat}: {status}; {task}; last report {at}", "tk_threads": "threads", "tk_promises_h": "Promised, not done: ", "tk_promises": "promises", "tk_asks_h": "Waiting for you: ", "tk_asks": "questions", "tk_issues_h": "Problems found: ", "tk_issues": "issues", "archive_broadcast": "{seat} is now owned by {who}; delivery: {where}", "env_heading": "Environment and process changes", "takeover_hint": "Run opening --takeover and send it to the user", "default_due": "default time reached: apply it with ask --default {n} if it can be undone", "parked": "parked at archive ({seat}, {why}): ",
+        "weekly_pair_insufficient": "insufficient data (fewer than 3 pairs)", "weekly_pair_result": "same-kind pairs {n}: Fable average {fable:.1f} {unit}, Opus average {opus:.1f} {unit} → {winner}", "weekly_metric_tokens": "tokens", "weekly_metric_minutes": "minutes", "weekly_metric_rework_rate": "rework rate", "weekly_metric_count": "items", "weekly_fable_cheaper": "Fable is cheaper", "weekly_opus_cheaper": "Opus is cheaper", "weekly_equal": "equal average",
            "default_external": "This looks external or irreversible and cannot be defaulted; if it is not, add --internal \"<reason>\""},
     "zh": {"model_down": "{model} 暂不可用：{why}，预计 {until} 恢复",
            "model_reason_quota": "额度", "model_reason_connection": "连接", "model_reason_other": "其他原因",
@@ -820,6 +963,7 @@ MODEL_STATUS_LABELS = {
            "check_msg_test_warning": "warning unsupported-without-test: 先说清怎么测的",
            "change_unknown": "（未记录原值）", "change_empty": "没有记录到环境和做法变化",
            "model_switched": "{initial} 不适合 {kind}，已换 {model}", "model_no_higher": "{initial} 不适合 {kind}，没有更高一级可用；保留原模型", "needs_user": "这一步要你本人来点：", "boundary_hint": "记一下边界（--boundary：它不等于什么）", "pref_prefix": "偏好：", "pref_boundary": "（边界：不等于{b}）", "old_link": "旧版，别用", "big_picture_receipt": "会话间回执不要大局观开头", "never_raise_hit": '命中禁区：{hit}；如用户原话允许，使用 --override "<用户原话>"', "lead_relay": "建议换一个新 lead（succ start lead），台账、看板、功能清单原样接上", "weekly": "这周 Fable 用了 {fable} 次、GPT 用了 {gpt} 次，返工作废 {redo} 次", "model_up": "{model} 已恢复", "gpt_default_q": "默认：{minutes} 分钟内你没回，P0 的活由 Claude 接着做，低优先的先停，等 GPT 恢复", "gpt_deny_q": "要把 GPT 的 {kind} 列进不适合吗", "model_escalated": "{model} 做不好 {kind}，已换 {next}，原因：最近 3 次 2 次返工", "tk_head": "接手：{project} — {goal}；{n} 个线程", "tk_none": "无", "tk_more": "另有 {n} 个{what}，见 board", "tk_thread": "{seat}：{status}；{task}；最后汇报 {at}", "tk_threads": "线程", "tk_promises_h": "答应未做：", "tk_promises": "承诺", "tk_asks_h": "等你：", "tk_asks": "问题", "tk_issues_h": "发现问题：", "tk_issues": "问题", "archive_broadcast": "{seat} 现在由 {who} 管；交付在 {where}", "env_heading": "环境和做法有什么变化", "takeover_hint": "跑 opening --takeover 发给用户", "default_due": "已到默认时间：能撤回的话用 ask --default {n} 落默认", "parked": "归档时挂起（{seat}，{why}）：",
+        "weekly_pair_insufficient": "数据不足（少于 3 对）", "weekly_pair_result": "同类活 {n} 对：Fable 平均 {fable:.1f}{unit}，Opus 平均 {opus:.1f}{unit} → {winner}", "weekly_metric_tokens": "个 token", "weekly_metric_minutes": "分钟", "weekly_metric_rework_rate": "返工率", "weekly_metric_count": "件", "weekly_fable_cheaper": "Fable 更省", "weekly_opus_cheaper": "Opus 更省", "weekly_equal": "平均相同",
            "default_external": "看起来是对外或不可撤回的事，不能按默认做；确实不是就加 --internal \"<理由>\""},
 }
 
@@ -1069,8 +1213,13 @@ def result_changed(st, q):
                 not all(st.get("tasks", {}).get(t, {}).get("status") == "done" for t in tasks))
 
 
+def awaiting_confirm(st, q):
+    """Reported and ready for the user's confirmation; a changed result stays in the main list."""
+    return q.get("status") == "reported" and not result_changed(st, q)
+
+
 def render_requests(st, chain=False):
-    reqs = [(r, q) for r, q in st.get("requests", {}).items() if q["status"] not in REQ_END and q["status"] != "remark"]
+    reqs = [(r, q) for r, q in st.get("requests", {}).items() if q["status"] not in REQ_END and q["status"] != "remark" and not awaiting_confirm(st, q)]
     if not reqs:
         return None
     order = {"delivered": 0, "held": 1, "proposed": 2, "open": 3, "waiting_user": 4, "dispatched": 5, "reported": 6, "landed": 7, "wont": 8}
@@ -1102,8 +1251,9 @@ def render_features(st):
     out = []
     for phase, items in sorted(groups.items(), key=lambda x: (x[0] or "~")):
         out.append("### " + _md(phase or "-"))
-        for fid, f in sorted(items, key=lambda x: int(x[0][1:])):
-            out.append(f"- **{fid}** {_md(f['name'])} [{lab(st, 'feature_' + f['status'])}] — {', '.join(f.get('reqs') or []) or '-'}")
+        for fid, f in sorted(items, key=lambda x: (re.sub(r'\d+.*', '', x[0]), int(m.group()) if (m := re.search(r'\d+', x[0])) else 0, x[0])):
+            moved = lab(st, "feature_moved", phase=f.get("moved_from")) if f.get("moved_from") else ""
+            out.append(f"- **{fid}** {_md(f['name'])} [{lab(st, 'feature_' + f['status'])}] — {', '.join(f.get('reqs') or []) or _md(f.get('source') or '-')}" + (f" {moved}" if moved else ""))
     return "\n".join(out)
 
 
@@ -1132,12 +1282,14 @@ def _reconcile_rows(st):
             for rid, q in reqs.items():
                 if tid in (q.get("tasks") or []) and q.get("status") not in REQ_SETTLED:
                     rows.append({"kind": "done_task_request_unreported", "task": tid, "req": rid})
+    if not features and (tasks or re.search(r"\b(app|software|website|webapp|feature|implement|code|build|开发|应用|网站)\b", st.get("goal", ""), re.I)):
+        rows.append({"kind": "empty_features"})
     return rows
 
 
 REQ_SETTLED = ("reported", "landed", "closed", "dropped", "wont", "remark")
 RC_KEYS = {"unassigned_request": "rc_unassigned", "original_pair": "rc_pair", "feature_without_request": "rc_no_req",
-           "landed_request_open": "rc_landed_open", "done_task_request_unreported": "rc_done_unreported"}
+           "landed_request_open": "rc_landed_open", "done_task_request_unreported": "rc_done_unreported", "empty_features": "rc_empty_features"}
 
 
 def _rc_line(st, x):
@@ -1304,10 +1456,11 @@ def _patch_state(d, path_keys, update_fn, event=None):
 
 
 def _save_locked(d, st, event=None):
+    metadata_only = (event or {}).get("ev") == "session-start-version"
     lock = st.get("write_lock")
     disk = json.loads((d / "state.json").read_text(encoding="utf-8")) if (d / "state.json").exists() else {}
     disk_lock = disk.get("write_lock")
-    if disk_lock and not (event or {}).get("ev", "").startswith("succ-"):
+    if disk_lock and not metadata_only and not (event or {}).get("ev", "").startswith("succ-"):
         sys.exit(lab(st, "lead_relead_locked") if disk_lock.get("relead") else lab(st, "lead_write_locked", ho=disk_lock.get("ho")))
     if disk.get("rev", 0) != st.get("_rev_loaded", 0):
         sys.exit(lab(st, "ledger_changed"))
@@ -1317,7 +1470,7 @@ def _save_locked(d, st, event=None):
     if isinstance(log_rev, int) and not isinstance(log_rev, bool) and log_rev > state_rev:
         print(f"log.jsonl is ahead of state.json (log rev {log_rev} > state rev {state_rev}); run `TW rebuild --apply`",
               file=sys.stderr)
-    if lock and not (event or {}).get("ev", "").startswith("succ-"):
+    if lock and not metadata_only and not (event or {}).get("ev", "").startswith("succ-"):
         sys.exit(lab(st, "lead_relead_locked") if lock.get("relead") else lab(st, "lead_write_locked", ho=lock.get("ho")))
     _radar_update(st)
     root_pending = st.pop("_root_pending", [])
@@ -1333,7 +1486,8 @@ def _save_locked(d, st, event=None):
                      if event_payload is not None else None)
     same_retried_event = (event is not None and log_rev == retry_rev and prior_payload == event_payload)
     st["rev"] = loaded_rev if not event else retry_rev if same_retried_event else max(loaded_rev, log_rev or 0) + 1
-    st["updated"] = now()
+    if not metadata_only:
+        st["updated"] = now()
     tmp = d / f"state.json.tmp-{os.getpid()}"
     tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
     log_event = None
@@ -1500,7 +1654,7 @@ def title_for(st, name):
 
 
 def lead_title(st):
-    return f"[{tag(st)}] ★lead · " + ("主控" if _lang_code(st) == "zh" else "lead")
+    return f"[{tag(st)}] ★lead · " + lab(st, "lead_seat_title")
 
 
 PERMISSION_MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions")
@@ -1719,11 +1873,15 @@ def render_groups(st, board=False, all_threads=False):
                                f"{t.get('summary') or '-'}")
             continue
         if g == "idle":
-            names = [n for n, t in st["threads"].items() if t["status"] in (("idle", "resolved") if all_threads else ("idle",))]
-            if names:
-                details = [f"{n} — {_screen_label(st, n)}" for n in names if _screen_label(st, n)]
-                out.append(lab(st, "completed", n=len(names), names=", ".join(names)) +
-                           (("\n" + "\n".join(f"  {x}" for x in details)) if details else ""))
+            # idle = in its seat, turn ended, can take work (standby); only resolved threads are finished
+            for status, key in (("idle", "standby"), ("resolved", "completed")):
+                if status == "resolved" and not all_threads:
+                    continue
+                names = [n for n, t in st["threads"].items() if t["status"] == status]
+                if names:
+                    details = [f"{n} — {_screen_label(st, n)}" for n in names if _screen_label(st, n)]
+                    out.append(lab(st, key, n=len(names), names=", ".join(names)) +
+                               (("\n" + "\n".join(f"  {x}" for x in details)) if details else ""))
             continue
         names = [n for n, t in st["threads"].items() if t["status"] == g and n not in stuck and
                  not (board and not all_threads and g == "planned" and not t.get("session_id"))]
@@ -1755,10 +1913,25 @@ def render_board(st, all_threads=False):
     r = st.get("repo", {})
     out = [
         f"# teamwork: {st['project']}" + (f" ({tag(st)})" if tag(st) != st["project"] else ""),
+        lab(st, "board_as_of", time=(st.get("updated") or now())[11:16], date=(st.get("updated") or now())[:10]) +
+        (" — " + lab(st, "possibly_stale") if _ledger_stale(st) else ""),
         "",
     ]
+    if st.get("desktop_open_queue"):
+        out += [lab(st, "desktop_queued", threads="、".join(st["desktop_open_queue"])), ""]
+    if st.get("sprint") and not st["sprint"].get("ended_at"):
+        until = _when(st["sprint"].get("until"))
+        minutes = max(0, int((until - _when(now())).total_seconds() // 60)) if until else "?"
+        out += [lab(st, "sprint_board", until=(st["sprint"].get("until", "?")[11:16] if "T" in st["sprint"].get("until", "") else st["sprint"].get("until", "?")), minutes=minutes), ""]
+    if quota_pace_tier(st)[0] != "normal":
+        out += [lab(st, "pace_board", checkin=effective_interval(st, "checkin_minutes"),
+                    quota=effective_interval(st, "quota_every_minutes")), ""]
+    notice = st.get("version_notice") or {}
+    if notice.get("release") == running_version()[0] and notice.get("sessions"):
+        out += [lab(st, "version_notice", n=len(notice["sessions"]), sessions=", ".join(notice["sessions"])), ""]
     recent = st.get("reconcile") or {}
-    docs = [f"- [{lab(st, 'doc_' + key)}]({doc['link']})" + (f" — {_md(doc['note'])}" if doc.get("note") else "")
+    docs = [f"- [{lab(st, 'doc_' + key)}]({doc['link']})" + (f" — {_md(doc['note'])}" if doc.get("note") else "") +
+            f" — {_age_label(st, doc.get('refreshed_at'))}" + (" (" + lab(st, "d_stale") + ")" if _doc_stale(st, doc) else "")
             for key in DOC_KINDS for doc in [st.get("docs", {}).get(key)] if doc and doc.get("link")]
     if docs:
         out += docs + [""]
@@ -1788,6 +1961,12 @@ def render_board(st, all_threads=False):
     reqs = render_requests(st, chain=True)
     if reqs:
         out += [f"## {lab(st, 'requests')}", "", reqs, ""]
+    reported = [(rid, q) for rid, q in st.get("requests", {}).items() if awaiting_confirm(st, q)]
+    if reported:
+        out += ["<details>", f"<summary>{lab(st, 'req_reported_heading', n=len(reported))}</summary>", ""]
+        out += [f"- {rid}: {_md(q.get('text',''))}\n  - {progress_chain(st, q)}" for rid, q in reported[:5]]
+        if len(reported) > 5: out += [lab(st, "req_reported_more", n=len(reported)-5)]
+        out += ["", "</details>", ""]
     features = render_features(st)
     if features:
         out += [f"## {lab(st, 'features')}", "", features, ""]
@@ -1812,14 +1991,17 @@ def render_board(st, all_threads=False):
         "",
         render_groups(st, board=True, all_threads=all_threads),
     ]
+    thread_q = [(i, q) for i, q in enumerate(st.get("questions", [])) if not q.get("answered") and q.get("from") not in ("lead", "user") and not q.get("external")]
+    if thread_q:
+        out += ["", f"## {lab(st, 'thread_waiting_heading')}", ""]
+        out += [f"- [{i + 1}] ({q['from']}) {_md(q['text'])}" + (" — " + lab(st, "default_prefix") + _md(q["defaulted"].get("what", "")) if q.get("defaulted") else "") for i, q in thread_q]
     open_q = [
-        (i, q) for i, q in enumerate(st.get("questions", [])) if not q.get("answered")
+        (i, q) for i, q in enumerate(st.get("questions", [])) if not q.get("answered") and q not in [x[1] for x in thread_q]
     ]
-    due_after = int(str(st.get("prefs", {}).get("default_after_minutes", 30)).strip() or 30)
     waiting = [
         f"- [{i + 1}] ({q['from']}) " + (lab(st, "proposal_prefix") if q.get("kind") == "proposal" else "") + _md(q['text'])
         + (" — " + lab(st, "default_prefix") + _md(q["defaulted"]["what"]) + lab(st, "can_change") if q.get("defaulted")
-           else " — " + model_lab(st, "default_due", n=i + 1) if q.get("t") and (_minutes_since(q["t"]) or 0) >= due_after
+           else " — " + model_lab(st, "default_due", n=i + 1) if question_default_due(st, q)
            and not q.get("external") and not q.get("beyond") and not DEFAULT_OUTWARD_RE.search(q.get("text", "")) else "")
         for i, q in open_q
     ] + ["- " + model_lab(st, "needs_user") + _md(x.get("text", ""))
@@ -1912,11 +2094,41 @@ def _md(x):
     return re.sub(r"([~*_`\\])", r"\\\1", " ".join(str(x or "").split()))
 
 
+def _ledger_stale(st):
+    updated = _when(st.get("updated"))
+    current = _when(now())
+    return bool(updated and current and (current - updated).total_seconds() > int(st.get("prefs", {}).get("stale_minutes", 120)) * 60)
+
+
+def _doc_stale(st, doc):
+    refreshed, updated = _when(doc.get("refreshed_at")), _when(st.get("updated"))
+    return bool(updated and (not refreshed or (updated - refreshed).total_seconds() > int(st.get("prefs", {}).get("stale_minutes", 120)) * 60))
+
+
+def _age_label(st, stamp):
+    when = _when(stamp)
+    if not when: return lab(st, "doc_age_unknown")
+    current = _when(now())
+    minutes = max(0, int((current - when).total_seconds() // 60)) if current else 0
+    age = lab(st,"doc_age_minutes",n=minutes) if minutes < 60 else lab(st,"doc_age_hours",n=minutes//60) if minutes < 1440 else lab(st,"doc_age_days",n=minutes//1440)
+    return lab(st, "doc_refreshed", age=age)
+
+
+def _current_feature_phase(st):
+    pref = st.get("prefs", {}).get("current_phase")
+    if pref: return pref
+    phases = sorted({f.get("phase") for f in st.get("features", {}).values()
+                     if f.get("status") in ("planned", "building") and f.get("phase")})
+    return phases[0] if phases else ""
+
+
 def render_share(st):
     """IL-13, IL-38: what the user opens on a phone, in their language. Deliverables first, then their requests,
     waiting items, issues, then every requirement by phase and category so stale ones can be struck out."""
     L = lambda k, **kw: lab(st, k, **kw)
-    out = [f"# {st['project']}: {L('s_title')}", "", f"{L('s_updated')} {st.get('updated', '-')[:16].replace('T', ' ')}",
+    saved_at = st.get("updated") or now()
+    out = [f"# {st['project']}: {L('s_title')}", "", L("board_as_of", time=saved_at[11:16], date=saved_at[:10]) + (" — " + L("possibly_stale") if _ledger_stale(st) else ""),
+           f"{L('s_updated')} {st.get('updated', '-')[:16].replace('T', ' ')}",
            ""]
     dl = [x for x in st.get("deliverables", []) if x.get("status") != "superseded"]
     out += [f"## {L('s_deliverables')}", ""] + ([f"{i + 1}. **{_md(x['name'])}** — {L('d_' + x['status'])}"
@@ -1927,12 +2139,18 @@ def render_share(st):
     roots=[(n,v) for n,v in radar(st).items() if v["state"]!="ok"]
     if roots: out += [f"## {L('root_heading')}", ""] + [f"- {n}: {L('root_'+v['state'])} ({len(v['symptoms'])} {L('s_symptoms')}, {v['rework']} {L('s_rework')})" for n,v in roots] + [""]
     reqs = st.get("requests", {})
-    live = [(r, q) for r, q in reqs.items() if q["status"] not in REQ_END]
+    live = [(r, q) for r, q in reqs.items() if q["status"] not in REQ_END and not awaiting_confirm(st, q)]
     out += [f"## {L('s_requests')}", ""] + ([f"- {r} — {L('req_' + q['status'])}: {_md(q['text'])}"
                                              + (f" → {_where(q['where'])}" if q.get("where") else "")
                                              + (f" ({L('followup')}: {_md(q['followup'])})" if q.get("followup")
                                                 else "")
                                              for r, q in live] or [L("s_none_open")]) + [""]
+    reported=[(r,q) for r,q in reqs.items() if awaiting_confirm(st, q)]
+    if reported:
+        out += ["<details>", f"<summary>{L('req_reported_heading',n=len(reported))}</summary>", ""]
+        out += [f"- {r} — {_md(q['text'])}" for r,q in reported[:5]]
+        if len(reported)>5: out += [L("req_reported_more",n=len(reported)-5)]
+        out += ["", "</details>", ""]
     features = render_features(st)
     if features:
         out += [f"## {L('features')}", "", features, ""]
@@ -2033,14 +2251,16 @@ def cmd_init(a):
             "skill_edge": "",  # H8: a clone this project tests before release; empty = the installed release
             "check_timeout_minutes": 60,  # merge stops checks that run longer (the whole process group); 0 = no limit
             "default_after_minutes": 30,  # IL-1: an unanswered non-gated question takes its stated default after this
-            "ledger_line_every": "wrapup",
+            "ledger_line_every": "report",
+            "stale_minutes": 120,
             "screen_mode": "shadow", "screen_autograde": True, "signals_red_at": 3, "relay_max_per_day": 2, "succ_watchdog_minutes": 45,
             "signals_window_minutes": 30, "observe_minutes": 20, "grader_timeout_s": 300,
             "lead_compact_alert": 2, "lead_compact_swap": 4, "drift_window_hours": 24,
             "root_mode": "on", "root_symptoms_at": 2, "root_rework_at": 2, "root_full_at": 4, "root_debt_at": 2, "root_fresh_at": 3,
             "archive_idle_days": 3,
             "reconcile_every": "wrapup", "selfcheck_every": "wrapup", "quota_every_minutes": 60,
-            "quota_trigger_id": "", "quota_trigger_on": "",  # R66: the lead's hourly quota timer and whether it is enabled
+            "slow_factor": 2, "sweep_every_minutes": 10, "thread_default_after_minutes": 5,
+            "quota_trigger_id": "", "quota_trigger_on": "", "sweep_trigger_id": "", "sweep_trigger_on": "",
         },
     }
     if not (d / "INSTRUCTIONS.md").exists():
@@ -2134,6 +2354,9 @@ def cmd_lead(a):
         st["lead"]["session_id"] = a.session
     if a.mode:
         st["lead"]["permission_mode"] = a.mode
+    if getattr(a, "opened_by", None): st["lead"]["opened_by"] = a.opened_by
+    if getattr(a, "spawn_probe", None):
+        st["lead"]["spawn_probe"] = {"result": a.spawn_probe, "note": getattr(a, "note", None) or "", "at": now()}
     if a.rc_env:
         st["envs"]["rc"] = a.rc_env
     if a.cloud_env:
@@ -2142,13 +2365,14 @@ def cmd_lead(a):
         st["repo"]["url"] = a.repo_url
     if a.base:
         st["repo"]["base"] = a.base
-    readonly = a.session is None and not (a.mode or a.rc_env or a.cloud_env or a.repo_url or a.base)
+    if getattr(a, "desktop", False): st["lead"]["desktop"] = True
+    readonly = a.session is None and not (a.mode or a.rc_env or a.cloud_env or a.repo_url or a.base or getattr(a, "desktop", False) or getattr(a, "opened_by", None) or getattr(a, "spawn_probe", None))
     if relead:
         st.pop("write_lock", None)
     if not readonly:
         save(d, st, {"ev": "succ-relead-seat" if relead else "lead", "session": a.session, "envs": st["envs"],
                  **({"lead_change":{"from":old,"to":a.session,"history":st["lead"].get("sessions",[])[-2:]}} if a.session and old and old != a.session else {}),
-                 **({"mode": a.mode} if a.mode else {})})
+                 **({"mode": a.mode} if a.mode else {}), **({"desktop": True} if getattr(a, "desktop", False) else {})})
     out = {"lead": st["lead"], "envs": st["envs"], "repo": st["repo"], "thread_permission_mode": thread_mode(st),
            "title": lead_title(st), "tags": [f"teamwork:{tag(st)}", "teamwork-thread:lead"],
            "set_up": "set_session_title and set_session_tags on your own session with these (IL-34)"}
@@ -2561,6 +2785,7 @@ def cmd_thread(a):
             "thread": name,
             "status": t["status"],
             "summary": t["summary"],
+            **({"waiting_for": t.get("waiting_for")} if t.get("waiting_for") else {}),
             **({"session": t["session_id"], "prev_session": prev_session, "reason": reason}
                if session_change else {}),
         },
@@ -4201,6 +4426,11 @@ def cmd_ready(a):
     pending_hints=st.pop("screen_pending_hints",[])
     for hint in pending_hints: print(hint.get("line", ""), file=sys.stderr)
     if pending_hints: save(d,st,{"ev":"screen-hints-shown"})
+    sprint = st.get("sprint") or {}
+    if sprint and not sprint.get("ended_at") and _when(sprint.get("until")) and _when(sprint.get("until")) <= _when(now()):
+        cmd_sprint(argparse.Namespace(action="end", since=None, json=False, until=None, goal=None, _from_ready=True))
+        st = load(d)
+    if apply_thread_defaults(st): save(d, st, {"ev": "thread-defaults"})
     urgent = urgent_unacked(st)
     done = {t for t, k in st["tasks"].items() if k["status"] == "done"}
     busy = sum(
@@ -4219,6 +4449,14 @@ def cmd_ready(a):
             lease_warnings.append(f"{task}: {info['status']}")
     to_open = {st["tasks"][tid].get("owner") for tid in ready
                if st["tasks"][tid].get("owner") and not (st.get("threads", {}).get(st["tasks"][tid].get("owner"), {}).get("session_id"))}
+    desktop_line = None
+    if st.get("lead", {}).get("desktop") and to_open:
+        queued = sorted(set(st.get("desktop_open_queue", [])) | to_open)
+        if queued != st.get("desktop_open_queue", []):
+            st["desktop_open_queue"] = queued
+            save(d, st, {"ev": "desktop-open-queue", "threads": queued})
+        desktop_line = lab(st, "desktop_open", threads=", ".join(sorted(to_open)))
+        print(desktop_line, file=sys.stderr)
     notice = (model_lab(st, "ready_notice", n=len(to_open)) if len(to_open) >= 2 else None)
     if notice:
         print(notice, file=sys.stderr)
@@ -4263,13 +4501,36 @@ def cmd_ready(a):
     if nested_gaps:
         print(f"嵌套会话检查缺口：{nested_gaps} 份桌面会话元数据 JSON 无法读取 / "
               f"Nested-session scan gap: skipped {nested_gaps} unreadable desktop session metadata file(s)", file=sys.stderr)
+    sweep_trigger = sweep_trigger_hint(st, bool(ready))
+    if sweep_trigger:
+        print(lab(st, "sweep_trigger_" + sweep_trigger, id=st["prefs"]["sweep_trigger_id"]), file=sys.stderr)
+    pace_tier = quota_pace_tier(st)[0]
+    checkin_eff = effective_interval(st, "checkin_minutes")
+    quota_eff = effective_interval(st, "quota_every_minutes")
+    pace_notice(d, st)
+    thread_defaults_due = []
+    for i, q in enumerate(st.get("questions", []), 1):
+        if q.get("answered") or not q.get("default_action") or q.get("external") or q.get("from") in ("lead", "user"):
+            continue
+        mins = question_default_minutes(st, q)
+        if question_default_due(st, q):
+            thread_defaults_due.append({"question": i, "from": q.get("from"), "text": q.get("text"), "minutes": mins,
+                                        "default": (q.get("defaulted") or {}).get("what", q.get("default_action")),
+                                        "defaulted": bool(q.get("defaulted"))})
     print(
         json.dumps(
             {
                 "ready": ready,
                 "quota_due": quota_due(st, dispatching=bool(ready)),
+                "sweep_due": sweep_due(st, dispatching=bool(ready)),
+                "thread_defaults_due": thread_defaults_due,
+                **({"sweep_trigger": sweep_trigger} if sweep_trigger else {}),
+                "pace": {"tier": pace_tier, "checkin_minutes": checkin_eff,
+                         "quota_every_minutes": quota_eff, "slowed": pace_tier != "normal"},
                 **({"quota_trigger": trigger} if trigger else {}),
                 "route_hints": {t: route_hint(st, t) for t in ready},
+                "route_lines": {t: route_hint(st, t).get("why_text") for t in ready},
+                **({"desktop_open": desktop_line} if desktop_line else {}),
                 "urgent_unacked": urgent,
                 "blocked_by_lease": blocked,
                 "lease_warnings": lease_warnings,
@@ -4324,12 +4585,94 @@ def route_hint(st, task):
     t = st.get("tasks", {}).get(task, {})
     if t.get("route") in ("gpt", "fable", "opus", "claude-fable"):
         return {"route": t["route"], "why": "task"}
+    if t.get("no_scripts"):
+        return {"route": "claude", "why": "no-scripts", "why_text": lab(st, "route_no_scripts")}
     tier = ((st.get("quota") or {}).get("tier") or "")
+    kind = t.get("kind") or "unknown"
     if tier in ("lead-only", "save"):
         return {"route": "gpt", "why": "tier"}
     if tier == "burn-fable":
+        if kind in ("docs-zh", "review2", "research"):
+            return {"route": "fable", "why": "work-kind:" + kind, "why_text": lab(st, "route_" + kind)}
         return {"route": "gpt", "why": "tier", "claude_side": "fable", "why_text": lab(st, "route_fable")}
-    return {"route": "gpt", "why": "default"}
+    route = {"docs-zh": "fable", "review2": "fable", "research": "fable",
+             "plan": "opus", "debug-hard": "opus"}.get(kind, "gpt")
+    return {"route": route, "why": "work-kind:" + kind,
+            "why_text": lab(st, "route_" + kind) if kind in ("docs-zh", "review2", "research", "plan", "debug-hard")
+            else lab(st, "route_gpt", kind=lab(st, "ready_kind_" + kind))}
+
+
+def quota_pace_tier(st):
+    quota = st.get("quota") or {}
+    prefs = st.get("prefs") if isinstance(st.get("prefs"), dict) else {}
+    tier = str(quota.get("tier") or "normal")
+    if tier in QUOTA_RANK and QUOTA_RANK.index(tier) >= QUOTA_RANK.index("burn-fable"):
+        return tier, int(quota.get("pct") or st.get("quota_pct") or prefs.get("quota_burn_at", 70))
+    pct = quota.get("pct", st.get("quota_pct"))
+    burn = int(prefs.get("quota_burn_at", 70) or 70)
+    if isinstance(pct, (int, float)) and pct >= burn:
+        return ("lead-only" if pct >= int(prefs.get("quota_lead_only_at", 90) or 90) else "burn-fable"), int(pct)
+    return "normal", int(pct or 0)
+
+
+def question_default_minutes(st, q):
+    prefs = st.get("prefs", {})
+    default = prefs.get("default_after_minutes", 30) if q.get("from") in ("lead", "user") else prefs.get("thread_default_after_minutes", 5)
+    return int(q.get("default_after_minutes", default) or default)
+
+
+def question_default_due(st, q):
+    return bool(q.get("t") and (_minutes_since(q["t"]) or 0) >= question_default_minutes(st, q) and not q.get("external")
+                and not q.get("beyond") and not DEFAULT_OUTWARD_RE.search(q.get("text", "")))
+
+
+def effective_interval(st, key):
+    base = int(st.get("prefs", {}).get(key, 10 if key == "checkin_minutes" else 60) or 1)
+    tier, pct = quota_pace_tier(st)
+    if tier == "normal":
+        return base
+    prefs = st.get("prefs") if isinstance(st.get("prefs"), dict) else {}
+    factor = int(prefs.get("slow_factor", 2) or 2)
+    if tier == "lead-only" or pct >= int(prefs.get("quota_lead_only_at", 90) or 90):
+        factor = 3
+    return base * factor
+
+
+def pace_notice(d, st):
+    tier, pct = quota_pace_tier(st)
+    # Write only on a real tier change: "normal" and never-recorded are the same state.
+    if (None if tier == "normal" else tier) == st.get("pace_notice_tier"): return
+    if tier == "normal":
+        if st.get("write_lock"): return
+        st["pace_notice_tier"] = None
+        save(d, st, {"ev": "pace-tier", "tier": tier})
+        return
+    line = lab(st, "route_slow", pct=pct, checkin=effective_interval(st, "checkin_minutes"), quota=effective_interval(st, "quota_every_minutes"))
+    print(line, file=sys.stderr)
+    if st.get("write_lock"): return  # read-only during a handover: say it, the successor records it
+    st["pace_notice_tier"] = tier
+    save(d, st, {"ev": "pace-tier", "tier": tier, "notice": line})
+
+
+def sweep_due(st, dispatching=False):
+    if quota_idle(st) and not dispatching:
+        return False
+    last = _when(st.get("last_sweep_at"))
+    return last is None or (_when(now()) - last).total_seconds() >= effective_interval(st, "sweep_every_minutes") * 60
+
+
+def apply_thread_defaults(st):
+    changed = False
+    for q in st.get("questions", []):
+        if q.get("answered") or q.get("defaulted") or not q.get("default_action") or q.get("external"):
+            continue
+        if not question_default_due(st, q):
+            continue
+        q["defaulted"] = {"what": q["default_action"], "at": now(), "by": "thread"}
+        st.setdefault("decisions", []).append({"kind": "default", "question": st["questions"].index(q) + 1,
+                                                "what": q["default_action"], "at": now(), "by": "thread"})
+        changed = True
+    return changed
 
 
 def _stem(w):
@@ -4536,6 +4879,11 @@ def cmd_ask(a):
     st = load(d)
     if a.proposal:
         a.text = a.proposal
+    if a.default is not None and not str(a.default).isdigit() and a.answer is None:
+        a.default_work = str(a.default).strip()
+        a.default = None
+        if a.external or DEFAULT_OUTWARD_RE.search((a.text or "") + " " + a.default_work):
+            sys.exit(lab(st,"thread_default_action"))
     if a.answer is not None:
         n = a.answer
         if not 1 <= n <= len(st["questions"]):
@@ -4561,7 +4909,7 @@ def cmd_ask(a):
             print(lab(st, "answer_revert", what=was_default), file=sys.stderr)
         save(d, st, {"ev": "answered", "n": n})
     elif a.default is not None:
-        n = a.default
+        n = int(a.default)
         if not a.undoable:
             sys.exit(lab(st, "default_undoable"))
         if not 1 <= n <= len(st["questions"]) or st["questions"][n - 1].get("answered"):
@@ -4631,6 +4979,7 @@ def cmd_ask(a):
              **({"kind": "proposal"} if a.proposal else {}),
              **({"kind": getattr(a, "_question_kind")} if getattr(a, "_question_kind", None) else {}),
              **({"external": True} if a.external else {}),
+             **({"default_action": a.default_work, "default_after_minutes": a.minutes if a.minutes is not None else question_default_minutes(st, {"from": a.frm})} if getattr(a, "default_work", None) else {}),
              **({"need_thread": nt} if nt else {})}
         )
         save(d, st, {"ev": "question", "from": a.frm, "text": a.text})
@@ -4731,8 +5080,84 @@ def _json_or_text(a, data, lines):
 
 def cmd_feature(a):
     d = need(find_dir()); st = load(d); rows = st.setdefault("features", {})
+    if a.action in ("import", "reconcile"):
+        try:
+            path = Path(a.file)
+            if path.suffix.lower() == ".json":
+                incoming = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(incoming, dict): incoming = incoming.get("features", [])
+            else:
+                incoming = list(csvmod.DictReader(path.open(encoding="utf-8-sig", newline="")))
+            if not isinstance(incoming, list): raise ValueError("expected a list of feature rows")
+        except (OSError, ValueError, TypeError) as exc: sys.exit(lab(st, "feature_import_error", reason=exc))
+        normalized = []
+        for row in incoming:
+            if not isinstance(row, dict) or not str(row.get("name") or "").strip(): sys.exit(lab(st, "feature_row_name"))
+            normalized.append({k: str(row.get(k) or "").strip() for k in ("id", "name", "phase", "status", "from", "note")})
+        if a.action == "reconcile":
+            by_name = {f.get("name", "").casefold(): (fid, f) for fid, f in rows.items()}
+            by_id = rows
+            matched_ids = set()
+            missing = []
+            status_differences = []
+            phase_differences = []
+            for r in normalized:
+                match = ((r["id"], by_id[r["id"]]) if r.get("id") in by_id else None) or by_name.get(r["name"].casefold())
+                if not match:
+                    missing.append(r)
+                    continue
+                fid, feature = match
+                matched_ids.add(fid)
+                if r.get("status") and r["status"] != feature.get("status"):
+                    status_differences.append({"file": r, "ledger": {"id": fid, "status": feature.get("status")}})
+                if r.get("phase") and r["phase"] != feature.get("phase"):
+                    phase_differences.append({"file": r, "ledger": {"id": fid, "phase": feature.get("phase")}})
+            extra = [{"id": i, "name": f.get("name"), "status": f.get("status")}
+                     for i, f in rows.items() if i not in matched_ids]
+            result = {"missing_in_ledger": missing, "not_in_file": extra, "status_differences": status_differences, "phase_differences": phase_differences}
+            _json_or_text(a, result, [*(lab(st,"feature_missing",name=r['name']) for r in missing),
+                                      *(lab(st,"feature_extra",id=r['id'],name=r['name']) for r in extra),
+                                      *(lab(st,"feature_status_diff",name=r['file']['name'],file=r['file']['status'],ledger=r['ledger']['status']) for r in status_differences),
+                                      *(lab(st,"feature_phase_diff",name=r['file']['name'],file=r['file']['phase'],ledger=r['ledger']['phase']) for r in phase_differences)] or [lab(st, "no_items")])
+            if missing or extra or status_differences or phase_differences: sys.exit(1)
+            return
+        added = updated = unchanged = 0
+        for r in normalized:
+            fid = r["id"] if r["id"] in rows else next((i for i, f in rows.items() if f.get("name", "").casefold() == r["name"].casefold()), None)
+            status = r["status"] or "planned"
+            if status not in ("planned", "building", "landed", "dropped"): sys.exit(lab(st, "feature_invalid_status", status=status))
+            record = {"name": r["name"], "phase": r["phase"], "status": status, "reqs": [], "tasks": [], "evidence": "", "reason": "", "created": now()}
+            if r["from"]:  # where the feature came from (requests, notes), not a phase it was moved from
+                record["source"] = r["from"]
+                record["reqs"] = [x for x in re.findall(r"R\d+", r["from"]) if x in st.get("requests", {})]
+            if r["note"]: record["note"] = r["note"]
+            if not fid:
+                fid = r["id"] or f"F{max([int(x[1:]) for x in rows if re.fullmatch(r'F\d+', x)] or [0])+1}"
+                rows[fid] = record; added += 1
+            else:
+                old = rows[fid]
+                keys = [k for k in ("name", "phase", "status", "note", "source") if k in record]
+                reqs = list(dict.fromkeys((old.get("reqs") or []) + record.get("reqs", [])))
+                if all(old.get(k) == record[k] for k in keys) and reqs == (old.get("reqs") or []): unchanged += 1
+                else:  # overlay only what the file carries: links, tasks, evidence and created time stay
+                    patch = {k: record[k] for k in keys}
+                    if old.get("phase") and old.get("phase") != record["phase"]:
+                        patch["moved_from"], patch["moved_at"] = old["phase"], now()
+                    rows[fid] = {**old, **patch, "reqs": reqs}; updated += 1
+        save(d, st, {"ev": "feature-import"})
+        print(lab(st, "feature_import_counts", added=added, updated=updated, unchanged=unchanged))
+        return
+    if a.action == "move":
+        f = rows.get(a.name)
+        if not f: sys.exit(lab(st, "feature_unknown", id=a.name))
+        old = f.get("phase") or ""
+        if old != a.to:
+            f["moved_from"], f["moved_at"], f["phase"] = old, now(), a.to
+            if a.why: f["move_why"] = a.why
+            save(d, st, {"ev": "feature-move", "feature": a.name}); print(a.name)
+        return
     if a.action == "add":
-        if not a.name.strip(): sys.exit("feature add requires a name")
+        if not a.name.strip(): sys.exit(lab(st, "feature_add_name"))
         reqs = [x for group in (a.req or []) for item in group for x in csv(item)]
         tasks = [x for group in (a.task or []) for item in group for x in csv(item)]
         if (a.status or "planned") not in ("planned", "building", "landed", "dropped"): sys.exit("invalid feature status")
@@ -4752,13 +5177,15 @@ def cmd_feature(a):
         save(d, st, {"ev": "feature-add", "feature": fid}); print(fid); return
     if a.action == "set":
         f = rows.get(a.name)
-        if not f: sys.exit(f"unknown feature {a.name}")
+        if not f: sys.exit(lab(st, "feature_unknown", id=a.name))
         status = a.status or f["status"]
-        if status not in ("planned", "building", "landed", "dropped"): sys.exit("invalid feature status")
+        if status not in ("planned", "building", "landed", "dropped"): sys.exit(lab(st, "feature_invalid_status", status=status))
         a.evidence, a.reason = (a.evidence or "").strip() or None, (a.reason or "").strip() or None
         if status == "landed" and not (a.evidence or f.get("evidence")): sys.exit("landed requires --evidence")
         if status == "dropped" and not (a.reason or f.get("reason")): sys.exit("dropped requires --reason")
-        if a.phase is not None: f["phase"] = a.phase
+        if a.phase is not None and a.phase != f.get("phase", ""):
+            if f.get("phase"): f["moved_from"], f["moved_at"] = f["phase"], now()
+            f["phase"] = a.phase
         for attr, key in (("req", "reqs"), ("task", "tasks")):
             value = getattr(a, attr)
             if value is not None:
@@ -4782,7 +5209,8 @@ def cmd_feature(a):
             if cutoff is None: sys.exit("--done-since: an ISO time (2026-11-20 or 2026-11-20T09:00) or last-report")
             selected = [(i, f) for i, f in selected if f.get("status") == "landed" and _later(f.get("landed_at"), cutoff)]
         data = [{"id": i, **f} for i, f in selected]
-        _json_or_text(a, data, [f"{i} [{lab(st, 'feature_' + f['status'])}] {f['name']} — {', '.join(f.get('reqs') or []) or '-'}" for i, f in selected])
+        _json_or_text(a, data, [f"{i} [{lab(st, 'feature_' + f['status'])}] {f['name']} — {', '.join(f.get('reqs') or []) or '-'}" +
+                                (f" {lab(st, 'feature_moved', phase=f['moved_from'])}" if f.get("moved_from") else "") for i, f in selected])
         return
 
 
@@ -4891,17 +5319,108 @@ def cmd_wrapup(a):
         lab(st, "replied_not_reported"): [r for r,q in st.get("requests",{}).items() if q.get("status")=="delivered"] + [t for t,x in st.get("tasks",{}).items() if x.get("status")=="done" and any(t in q.get("tasks",[]) and q.get("status") not in REQ_SETTLED + ("delivered",) for q in st.get("requests",{}).values())],
         lab(st, "promises_open"): [f"{x['id']}: {x['text']}" for x in st.get("promises",[]) if x.get("status")=="open"],
         lab(st, "notice_heading"): [f"{x['thread']}: {x.get('text') or x.get('kind')}" for x in st.get("notices", []) if not x.get("done")]}
+    if not st.get("features") and (st.get("tasks") or re.search(r"\b(app|software|website|webapp|feature|implement|code|build|开发|应用|网站)\b", st.get("goal", ""), re.I)):
+        sections[lab(st, "features")] = [lab(st, "feature_fix")]
+    stale_docs = [lab(st, "wrap_refresh_doc", link=x.get('link')) for x in st.get("docs", {}).values() if _doc_stale(st, x)]
+    if stale_docs: sections[lab(st, "docs")] = stale_docs
     done_ids = {t for t, k in st.get("tasks", {}).items() if k.get("status") == "done"}
     sendable = any(k.get("status") == "approved" and set(k.get("deps", [])) <= done_ids for k in st.get("tasks", {}).values())
     trigger = quota_trigger_hint(st, sendable)
     data = {"sections": sections, "reconcile": st["reconcile"], **({"quota_trigger": trigger} if trigger else {})}
-    lines = [f"## {lab(st,'wrapup')}"] + ([quota_trigger_line(st, trigger)] if trigger else []) + [f"### {k}\n" + ("\n".join("- "+x for x in v) if v else lab(st,"no_items")) for k,v in sections.items()]
+    phase = _current_feature_phase(st)
+    features = [f"{i} {x.get('name')}" for i, x in st.get("features", {}).items() if x.get("phase") == phase]
+    sections[lab(st, "features_done")] = [x for x in features if st["features"][x.split(" ", 1)[0]].get("status") == "landed"]
+    sections[lab(st, "features_not_done")] = [x for x in features if st["features"][x.split(" ", 1)[0]].get("status") != "landed"]
+    lines = [f"## {lab(st,'wrapup')}"] + ([quota_trigger_line(st, trigger)] if trigger else [])
+    for key, values in sections.items():
+        shown = values[:6]
+        if len(values) > 6: shown.append(lab(st, "card_more", n=len(values) - 6))
+        lines.append(f"### {key}\n" + ("\n".join("- "+x for x in shown) if shown else lab(st,"no_items")))
     lines.append(f"### {lab(st,'reconcile')}\n" + ("\n".join("- " + _rc_line(st, x) for x in rows) or lab(st, "no_items")))
     _json_or_text(a, data, lines)
 
 
 def cmd_sprint(a):
-    d=need(find_dir()); st=load(d); since=_when(a.since) if a.since else EPOCH
+    d=need(find_dir()); st=load(d)
+    action = getattr(a, "action", None)
+    if action in ("beta", "feedback"):
+        betas=st.setdefault("betas", [])
+        if action == "feedback":
+            if not (a.text or "").strip(): sys.exit(lab(st,"beta_feedback_required"))
+            row={"text":a.text.strip(),"at":now(),"version":betas[-1].get("version") if betas else None}
+            st.setdefault("beta_feedback", []).append(row); save(d,st,{"ev":"beta-feedback","version":row["version"]}); print(lab(st,"beta_feedback_saved",version=row["version"] or "?")); return
+        if not a.version: sys.exit(lab(st,"beta_version_required"))
+        previous = betas[-1].get("at") if betas else None
+        since = _when(previous) if previous else EPOCH
+        already = {fid for beta in betas for fid in beta.get("try_feature_ids", [])}
+        landed = [(fid, f) for fid, f in st.get("features", {}).items() if f.get("status")=="landed" and
+                  (not previous or (_when(f.get("landed_at")) and _when(f.get("landed_at")) >= since)) and fid not in already]
+        tries=[f.get("name", "") for _, f in landed] + list(a.try_items or [])
+        row={"version":a.version,"at":now(),"try_list":tries,"try_feature_ids":[fid for fid,_ in landed],"status":"waiting-feedback"}
+        betas.append(row); save(d,st,{"ev":"beta","version":a.version})
+        version_text=str(a.version).casefold()
+        link=next((x.get("link") for x in st.get("deliverables",[]) if x.get("link") and version_text in json.dumps({k:x.get(k) for k in ("name","missing","source")},ensure_ascii=False).casefold()),None)
+        if not link: link=next((x.get("link") for x in st.get("docs",{}).values() if x.get("link") and version_text in json.dumps(x,ensure_ascii=False).casefold()),None)
+        if not link: link=lab(st,"beta_no_link")
+        print(lab(st,"beta_card",version=a.version,link=link,tries="\n".join(f"{i}. {x}" for i,x in enumerate(tries,1)) or lab(st,"beta_no_new"))); return
+    if action == "stop-all":
+        p=st.get("prefs",{}); none=lab(st,"stop_none"); checklist={"quota":p.get("quota_trigger_id") or none,"sweep":p.get("sweep_trigger_id") or none,"codex":lab(st,"stop_codex")}
+        st["stopped_at"]=now(); save(d,st,{"ev":"stop-all","checklist":checklist}); print(lab(st,"stop_all",**checklist)); return
+    if action == "start":
+        raw = a.until
+        if not raw: sys.exit(lab(st,"sprint_until_required"))
+        if len(raw) == 5 and raw[2] == ":":
+            try:
+                current = _when(now())
+                candidate = dt.datetime.combine(current.date(), dt.time.fromisoformat(raw), tzinfo=current.tzinfo)
+            except ValueError:
+                sys.exit(lab(st,"sprint_until_required"))
+            if candidate <= current: candidate += dt.timedelta(days=1)
+            raw = candidate.isoformat(timespec="minutes")
+        until = _when(raw)
+        if until is None: sys.exit(lab(st,"sprint_until_required"))
+        raw = until.isoformat(timespec="minutes")
+        base = st.get("repo", {}).get("base") or "main"
+        try: sha = subprocess.run(["git", "-C", str(st.get("repo", {}).get("path") or d.parent), "rev-parse", base], capture_output=True, text=True).stdout.strip() or None
+        except OSError: sha = None
+        st["sprint"] = {"start": now(), "until": raw, "goal": a.goal or "", "base": sha}
+        save(d, st, {"ev": "sprint-start", "until": raw, "goal": a.goal or ""})
+        line = lab(st, "sprint_started", until=until.strftime("%H:%M"))
+        print(line); print("SPRINT: " + line)
+        return
+    ending_sprint = action == "end" or (action is None and st.get("sprint") and not st["sprint"].get("ended_at") and _when(st["sprint"].get("until")) and _when(st["sprint"].get("until")) <= _when(now()))
+    if ending_sprint:
+        sprint = st.get("sprint") or {}
+        if not sprint: sys.exit(lab(st,"sprint_no_active"))
+        repo = Path(st.get("repo", {}).get("path") or d.parent)
+        base = st.get("repo", {}).get("base") or "main"
+        p = subprocess.run(["git", "-C", str(repo), "rev-parse", base], capture_output=True, text=True)
+        sha = p.stdout.strip() if p.returncode == 0 else sprint.get("base") or "unknown"
+        sprint["aligned_to"] = sha; sprint["ended_at"] = now()
+        misaligned=[]
+        for tid, task in st.get("tasks", {}).items():
+            if task.get("status") in ("done", "dropped"): continue
+            owner=task.get("owner"); branch=task.get("branch") or (st.get("threads",{}).get(owner or "") or {}).get("branch")
+            branch_sha=task.get("sha") or task.get("commit")
+            if branch and not branch_sha:
+                check=subprocess.run(["git","-C",str(repo),"rev-parse",branch],capture_output=True,text=True)
+                branch_sha=check.stdout.strip() if check.returncode==0 else None
+            if branch_sha == sha: task["aligned_to"] = sha
+            else: task.pop("aligned_to", None); misaligned.append(tid)
+        for deliverable in st.get("deliverables", []):
+            if deliverable.get("status") == "stale": continue
+            item_sha=deliverable.get("sha") or deliverable.get("commit")
+            if item_sha == sha: deliverable["aligned_to"] = sha
+            else: deliverable.pop("aligned_to", None); misaligned.append(deliverable.get("id",deliverable.get("name","deliverable")))
+        save(d, st, {"ev": "sprint-end", "sha": sha})
+        end_stream = sys.stderr if getattr(a,"_from_ready",False) else sys.stdout
+        sprint_until=sprint.get("until", "?")
+        print(lab(st, "sprint_ended", until=(sprint_until[11:16] if "T" in sprint_until else sprint_until), sha=sha), file=end_stream)
+        if misaligned: print(lab(st,"sprint_misaligned",items=", ".join(misaligned)), file=end_stream)
+        if getattr(a,"_from_ready",False): return
+        since = EPOCH
+    else:
+        since=_when(a.since) if a.since else EPOCH
     if since is None: sys.exit("--since: an ISO time (2026-11-20 or 2026-11-20T09:00)")
     ph=st.get("prefs",{}).get("current_phase")
     if not ph:
@@ -4919,6 +5438,7 @@ def cmd_sprint(a):
 def cmd_board(a):
     d = need(find_dir())
     st = load(d)
+    if apply_thread_defaults(st): save(d, st, {"ev": "thread-defaults"})
     if not st.get("write_lock"):  # refresh the file view; during a lead handover the board is read-only
         (d / "BOARD.md").write_text(render_board(st), encoding="utf-8")
     if getattr(a, "share", False):
@@ -4948,12 +5468,12 @@ def cmd_card(a):
         since = EPOCH
     reqs, feats, tasks = st.get("requests", {}), st.get("features", {}), st.get("tasks", {})
     done = [f"{i} {f.get('name', '')}" for i, f in feats.items() if f.get("status") == "landed" and _later(f.get("landed_at"), since)]
-    done += [f"{i} {q.get('text', '')}" for i, q in reqs.items() if q.get("status") in ("reported", "landed") and _later(q.get("updated"), since)]
+    done += [f"{i} {q.get('text', '')}" for i, q in reqs.items() if (q.get("status") == "landed" or awaiting_confirm(st, q)) and _later(q.get("updated"), since)]
     doing = [f"{i} {f.get('name', '')}" for i, f in feats.items() if f.get("status") == "building"]
     doing += [f"{lab(st, 'root_patch_tag') if t.get('fix_kind') == 'patch' else lab(st, 'root_fix_tag') if t.get('fix_kind') == 'root' else ''}{i} {t.get('title', '')}" for i, t in tasks.items() if t.get("status") in ("dispatched", "working")]
     waiting = [f"{i} {q.get('text', '')}" for i, q in reqs.items() if q.get("status") == "waiting_user"]
     for n, q in enumerate(st.get("questions", []), 1):
-        if not q.get("answered"):  # a question that took its default still waits for the user's word
+        if not q.get("answered") and (q.get("from") in ("lead", "user") or q.get("external")):  # thread-to-lead questions have their own board section
             mark = f" ({lab(st, 'card_defaulted', what=q['defaulted'].get('what', ''))})" if q.get("defaulted") else ""
             waiting.append(f"{lab(st, 'card_question', n=n)} {q.get('text', '')}{mark}")
     added = sum(1 for q in reqs.values() if _later(q.get("created"), since))
@@ -4973,8 +5493,13 @@ def cmd_card(a):
     gpt_text = lab(st, "card_gpt_none", n=len(gpt_items)) if not gpt_items else lab(
         st, "card_gpt_detail", n=len(gpt_items), items=lab(st, "card_gpt_sep").join(gpt_items[:5]),
         more=(lab(st, "card_gpt_more", n=len(gpt_items)-5) if len(gpt_items) > 5 else ""))
-    merge_uses = [x for x in st.get("grant_uses", []) if x.get("grant") == "merge" and _later(x.get("at"), since)]
-    grant_text = lab(st, "card_grant", n=len(merge_uses)) if merge_uses else ""
+    grant_counts = {g: sum(1 for x in st.get("grant_uses", []) if x.get("grant") == g and _later(x.get("at"), since)) for g in ("merge", "archive", "schedule")}
+    grant_parts = [lab(st, "grant_count_" + g, n=n) for g,n in grant_counts.items() if n]
+    grant_text = lab(st, "grant_counts", counts=lab(st, "grant_counts_sep").join(grant_parts)) if grant_parts else ""
+    phase_features = []
+    if a.kind == "done":
+        phase = _current_feature_phase(st)
+        phase_features = [(i, f) for i, f in feats.items() if f.get("phase") == phase]
     links = list(dict.fromkeys(list(a.link or []) + [x["link"] for k in DOC_KINDS for x in [st.get("docs", {}).get(k)] if x and x.get("link")]))
     head = f"[{lab(st, 'card_delivered' if a.kind == 'done' else 'card_' + a.kind)}] {' '.join(a.head.split())}"
     primary_lines = []
@@ -4990,17 +5515,44 @@ def cmd_card(a):
             review = task.get("review") or {}
             if review:
                 primary_lines.append(review_tests_line(st, review))
-    payload = {"kind": a.kind, "head": head, "done": done, "doing": doing, "waiting": waiting}
-    if st.get("prefs", {}).get("ledger_line_every", "wrapup") == "report" or a.kind == "done" or a.ledger_line:
-        payload["ledger"] = lab(st, "card_ledger", added=added, ended=ended, waiting=len(waiting), gpt_detail=gpt_text, grant_detail=(" · " + grant_text if grant_text else ""),
-                                links=" ".join(links) or "-")
+    waiting_confirm = sum(1 for q in reqs.values() if awaiting_confirm(st, q))
+    payload = {"kind": a.kind, "head": head, "done": done, "doing": doing, "waiting": waiting,
+               "features_done": [], "features_not_done": []}
+    if a.kind == "done":
+        payload["features_done"] = [f"{i} {f.get('name')}" for i, f in phase_features if f.get("status") == "landed"]
+        payload["features_not_done"] = [f"{i} {f.get('name')}" for i, f in phase_features if f.get("status") != "landed"]
+    payload["ledger"] = lab(st, "card_ledger", added=added, ended=ended, waiting=len(waiting), gpt_detail=gpt_text, grant_detail=(" · " + grant_text if grant_text else ""),
+                            links=" ".join(links) or "-")
+    if waiting_confirm: payload["waiting"].append(lab(st, "req_reported_summary", n=waiting_confirm))
+    prior_report = st.get("last_report_at") or st.get("updated") or st.get("created") or "start"
     st["last_report_at"] = now()
     save(d, st, {"ev": "report-card", "kind": a.kind})
     lines = primary_lines + [head]
-    for key in ("done", "doing", "waiting"):
-        lines += ["", f"## {lab(st, 'card_' + key)}", "\n".join("- " + x for x in payload[key]) or lab(st, "no_items")]
-    if "ledger" in payload:
-        lines += ["", payload["ledger"]]
+    headings = {"features_done": "features_done", "features_not_done": "features_not_done"}
+    sections = [(key, payload[key]) for key in ("done", "doing", "waiting", "features_done", "features_not_done") if payload[key]]
+    if sections:
+        if getattr(a, "all", False):
+            quotas = [len(values) for _, values in sections]
+        else:
+            remaining = 25 - 2 - 2 * len(sections)  # header, ledger, blank lines and section headings
+            quotas = []
+            for index, (_, values) in enumerate(sections):
+                left = len(sections) - index
+                quota = min(6, len(values), max(0, remaining // left))
+                if quota < len(values) and remaining <= quota:
+                    quota = max(0, remaining - 1)
+                overflow_line = int(quota < len(values))
+                quotas.append(quota)
+                remaining -= quota + overflow_line
+    for (key, values), quota in zip(sections, quotas if sections else []):
+        shown = values[:quota]
+        body = ["- " + x for x in shown]
+        if quota < len(values): body.append(lab(st, "card_more", n=len(values)-quota))
+        heading = lab(st, headings[key]) if key in headings else lab(st, "card_" + key)
+        lines += ["", f"## {heading}", *body]
+    if not sections:
+        lines += ["", lab(st, "nothing_changed", time=prior_report)]
+    lines += [payload["ledger"]]
     _json_or_text(a, payload, lines)
 
 
@@ -5024,11 +5576,16 @@ def cmd_docs(a):
         history = list(old.get("history", []))
         if old.get("link") and old.get("link") != a.link.strip():
             history.append({"link": old["link"], "note": old.get("note", ""), "superseded": True, "at": now()})
-        rows[a.which] = {"link": a.link.strip(), "note": " ".join((a.note or "").split()), "history": history}
+        rows[a.which] = {"link": a.link.strip(), "note": " ".join((a.note or "").split()), "history": history,
+                         "refreshed_at": now()}
         save(d, st, {"ev": "docs-set", "which": a.which})
         print(a.which)
         return
-    lines = [f"{lab(st, 'doc_' + k)} ({k}): {rows[k]['link']}" + (f" — {rows[k]['note']}" if rows[k].get("note") else "")
+    if a.action == "refreshed":
+        if not a.which or a.which not in rows: sys.exit(lab(st, "doc_missing", kind=a.which or ""))
+        rows[a.which]["refreshed_at"] = now()
+        save(d, st, {"ev": "docs-refreshed", "which": a.which}); print(a.which); return
+    lines = [f"{lab(st, 'doc_' + k)} ({k}): {rows[k]['link']}" + (f" — {rows[k]['note']}" if rows[k].get("note") else "") + f" — {_age_label(st, rows[k].get('refreshed_at'))}" + (f" — {lab(st, 'd_stale')}" if _doc_stale(st, rows[k]) else "")
              for k in DOC_KINDS if k in rows]
     if getattr(a, "all", False):
         for k in DOC_KINDS:
@@ -5648,7 +6205,10 @@ def cmd_threads(a):
         if x not in done: out.append(f"- {x['thread']} — {x['title']} — {x['summary']}")
     if a.all:
         for x in done: out.append(f"- {x['thread']} — {x['title']} — {x['summary']}")
-    elif done: out.append(lab(st, "completed", n=len(done), names=", ".join(x["thread"] for x in done)))
+    else:
+        for status, key in (("idle", "standby"), ("resolved", "completed")):
+            names = [x["thread"] for x in done if x["status"] == status]
+            if names: out.append(lab(st, key, n=len(names), names=", ".join(names)))
     print("\n".join(out) or lab(st, "no_threads"))
 
 
@@ -5911,12 +6471,15 @@ def cmd_nav_all(a):
 
 def cmd_notice(a):
     d = need(find_dir()); st = load(d); rows = st.setdefault("notices", [])
+    if a.action == "sweep":
+        a.sessions_for_events = [a.session] if a.session else []
+        return cmd_sweep(a)
     if a.action == "add":
         if a.kind == "needs-user":
             if not (a.text or "").strip(): sys.exit('notice add --kind needs-user requires --note')
             x = {"thread": "lead", "session": st.get("lead", {}).get("session_id"), "ref": f"needs-user:{len(rows)+1}",
                  "kind": "needs-user", "text": a.text.strip(), "at": now(), "done": False}
-            rows.append(x); save(d, st, {"ev": "notice-add"}); print(model_lab(st, "needs_user") + x["text"]); return
+            rows.append(x); save(d, st, {"ev": "notice-add", "kind": "needs-user"}); print(model_lab(st, "needs_user") + x["text"]); return
         if not a.thread or not a.session or not a.ref: sys.exit("notice add needs --thread T --session S --ref REF")
         t = st["threads"].get(a.thread)
         if not t: sys.exit(f"unknown thread {a.thread}")
@@ -5928,7 +6491,7 @@ def cmd_notice(a):
             print(lab(st, "notice_saved"), file=sys.stderr); print(json.dumps(prior, ensure_ascii=False)); return
         x = {"thread": a.thread, "session": a.session, "ref": ref, "kind": a.kind or "turn-end",
              "text": a.text or "", "at": now(), "done": False}; rows.append(x)
-        save(d, st, {"ev": "notice-add"}); print(json.dumps(x, ensure_ascii=False)); return
+        save(d, st, {"ev": "notice-add", "kind": x["kind"]}); print(json.dumps(x, ensure_ascii=False)); return
     pending = [x for x in rows if not x.get("done")]
     if a.action == "done":
         if not a.all and not a.thread: sys.exit("notice done needs --thread T or --all")
@@ -5970,6 +6533,10 @@ def cmd_open(a):
     st = load(d)
     stuck = stuck_threads(st)
     urgent = urgent_unacked(st)
+    if st.get("lead", {}).get("desktop") and st.get("desktop_open_queue"):
+        print(lab(st, "desktop_open", threads=", ".join(st["desktop_open_queue"])), file=sys.stderr)
+        st["desktop_open_queue"] = []
+        save(d, st, {"ev": "desktop-open-drained"})
     if urgent:  # the list stays the same shape for callers; urgent ones are also in `ready`
         print(lab(st, "urgent_advice") + ": " + ", ".join(x["task"] for x in urgent), file=sys.stderr)
     print(
@@ -5991,6 +6558,260 @@ def cmd_open(a):
             ensure_ascii=False,
         )
     )
+
+
+def cmd_sweep(a):
+    """Read the newest ledger and save it under the shared save lock (T72), so a lead write during a sweep is
+    never lost and never refused."""
+    d = need(find_dir())
+    _with_save_lock(d, lambda: _sweep_locked(a, d, load(d)))
+
+
+def _sweep_locked(a, d, st):
+    notices = st.setdefault("notices", [])
+    def payload_rows(raw, keys):
+        if isinstance(raw, list): return raw
+        if isinstance(raw, dict):
+            for key in keys:
+                if isinstance(raw.get(key), list): return raw[key]
+            if isinstance(raw.get("data"), dict) and (raw["data"].get("id") or raw["data"].get("session_id")):
+                return [raw["data"]]
+            # get_session returns one object, while list_sessions wraps rows in data.
+            if raw.get("id") or raw.get("session_id"): return [raw]
+        return []
+    rows = []
+    if a.sessions:
+        raw = json.loads(Path(a.sessions).read_text(encoding="utf-8"))
+        rows = payload_rows(raw, ("data", "sessions", "rows"))
+    event_sets = []
+    event_specs = list(getattr(a, "event_files", []) or [])
+    if not event_specs:
+        files = getattr(a, "events", []) or []
+        if isinstance(files, str): files = [files]
+        sessions = getattr(a, "sessions_for_events", []) or []
+        event_specs = [(f, sessions[i] if i < len(sessions) else None) for i, f in enumerate(files)]
+    for event_file, event_session in event_specs:
+        raw = json.loads(Path(event_file).read_text(encoding="utf-8"))
+        # A dict keyed by session id is also accepted. list_events envelopes may
+        # be paired with --session because their rows do not contain ownership.
+        if isinstance(raw, dict) and event_session is None and not any(k in raw for k in ("data", "events", "rows", "id", "session_id")):
+            for sid, items in raw.items():
+                event_sets.append((str(sid), payload_rows(items, ("data", "events", "rows"))))
+        else:
+            event_sets.append((event_session or (raw.get("session_id") if isinstance(raw,dict) else None), payload_rows(raw, ("data", "events", "rows"))))
+    by_session = {}
+    for name, thread in st.get("threads", {}).items():
+        for item in [thread.get("session_id")] + [x.get("session_id") for x in thread.get("sessions", [])]:
+            if item: by_session[str(item)] = name
+    events_by_session = {}
+    for assigned_sid, items in event_sets:
+        for event in items:
+            sid = assigned_sid or event.get("session_id")
+            if sid: events_by_session.setdefault(str(sid), []).append(event)
+    messages = []
+    session_updates = []
+    changed = False
+    matched = set()
+    # Events can be requested without a sessions poll. In that mode, build rows
+    # from the explicitly named event sessions and match them to the board.
+    if not rows and event_sets:
+        known = {str(t.get("session_id")): (n, t) for n, t in st.get("threads", {}).items() if t.get("session_id")}
+        known.update({str(x.get("session_id")): (n, t) for n, t in st.get("threads", {}).items()
+                      for x in t.get("sessions", []) if x.get("session_id")})
+        for esid, _ in event_sets:
+            if esid and str(esid) in known:
+                name, _thread = known[str(esid)]
+                rows.append({"id": str(esid), "session_id": str(esid), "thread": name})
+            elif esid:
+                print(f"sweep events: no thread matches session {esid}")
+    for row in rows:
+        sid = str(row.get("session_id") or row.get("id") or "")
+        name = by_session.get(sid)
+        # A session can be rediscovered after its ID was lost. Tags are the
+        # stable fallback; the exact title prefix is the final fallback.
+        if not name:
+            tags = row.get("tags") if isinstance(row.get("tags"), list) else []
+            name = next((n for n in st.get("threads", {})
+                         if f"teamwork:{tag(st)}" in tags and f"teamwork-thread:{n}" in tags), None)
+        if not name:
+            title = str(row.get("title") or "")
+            name = next((n for n in st.get("threads", {}) if title.startswith(f"[{tag(st)}] {n} ·")), None)
+        t = st.get("threads", {}).get(name)
+        if not t: continue
+        matched.add(sid or name)
+        wanted_tags = [f"teamwork:{tag(st)}", f"teamwork-thread:{name}"]
+        present_tags = row.get("tags") if isinstance(row.get("tags"), list) else []
+        prefix = f"[{tag(st)}] {name} ·"
+        title = str(row.get("title") or "")
+        if not title.startswith(prefix) or any(x not in present_tags for x in wanted_tags):
+            suffix = title[len(prefix):].strip() if title.startswith(prefix) else title
+            session_updates.append({"session_id": sid, "tags": list(dict.fromkeys(present_tags + wanted_tags)),
+                                   "title": prefix + (" " + suffix if suffix else "")})
+        if sid and sid not in [str(x.get("session_id")) for x in t.get("sessions", []) if isinstance(x, dict)]:
+            if sid != str(t.get("session_id") or ""):
+                t.setdefault("sessions", []).append({"session_id": sid, "at": now()})
+                print(f"sweep: recorded session {sid} in thread {name} history")
+                changed = True
+        stamp = row.get("updated_at") or row.get("updatedAt")
+        sid = sid or str(t.get("session_id") or "")
+        bucket = str(row.get("status_bucket", "")).lower()
+        status = str(row.get("status", "")).lower()
+        summary = row.get("post_turn_summary") or {}
+        needs = str(summary.get("needs_action") or "")
+        model = row.get("configured_model") or (row.get("session_context") or {}).get("model")
+        served = (row.get("external_metadata") or {}).get("last_served_model")
+        def add(kind, ref, line):
+            nonlocal changed
+            if not any(n.get("session") == sid and n.get("ref") == ref for n in notices):
+                notices.append({"thread": name, "session": sid, "ref": ref, "kind": kind,
+                                "text": line, "at": now(), "done": False})
+                messages.append(line); changed = True
+                log(d, {"ev": "sweep-notice", "kind": "approval" if kind == "needs-user" else kind, "thread": name})
+        permission_waiting = bucket == "blocked" or "permission" in needs.lower()
+        if permission_waiting and sid:
+            t["waiting_for"] = "permission"; t["status"] = "waiting"
+        if (status == "failed" or bucket == "failed") and sid:
+            add("failed", "sweep-failed:" + str(stamp or sid), lab(st, "sweep_failed", thread=name))
+        if model and served and model != served and sid:
+            add("model-fallback", "model-fallback:" + str(stamp or sid), lab(st, "sweep_fallback", thread=name, configured=model, served=served))
+        thread_events = events_by_session.get(sid, [])
+        cursor_id = t.get("last_event_id")
+        cursor_time = _when(t.get("last_event_at"))
+        fresh_events = []
+        for candidate in thread_events:
+            cid = str(candidate.get("id") or candidate.get("event_id") or "")
+            ctime = _when(candidate.get("created_at") or candidate.get("timestamp") or candidate.get("at"))
+            if cursor_id and cid == str(cursor_id):
+                fresh_events = []
+                continue
+            if cursor_id or cursor_time:
+                if cid and not cursor_id:
+                    pass
+                elif ctime and cursor_time and ctime <= cursor_time:
+                    continue
+                elif not ctime and not cid:
+                    continue
+            fresh_events.append(candidate)
+        if cursor_id and thread_events and any(str(x.get("id") or x.get("event_id") or "") == str(cursor_id) for x in thread_events):
+            after = next(i for i,x in enumerate(thread_events) if str(x.get("id") or x.get("event_id") or "") == str(cursor_id)) + 1
+            fresh_events = thread_events[after:]
+        event = fresh_events[-1] if fresh_events else {}
+        # Process every complete turn independently. Session event feeds append
+        # [user, assistant... result] records, so a result event's own text is
+        # not enough to classify the turn or find an earlier deliverable.
+        grouped_turns, current_turn = [], []
+        for ev in fresh_events:
+            current_turn.append(ev)
+            ev_data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+            if str(ev.get("type", "")).lower() == "result" or isinstance(ev_data.get("result"), dict):
+                grouped_turns.append(current_turn); current_turn = []
+        if current_turn: grouped_turns.append(current_turn)
+        cloud_pending = False
+        interrupted = False
+        for turn in grouped_turns:
+            result_event = next((ev for ev in reversed(turn) if str(ev.get("type", "")).lower() == "result" or
+                                 isinstance((ev.get("data") or {}).get("result"), dict)), {})
+            rd = result_event.get("data") if isinstance(result_event.get("data"), dict) else {}
+            result_obj = rd.get("result") if isinstance(rd.get("result"), dict) else result_event.get("result")
+            subtype = str((result_obj or {}).get("subtype") if isinstance(result_obj, dict) else "") or str(result_event.get("result_type") or "").lower()
+            fallback_ref = hashlib.sha1(json.dumps(turn, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+            tid_ref = str(result_event.get("id") or result_event.get("event_id") or
+                          result_event.get("created_at") or result_event.get("timestamp") or result_event.get("at") or
+                          f"{sid}:{fallback_ref}")
+            approval = False
+            for ev in turn:
+                ed = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+                req = (ed.get("control_request") or {}).get("request") or {}
+                if str(ev.get("type", "")).lower() == "control_request" and req.get("subtype") == "can_use_tool":
+                    pos = next(i for i, item in enumerate(fresh_events) if item is ev)
+                    approval |= not any(str(later.get("type", "")).lower() == "control_response" for later in fresh_events[pos+1:])
+            if approval:
+                cloud_pending = True
+                t["waiting_for"] = "permission"; t["status"] = "waiting"
+                add("needs-user", "sweep-approval:" + tid_ref, lab(st, "sweep_cloud", thread=name))
+            elif subtype == "success":
+                add("turn-end", "sweep-turn:" + tid_ref, lab(st, "sweep_done", thread=name, seconds=0))
+            elif subtype.startswith("error_") or subtype == "interrupted" or str(result_event.get("type", "")).lower() == "error":
+                interrupted = True
+                add("interrupted", "sweep-interrupted:" + tid_ref, lab(st, "sweep_interrupt", thread=name))
+            def event_text(ev):
+                data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+                assistant_data = data.get("assistant") if isinstance(data.get("assistant"), dict) else {}
+                value = ev.get("message") or ev.get("text") or ev.get("content") or assistant_data.get("text")
+                if value is None:
+                    message = assistant_data.get("message")
+                    value = message.get("content") if isinstance(message, dict) else message
+                if isinstance(value, dict): value = value.get("text") or value.get("content") or ""
+                if isinstance(value, list):
+                    value = " ".join(str(block.get("text", "")) if isinstance(block, dict) else str(block) for block in value)
+                return str(value or "")
+            turn_text = " ".join(event_text(ev) for ev in turn)
+            task_match = re.search(r"\bDONE\s+(T\d+)\b", turn_text, re.I)
+            link_match = re.search(r"https?://\S+|(?<!\w)/[^\s]+", turn_text)
+            if task_match or link_match:
+                task_id = task_match.group(1).upper() if task_match else None
+                if not task_id:
+                    owned = [(key, task) for key, task in st.get("tasks", {}).items()
+                             if task.get("owner") == name and task.get("status") in ("dispatched", "working", "blocked", "review")]
+                    owned.sort(key=lambda x: str(x[1].get("dispatched_at") or x[1].get("updated") or ""))
+                    task_id = owned[-1][0] if owned else None
+                if task_id in st.get("tasks", {}):
+                    version = int(st["tasks"][task_id].get("dispatch_v") or 0)
+                    url = link_match.group(0).rstrip(".,)]") if link_match else ""
+                    add("deliverable", f"sweep-deliverable:{task_id}:v{version}:{url or 'reported'}", lab(st, "sweep_deliverable", thread=name))
+                    if url and not any(x.get("task") == task_id and x.get("link") == url for x in st.get("deliverables", [])):
+                        task = st["tasks"][task_id]
+                        st.setdefault("deliverables", []).append({"id": f"D{len(st.get('deliverables', []))+1}", "name": task.get("title") or task_id,
+                            "task": task_id, "dispatch_v": version, "status": "draft", "link": url,
+                            "source": "auto (message not delivered)", "missing": "", "req": "", "at": now()})
+                        changed = True
+        if fresh_events:
+            latest = fresh_events[-1]
+            latest_id = latest.get("id") or latest.get("event_id")
+            latest_at = latest.get("created_at") or latest.get("timestamp") or latest.get("at")
+            if latest_id or latest_at:
+                t["last_event_id"] = latest_id or t.get("last_event_id")
+                t["last_event_at"] = latest_at
+                changed = True
+        if not fresh_events and permission_waiting and sid:
+            add("needs-user", "sweep-permission:" + str(stamp or sid), lab(st, "sweep_permission", thread=name))
+        stamp_time, last_seen_time = _when(stamp), _when(t.get("last_seen_at"))
+        newer_stamp = bool(stamp_time and (last_seen_time is None or stamp_time > last_seen_time))
+        if cloud_pending or permission_waiting:  # a blocked row can still say status "running": the wait wins
+            t["waiting_for"] = "permission"; t["status"] = "waiting"
+        elif interrupted:
+            t.pop("waiting_for", None)
+        elif status in ("working", "running"):
+            t.pop("waiting_for", None)
+            if t.get("status") == "waiting":
+                t["status"] = "working"
+                for old_notice in notices:
+                    if old_notice.get("thread") == name and old_notice.get("session") == sid and old_notice.get("kind") == "needs-user":
+                        old_notice["done"] = True
+        elif t.get("waiting_for") == "permission" and not permission_waiting and not cloud_pending:
+            t.pop("waiting_for", None)
+            t["status"] = "working"
+            for old_notice in notices:
+                if old_notice.get("thread") == name and old_notice.get("session") == sid and old_notice.get("kind") == "needs-user":
+                    old_notice["done"] = True
+        if not fresh_events and not interrupted and not permission_waiting and not cloud_pending and newer_stamp and status in ("idle", "review_ready", "completed"):
+            age = 0
+            try: age = max(0, int((_when(now()) - _when(stamp)).total_seconds()))
+            except (TypeError, AttributeError): pass
+            add("turn-end", "turn-end:" + str(stamp), lab(st, "sweep_done", thread=name, seconds=age))
+        if newer_stamp:
+            t["last_seen_at"] = stamp; changed = True
+    if a.sessions and not matched:
+        print(lab(st, "sweep_no_match", matched=0, total=len(rows)))
+        print(json.dumps({"notices": 0, "last_sweep_at": st.get("last_sweep_at"), "sessions_to_update": []}, ensure_ascii=False))
+        return
+    if not a.sessions and event_sets and not matched:
+        print(json.dumps({"notices": 0, "last_sweep_at": st.get("last_sweep_at"), "sessions_to_update": []}, ensure_ascii=False))
+        return
+    st["last_sweep_at"] = now()
+    _save_locked(d, st, {"ev": "sweep", "count": len(messages)})
+    for line in messages: print(line)
+    print(json.dumps({"notices": len(messages), "last_sweep_at": st.get("last_sweep_at"), "sessions_to_update": session_updates}, ensure_ascii=False))
 
 
 # The opening screen (L2). Practice items only: nothing here pretends to be the user's words. Each kind has three
@@ -7312,6 +8133,13 @@ def cmd_signals(a):
 def cmd_prefs(a):
     d = need(find_dir())
     st = load(d)
+    if a.grant_use:
+        if not (a.what or "").strip(): sys.exit(lab(st, "grant_usage"))
+        if a.grant_use not in st.get("prefs", {}).get("standing_grants", []):
+            sys.exit(lab(st, "grant_missing", grant=a.grant_use))
+        st.setdefault("grant_uses", []).append({"grant": a.grant_use, "what": a.what.strip(), "at": now()})
+        save(d, st, {"ev": "standing-grant-use", "grant": a.grant_use})
+        print(lab(st, "grant_recorded", grant=a.grant_use)); return
     old_cap = review_max(st)
     for kv in a.set or []:
         k, _, v = kv.partition("=")
@@ -7329,12 +8157,16 @@ def cmd_prefs(a):
                 sys.exit(lab(st, "rp_bool"))
             if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
                 sys.exit(lab(st, "rp_user"))
-        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes", "urgent_ack_minutes", "quota_every_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", "lead_compact_alert", "lead_compact_swap", "drift_window_hours", *QUOTA_DEFAULTS) and not re.fullmatch(r"[0-9]+", v):
+        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes", "urgent_ack_minutes", "quota_every_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", "lead_compact_alert", "lead_compact_swap", "drift_window_hours", "sweep_every_minutes", "thread_default_after_minutes", "slow_factor", *QUOTA_DEFAULTS) and not re.fullmatch(r"[0-9]+", v):
             sys.exit(f"{k}: a whole number" + ("" if k in QUOTA_DEFAULTS else " of minutes"))
         if k == "quota_every_minutes" and int(v) < 1:
             sys.exit("quota_every_minutes: a positive whole number of minutes")
+        if k in ("sweep_every_minutes", "thread_default_after_minutes", "slow_factor") and int(v) < 1:
+            sys.exit(f"{k}: a positive whole number")
         if k == "quota_trigger_on" and v.lower() not in ("true", "false"):
             sys.exit("quota_trigger_on: true or false")
+        if k == "sweep_trigger_on" and v.lower() not in ("true", "false"):
+            sys.exit("sweep_trigger_on: true or false")
         if k == "notice_merge" and v not in ("thread", "none"):
             sys.exit("notice_merge: thread or none")
         if k == "screen_mode" and v not in ("shadow", "off"):
@@ -7448,7 +8280,7 @@ def quota_due(st, dispatching=False):
     check due at once after any idle spell of quota_every_minutes or more; a short pause adds no extra check."""
     if quota_idle(st) and not dispatching:  # ready with work to send out: route it with a fresh tier
         return False
-    interval = int(st.get("prefs", {}).get("quota_every_minutes", 60) or 60)
+    interval = effective_interval(st, "quota_every_minutes")
     last = _when(st.get("last_quota_at"))
     return last is None or (_when(now()) - last).total_seconds() >= interval * 60
 
@@ -7473,8 +8305,18 @@ def quota_trigger_line(st, hint):
     return lab(st, "quota_trigger_" + hint, id=st["prefs"]["quota_trigger_id"])
 
 
+def sweep_trigger_hint(st, sendable):
+    p=st.get("prefs", {})
+    if not str(p.get("sweep_trigger_id") or "").strip(): return None
+    flag=p.get("sweep_trigger_on")
+    on=flag in (None, "") or str(flag).lower() not in ("false", "0")
+    if on and quota_idle(st) and not sendable: return "off"
+    if not on and (sendable or not quota_idle(st)): return "on"
+    return None
+
+
 def quota_due_minutes(st):
-    interval = int(st.get("prefs", {}).get("quota_every_minutes", 60) or 60)
+    interval = effective_interval(st, "quota_every_minutes")
     last = _when(st.get("last_quota_at"))
     if last is None:
         return 0
@@ -7483,6 +8325,18 @@ def quota_due_minutes(st):
 
 def cmd_quota(a):
     """T55: the lead's quota check. Reads local files only; bad data counts as missing; exit code is always 0."""
+    if getattr(a, "simulate_pct", None) is not None:
+        d = need(find_dir()); st = load(d); pct = max(0, min(100, a.simulate_pct))
+        st["quota"] = {"pct": pct, "at": now(), "simulated": True}
+        tier, pct = quota_pace_tier(st)
+        st["quota"]["tier"] = tier
+        st["quota_pct"] = pct
+        save(d, st, {"ev": "quota-simulated", "tier": tier, "pct": pct, "simulated": True})
+        log(d, {"ev":"quota-usage","used_pct":pct,"tier":tier,"at":now(),"simulated":True})
+        pace_notice(d, st)
+        print(json.dumps({"tier": tier, "pct": pct, "simulated": True}, ensure_ascii=False) if a.json else
+              lab(st, "quota_simulated", pct=pct, tier=lab(st, "quota_tier_" + tier)))
+        return
     if a.due:
         d = need(find_dir()); st = load(d); idle = quota_idle(st); due = quota_due(st)
         result = {"due": due, "minutes_remaining": 0 if due or idle else quota_due_minutes(st)}
@@ -7502,6 +8356,34 @@ def cmd_quota(a):
         fable = sum(x.get("model") == "fable" for x in rows); gpt = sum(x.get("model") == "gpt" for x in rows)
         redo = sum(x.get("result") == "redo" and x.get("model") in ("fable", "gpt") for x in rows)
         print(model_lab(st, "weekly", fable=fable, gpt=gpt, redo=redo))
+        paired = {"tokens": [], "minutes": []}
+        for kind in sorted({x.get("work_kind") or x.get("type") for x in rows} - {None, ""}):
+            for field in paired:
+                fable_rows = [x for x in rows if x.get("model") == "fable" and (x.get("work_kind") or x.get("type")) == kind and isinstance(x.get(field),(int,float))]
+                opus_rows = [x for x in rows if x.get("model") == "opus" and (x.get("work_kind") or x.get("type")) == kind and isinstance(x.get(field),(int,float))]
+                if fable_rows and opus_rows:
+                    paired[field].append((sum(x[field] for x in fable_rows)/len(fable_rows),
+                                          sum(x[field] for x in opus_rows)/len(opus_rows)))
+        field = next((field for field in ("tokens", "minutes") if len(paired[field]) >= 3), None)
+        if field is None:
+            rework_pairs=[]
+            for kind in sorted({x.get("work_kind") or x.get("type") for x in rows} - {None, ""}):
+                fr=[x for x in rows if x.get("model")=="fable" and (x.get("work_kind") or x.get("type"))==kind]
+                op=[x for x in rows if x.get("model")=="opus" and (x.get("work_kind") or x.get("type"))==kind]
+                if fr and op:
+                    rework_pairs.append((sum(x.get("result")=="redo" for x in fr)/len(fr),
+                                         sum(x.get("result")=="redo" for x in op)/len(op)))
+            field, pairs = ("rework_rate", rework_pairs)
+        else: pairs=paired[field]
+        eligible = [x for x in rows if x.get("model") in ("fable", "opus")]
+        if len(pairs) < 3 or sum(x.get("model")=="fable" for x in eligible) < 3 or sum(x.get("model")=="opus" for x in eligible) < 3:
+            print(model_lab(st, "weekly_pair_insufficient"))
+        else:
+            fa = sum(x[0] for x in pairs) / len(pairs)
+            oa = sum(x[1] for x in pairs) / len(pairs)
+            unit = model_lab(st, "weekly_metric_" + field)
+            winner = model_lab(st, "weekly_fable_cheaper" if fa < oa else "weekly_opus_cheaper" if oa < fa else "weekly_equal")
+            print(model_lab(st, "weekly_pair_result", n=len(pairs), fable=fa, opus=oa, unit=unit, winner=winner))
         return
     if quota_reader is None:
         print("quota: scripts/quota.py is missing next to tw.py (reinstall teamwork) · tier unknown · changed: no")
@@ -7576,6 +8458,12 @@ def cmd_quota(a):
             except Exception as exc:
                 result["notes"].append(f"log not written: {exc.__class__.__name__}")
     output = {**result, "tier": level, "flags": flags, "prev": prev, "changed": changed}
+    total_pct = quota_reader.num((result.get("claude", {}).get("total") or {}).get("pct"))
+    if project_dir and total_pct is not None and not write_locked:
+        try:
+            log(Path(project_dir), {"ev":"quota-usage","used_pct":float(total_pct),"tier":level,"at":now()})
+        except OSError as exc:
+            result.setdefault("notes", []).append(f"log not written: {exc.__class__.__name__}")
     if state_path and prefs_ok and level != "unknown" and not write_locked:
         st0["quota"] = {"tier": level, "at": now()}
         st0["last_quota_at"] = st0["quota"]["at"]
@@ -7585,6 +8473,12 @@ def cmd_quota(a):
             result.setdefault("notes", []).append(f"quota run time not saved ({str(exc)})")
         except Exception as exc:
             result.setdefault("notes", []).append(f"quota run time not saved ({exc.__class__.__name__})")
+    if project_dir and level != "unknown" and not write_locked:
+        try:
+            pace_st = load(Path(project_dir))
+            if isinstance(pace_st, dict) and isinstance(pace_st.get("prefs", {}), dict): pace_notice(Path(project_dir), pace_st)
+        except (OSError, ValueError, TypeError, AttributeError, SystemExit):
+            pass
     if a.json:
         print(json.dumps(output, ensure_ascii=False, indent=1))
         return
@@ -7748,8 +8642,12 @@ def cmd_model_log(a):
         sys.exit("record needs a valid --type, --model and --result")
     if a.task not in st.get("tasks", {}):
         sys.exit(f"unknown task {a.task}")
-    record = {"task": a.task, "type": a.type, "model": a.model, "result": a.result,
+    record = {"task": a.task, "type": a.type, "work_kind": st["tasks"][a.task].get("kind") or a.type,
+              "model": a.model, "result": a.result,
               "why": a.why, "at": now()}
+    for field in ("tokens", "minutes", "count"):
+        value = getattr(a, field, None)
+        if value is not None: record[field] = value
     _model_log_append(path, record)
     recent = []
     log_rows = []
@@ -7900,13 +8798,12 @@ def cmd_opening(a):
                 print(f"  {n}. {step['step']} — {step['cost']}" + (lab(st, "opening_recommended") if n - 1 == row["recommended"] else ""))
             last = row["last"]
             print(lab(st, "opening_current", current=row["current"] or lab(st, "opening_unset"),
-                      last=lab(st, "opening_last", value=last["value"], text=last["text"]) if last else lab(st, "opening_no_last"))
-                  if _zh(st) else f"  current: {row['current']}; last elsewhere: {row['last']}")
+                      last=lab(st, "opening_last", value=last["value"], text=last["text"]) if last else lab(st, "opening_no_last")))
             print("  " + row["change"])
         print(result["gpt_private_question"])
         if result.get("managed_note"): print(result["managed_note"])
-        print((lab(st, "opening_unanswered", keys="、".join(result["unanswered_now"])) if result["unanswered_now"] else lab(st, "opening_all_answered"))
-              if _zh(st) else "unanswered_now: " + ", ".join(result["unanswered_now"]))
+        print(lab(st, "opening_unanswered_list", keys=lab(st, "language_list_sep").join(result["unanswered_now"]))
+              if result["unanswered_now"] else lab(st, "opening_all_answered"))
         for name, status in result["thread_screens"].items(): print(f"{name}: {status}")
         print(result["rule"])
 
@@ -7993,7 +8890,8 @@ def newer_release(info=None):
     if info.get("type") != "release": return None
     try:
         releases = json.loads((skill.parent / "index.json").read_text(encoding="utf-8"))["releases"]
-        return releases[-1]["name"] if releases and releases[-1]["name"] != info["name"] else None
+        latest = max(releases, key=lambda r: _release_stamp(r.get("name") or "") or "") if releases else None
+        return latest["name"] if latest and version_relation(latest["name"], info["name"]) == "older" else None
     except (OSError, ValueError, KeyError): return None
 
 
@@ -8001,18 +8899,21 @@ def cmd_selfcheck(a):
     d = find_dir(); st = load(d) if d else {}; lead = st.get("lead", {})
     def item(name, ok, detail="", fix=""): return {"item": name, "ok": ok, "detail": detail, "fix": fix}
     mode = a.mode or lead.get("permission_mode")
-    items = [item("mode", mode == "auto" if mode else None, mode or "mode unavailable", "switch this session's mode away from Auto and back in the mode menu under the message box, then tell the lead"),
-             item("session", bool(lead.get("session_id")), str(lead.get("session_id") or "lead session not set"), "TW lead --session <id>")]
+    items = [item("mode", mode == "auto" if mode else None, mode or lab(st,"selfcheck_input_missing"), lab(st,"selfcheck_mode_fix")),
+             item("session", bool(lead.get("session_id")), str(lead.get("session_id") or lab(st,"selfcheck_session_missing")), "TW lead --session <id>")]
     lead_screen = next((x for x in reversed(list(st.get("screens", {}).values())) if x.get("seat") == "lead"), None)
     if lead_screen:
         items.append(item("screening", lead_screen.get("verdict") == "pass",
                           _screen_label(st, "lead") or _verdict_word(st, "unscored"),
                           f"TW screen ask lead --session {lead.get('session_id') or '<id>'}"))
-    items.append(item("model", a.model == a.served_model if a.model and a.served_model else None,
-                      f"served {a.served_model}, configured {a.model} (fallback)" if a.model and a.served_model and a.model != a.served_model else ""))
+    served_model = getattr(a, "served_model", None) or getattr(a, "last_served_model", None)
+    items.append(item("model", a.model == served_model if a.model and served_model else None,
+                      lab(st,"selfcheck_model_detail",served=served_model,configured=a.model) if a.model and served_model and a.model != served_model else "",
+                      lab(st,"selfcheck_model_fix")))
     items.append(item("gpt_model", None, str(st.get("prefs", {}).get("gpt_model") or "not recorded")))
     items.append(item("effort", a.effort == a.want_effort if a.want_effort else None,
-                      f"effort {a.effort}, wanted {a.want_effort}" if a.want_effort and a.effort != a.want_effort else ""))
+                      lab(st,"selfcheck_effort_detail",effort=a.effort,wanted=a.want_effort) if a.want_effort and a.effort != a.want_effort else "",
+                      lab(st,"selfcheck_effort_fix")))
     folder = Path(st.get("repo", {}).get("path") or (d.parent if d else "."))
     used = a.seats_used
     if used is None:  # the seat cap counts every project's sessions on this computer, not only this one's
@@ -8028,14 +8929,43 @@ def cmd_selfcheck(a):
             used += sum(1 for t in (o.get("threads") or {}).values()
                         if isinstance(t, dict) and t.get("status") != "archived" and t.get("session_id"))
             used += 1 if f.resolve() != own and (o.get("lead") or {}).get("session_id") else 0
-    items.append(item("seats", used < a.seats_max, f"{used} of {a.seats_max} used"))
-    found = shutil.which("codex")
-    items.append(item("gpt", True if found else None, "codex CLI found" if found else "codex CLI not found; GPT work runs only through the codex plugin if installed"))
+    items.append(item("seats", used < a.seats_max, lab(st,"selfcheck_seats_detail",used=used,max=a.seats_max), lab(st, "selfcheck_seats_fix")))
+    codex = shutil.which("codex")
+    gpt_status, gpt_detail = None, lab(st, "selfcheck_gpt_missing")
+    if codex:
+        try:
+            probe = subprocess.run([codex, "--version"], capture_output=True, text=True, timeout=10)
+            gpt_status = probe.returncode == 0
+            gpt_detail = (probe.stdout or probe.stderr).strip().splitlines()[0] if (probe.stdout or probe.stderr).strip() else lab(st, "selfcheck_gpt_version_failed", code=probe.returncode)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            gpt_detail = lab(st, "selfcheck_gpt_version_error", error=type(exc).__name__)
+    items.append(item("gpt", gpt_status, gpt_detail, lab(st, "selfcheck_gpt_fix")))
+    if getattr(a, "gpt_probe", False):
+        model = st.get("prefs", {}).get("gpt_model") or "gpt-6-luna"
+        try:
+            result = subprocess.run([codex, "exec", "--skip-git-repo-check", "-m", model, "reply OK"],
+                                    capture_output=True, text=True, timeout=60) if codex else None
+            st.setdefault("selfcheck", {})["gpt_probe"] = {"at": now(), "ok": bool(result and result.returncode == 0),
+                "detail": ((result.stdout or result.stderr).strip().splitlines()[-1][:240] if result and (result.stdout or result.stderr).strip() else lab(st, "selfcheck_gpt_probe_missing"))}
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            st.setdefault("selfcheck", {})["gpt_probe"] = {"at": now(), "ok": False, "detail": type(exc).__name__}
     label, info = running_version(); newer = newer_release(info)
-    items.append(item("version", not bool(newer), f"newer release {newer} available" if newer else
-                      label + ("; unreleased changes: this is the live clone, not a release" if info.get("type") == "edge" else ""),
-                      "say which version you run, and that the user may want the newest release" if newer else ""))
-    items.append(item("ledger", bool(d and (d / "state.json").exists() and (d / "BOARD.md").exists()), "state.json and BOARD.md"))
+    host_key = hashlib.sha256(socket.gethostname().encode()).hexdigest()[:8]
+    st.setdefault("versions", {})[host_key] = {"version": label, "at": now()}
+    other_versions = []
+    for k,v in st["versions"].items():
+        if k == host_key: continue
+        relation=version_relation(label,v.get("version"))
+        if relation == "older": other_versions.append(lab(st,"version_other_computer",host=k,version=v.get("version")))
+        elif relation == "newer": other_versions.append(lab(st,"version_computer_newer",host=k,version=v.get("version")))
+        elif relation == "incomparable": other_versions.append(lab(st,"version_incomparable"))
+    version_needs_attention = bool(newer or any(version_relation(label,v.get("version")) in ("older","incomparable") for k,v in st["versions"].items() if k != host_key))
+    edge_detail = lab(st, "version_edge_detail") if info.get("type") == "edge" else ""
+    items.append(item("version", not version_needs_attention,
+                      "; ".join(([lab(st, "version_newer_detail", version=newer)] if newer else [lab(st, "version_detail", version=label, edge=edge_detail)]) + other_versions),
+                      lab(st, "version_fix") if version_needs_attention else ""))
+    items.append(item("ledger", bool(d and (d / "state.json").exists() and (d / "BOARD.md").exists()),
+                      lab(st, "selfcheck_ledger_files")))
     found = {"SessionStart": False, "PreToolUse": False}  # RC sessions start in the served folder: its hooks count too
     for base in dict.fromkeys([folder, Path(a.served).expanduser() if a.served else folder.parent]):
         for name in ("settings.json", "settings.local.json"):
@@ -8049,7 +8979,7 @@ def cmd_selfcheck(a):
                         c = str(h.get("command", "")) if isinstance(h, dict) else ""
                         found[ev] |= "tw.py" in c and word in c
     hookok = all(found.values())
-    items.append(item("hooks", hookok, "SessionStart context and PreToolUse bash-guard" if hookok else "required hooks not found", "run install.py --link --project <folder> --served <served folder> (dry run, then --apply)"))
+    items.append(item("hooks", hookok, lab(st,"selfcheck_hooks_detail") if hookok else lab(st,"selfcheck_hooks_missing"), lab(st,"selfcheck_hooks_fix")))
     errs = guard_errors_recent()
     if errs:  # reported only when there is something to report
         items.append(item("guard_errors", False, lab(st, "guard_errors", n=errs), f"read {guard_log_path()} and report the error"))
@@ -8062,24 +8992,78 @@ def cmd_selfcheck(a):
         items.append(item("compact_check",bool(check.get("answered") and check.get("passed")),
                           _compact_label(st,"lead"),"read SKILL.md Rules and answer the recorded [quiz HQ<n>]"))
     modeitem, proj = items[0], st.get("project")
-    if not d:
-        first = f"No teamwork project here: run /teamwork in the project folder (teamwork {label})"
-    elif a.desktop:
-        first = f"I am the lead of {proj}, on the desktop: I open threads in the turn you send a message (teamwork {label})"
-    elif modeitem["ok"]:
-        first = f"I am the lead of {proj}, auto is in effect (teamwork {label})"
-    elif modeitem["ok"] is None:
-        first = (f"I am the lead of {proj}; I could not read this session's mode: check it says Auto in the mode menu "
-                 f"under the message box (teamwork {label})")
+    # Every checklist entry states whether it was measured, recorded, or left untested.
+    for x in items:
+        x["how"] = "tested" if x.get("ok") is not None else "not-tested"
+        if x["how"] == "not-tested": x["why"] = x.get("detail") or "required input was not available"
+    items[0]["how"] = "tested" if a.mode else "recorded" if lead.get("permission_mode") else "not-tested"
+    if not a.mode: items[0]["ok"] = None
+    if not a.mode and lead.get("permission_mode"):
+        items[0].pop("why", None)
+        items[0]["detail"] += " (" + lab(st, "mode_recorded_detail") + ")"
+    elif not a.mode:
+        items[0]["why"] = lab(st, "mode_not_supplied")
+    model_item = next(x for x in items if x["item"] == "model")
+    effort_item = next(x for x in items if x["item"] == "effort")
+    model_item["how"] = "tested" if a.model and a.served_model else "recorded" if a.model else "not-tested"
+    effort_item["how"] = "tested" if a.want_effort else "recorded" if a.effort else "not-tested"
+    if model_item["how"] == "not-tested": model_item["why"] = lab(st, "selfcheck_model_input_missing")
+    else: model_item.pop("why", None)
+    if effort_item["how"] == "not-tested": effort_item["why"] = lab(st, "selfcheck_effort_input_missing")
+    else: effort_item.pop("why", None)
+    spawn = lead.get("spawn_probe") or {}; spawn_ok = spawn.get("result") == "ok"
+    spawn_word=lab(st,"spawn_" + spawn.get("result", "untested") if spawn.get("result") in ("ok","refused","untested") else "spawn_untested")
+    items.append(item("spawn", spawn_ok if spawn.get("result") in ("ok", "refused") else None,
+                      spawn_word + (f": {spawn['note']}" if spawn.get("note") else ""),
+                      lab(st,"selfcheck_spawn_fix")))
+    if spawn.get("result") in ("ok", "refused"): items[-1]["how"] = "tested"
+    if not spawn.get("result") or spawn.get("result") == "untested": items[-1]["how"] = "not-tested"; items[-1]["why"] = items[-1]["fix"]
+    if lead.get("opened_by"):
+        items.append(item("opened_by", None,
+                          lab(st, "mode_opened_elsewhere_detail") if lead.get("opened_by") != "self" else lab(st, "mode_opened_self"),
+                          lab(st, "mode_trusted_fix") if lead.get("opened_by") != "self" else ""))
+        items[-1]["how"] = "recorded"
+        if lead.get("opened_by") != "self" and not a.mode:
+            items[0].update(ok=None, how="not-tested", why=lab(st, "mode_opened_elsewhere"))
+    dev = bool(st.get("tasks")) or bool(re.search(r"\b(app|software|website|webapp|feature|implement|code|build|开发|应用|网站)\b", st.get("goal", ""), re.I))
+    if dev and not st.get("features"):
+        items.append(item("features", False, lab(st, "dev_features_missing"), lab(st, "feature_fix")))
+        items[-1]["how"] = "tested"
     else:
-        first = f"I am the lead of {proj}; please switch this session to auto once: {modeitem['fix']} (teamwork {label})"
+        items.append(item("features", True, lab(st, "features_count", n=len(st.get("features") or {})) if dev else lab(st, "features_not_required")))
+        items[-1]["how"] = "tested"
+    probe_row = (st.get("selfcheck") or {}).get("gpt_probe")
+    if probe_row:
+        age = _minutes_since(probe_row.get("at"))
+        items.append(item("gpt_probe", bool(probe_row.get("ok")), f"{probe_row.get('detail', '')}; age {age if age is not None else '?'} min",
+                          lab(st, "selfcheck_gpt_probe_fix") if not probe_row.get("ok") else ""))
+        items[-1]["how"] = "recorded"
+    st.setdefault("selfcheck", {})["items"] = items
+    st["selfcheck"]["at"] = now()
+    if d: save(d, st, {"ev": "selfcheck"})
+    if not d:
+        first = lab(st,"selfcheck_first_none",project="",version=label)
+    elif a.desktop or lead.get("desktop"):
+        first = lab(st,"selfcheck_first_desktop",project=proj,version=label)
+    elif modeitem["ok"]:
+        first = lab(st,"selfcheck_first_auto",project=proj,version=label)
+    elif modeitem["ok"] is None:
+        first = lab(st,"selfcheck_first_unknown",project=proj,version=label)
+    else:
+        first = lab(st,"selfcheck_first_switch",project=proj,fix=modeitem['fix'],version=label)
     failed = [x for x in items if x["ok"] is False]
     opening_status = lab(st, "open_session_tests")
-    if a.json: print(json.dumps({"items": items, "first_line": first, "session_opening": opening_status}, ensure_ascii=False))
+    notice = st.get("version_notice") or {}
+    notice_line = lab(st, "version_notice", n=len(notice.get("sessions") or []), sessions=", ".join(notice.get("sessions") or [])) if notice.get("release") == label and notice.get("sessions") else None
+    if a.json: print(json.dumps({"items": items, "first_line": first, "session_opening": opening_status, **({"version_notice": notice_line} if notice_line else {})}, ensure_ascii=False))
     else:
         print(first)
+        if notice_line: print(notice_line)
         print(opening_status)
-        for x in (failed if a.brief else items): print(f"{'✓' if x['ok'] else '✗' if x['ok'] is False else '?'} {x['item']}: {x['detail']}" + (f"; fix: {x['fix']}" if x['ok'] is False and x['fix'] else ""))
+        for x in (failed if a.brief else items):
+            status = lab(st, "selfcheck_tested") if x.get("ok") is True and x.get("how") == "tested" else lab(st, "selfcheck_failed") if x.get("ok") is False else lab(st, "selfcheck_recorded") if x.get("how") == "recorded" else lab(st, "selfcheck_untested", why=x.get("why", "原因未记录"))
+            name = lab(st, "selfcheck_item_" + x["item"])
+            print(f"{status} {name}: {x['detail']}" + (lab(st, "selfcheck_fix_sep") + x['fix'] if x["ok"] is False and x.get("fix") else ""))
 
 
 def cmd_worker_prompt(a):
@@ -8331,9 +9315,21 @@ def cmd_req(a):
     st = load(d)
     reqs = st.setdefault("requests", {})
     if a.action == "list":
-        rows = {r: q for r, q in reqs.items() if a.all or (q["status"] not in REQ_END and q["status"] != "remark")}
+        rows = {r: q for r, q in reqs.items() if (not a.status or q.get("status") == a.status) and
+                (a.all or a.status or (q["status"] not in REQ_END and q["status"] != "remark"))}
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return
+    if a.action == "confirm":
+        said=(a.user_said or "").strip()
+        if not said: sys.exit(lab(st,"req_confirm_words"))
+        ids=[rid for rid,q in reqs.items() if awaiting_confirm(st,q)] if a.all else a.args
+        if not ids: sys.exit(lab(st,"req_confirm_ids"))
+        bad=[rid for rid in ids if rid not in reqs or not awaiting_confirm(st,reqs[rid])]
+        if bad: sys.exit(lab(st,"req_confirm_reported",ids=", ".join(bad)))
+        for rid in ids:
+            q=reqs[rid]; q.update(status="closed",confirmed_at=now(),confirmed_by=said,updated=now())
+        save(d,st,{"ev":"req-confirm","ids":ids,"user_said":said})
+        print(json.dumps({rid:reqs[rid] for rid in ids},ensure_ascii=False,indent=2)); return
     if a.action == "import":
         cmd_req_import(a, d, st); return
     if a.action == "migrate":
@@ -9577,6 +10573,8 @@ def cmd_archive(a):
         if rec.get("category") in ("disconnected", "idle-old") and not direct_disconnected and not (a.user_said or "").strip():
             sys.exit("this category needs --user-said (user decision)")
         rec["archived_at"] = now()
+        if "archive" in st.get("prefs", {}).get("standing_grants", []):
+            st.setdefault("grant_uses", []).append({"grant": "archive", "at": now(), "what": sid})
         rec.pop("check", None); rec.pop("checked_at", None)
         rec["user_said"] = (a.user_said or "").strip()
         if direct_disconnected: rec["direct_disconnected_id_verified"] = sid
@@ -11605,9 +12603,75 @@ def _vkey(label):
     return "edge" if label.startswith("edge ") else label.split(" (")[0]
 
 
+def _release_stamp(label):
+    match = re.search(r"\br(\d{8})-(\d{6})\b", str(label or ""))
+    return match.group(1) + match.group(2) if match else None
+
+
+def version_relation(current, recorded):
+    """Relation of the recorded version to this one, using release timestamps when available."""
+    cur, old = str(current or ""), str(recorded or "")
+    if cur.startswith("edge ") != old.startswith("edge ") and (cur.startswith("edge ") or old.startswith("edge ")):
+        return "incomparable"
+    a, b = _release_stamp(cur), _release_stamp(old)
+    if a and b:
+        return "older" if b < a else "newer" if b > a else "same"
+    return "same" if _vkey(cur) == _vkey(old) else "incomparable"
+
+
+def session_versions(d):
+    latest = {}
+    path = d / "session-versions.jsonl"
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+                latest[row["session"]] = row
+            except (ValueError, KeyError):
+                continue
+    except OSError:
+        pass
+    return latest
+
+
 def cmd_version(a):
     label, info = running_version()
     newer = newer_release(info)
+    if getattr(a, "leads", False):
+        root = Path(a.root).expanduser() if getattr(a, "root", None) else (find_dir().parent.parent if find_dir() else Path.cwd())
+        rows = []
+        for project in find_projects(root):
+            try: state = json.loads((project / ".teamwork" / "state.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError, UnicodeError): continue
+            if not isinstance(state, dict): continue
+            lead = state.get("lead") or {}; sid = lead.get("session_id")
+            checks = state.get("selfcheck", {}).get("items", [])
+            mode_tested = any(x.get("item") == "mode" and x.get("how") == "tested" and x.get("ok") for x in checks)
+            if lead.get("permission_mode") != "auto" or not mode_tested:
+                title = lead.get("title") or (f"[{tag(state)}] lead" + (f" · {state.get('goal')}" if state.get("goal") else ""))
+                rows.append(f"{state.get('project')}: {title}")
+        print(lab(load(find_dir()) if find_dir() else {}, "unapproved_leads", n=len(rows), projects="; ".join(rows)) if rows else "")
+        return
+    if getattr(a, "notify", False):
+        d = need(find_dir()); st = load(d)
+        latest = session_versions(d)
+        behind, incomparable = [], []
+        for name, thread in {"lead": st.get("lead", {}), **(st.get("threads") or {})}.items():
+            sid = thread.get("session_id") if isinstance(thread, dict) else None
+            if sid in latest:
+                relation=version_relation(label,latest[sid].get("version"))
+                if relation == "older": behind.append(name)
+                elif relation == "incomparable": incomparable.append(name)
+        notice = st.get("version_notice") or {}
+        if behind and notice.get("release") != label:
+            st["version_notice"] = {"release": label, "at": now(), "sessions": behind}
+            save(d, st, {"ev": "version-notice"})
+            print(lab(st, "version_notice", n=len(behind), sessions=", ".join(behind)))
+        elif not behind and notice:
+            st.pop("version_notice", None)
+            save(d, st, {"ev": "version-notice-closed"})
+        if incomparable: print(lab(st,"version_incomparable_sessions", sessions=", ".join(incomparable)))
+        return
     if not a.sessions and not a.json:
         print(label)
         if newer:
@@ -11616,24 +12680,22 @@ def cmd_version(a):
     result = {"running": {**info, "version": label}, "newer": newer}
     if a.sessions:
         d = find_dir()
-        latest = {}
-        if d and (d / "session-versions.jsonl").exists():
-            for line in (d / "session-versions.jsonl").read_text(encoding="utf-8").splitlines():
-                try:
-                    row = json.loads(line)
-                    latest[row["session"]] = row
-                except (ValueError, KeyError):
-                    continue
+        latest = session_versions(d) if d else {}
         st = load(d) if d and (d / "state.json").exists() else {}
-        old = []
+        old, incomparable = [], []
         for name, thread in (st.get("threads") or {}).items():
             sid = thread.get("session_id") if isinstance(thread, dict) else None
-            if sid in latest and _vkey(latest[sid].get("version")) != _vkey(label):
-                old.append({"thread": name, "session": sid, "version": latest[sid].get("version")})
+            if sid in latest:
+                relation=version_relation(label,latest[sid].get("version"))
+                if relation == "older": old.append({"thread": name, "session": sid, "version": latest[sid].get("version")})
+                elif relation == "incomparable": incomparable.append({"thread": name,"session":sid,"version":latest[sid].get("version")})
         sid = (st.get("lead") or {}).get("session_id")
-        if sid in latest and _vkey(latest[sid].get("version")) != _vkey(label):
-            old.append({"thread": "lead", "session": sid, "version": latest[sid].get("version")})
+        if sid in latest:
+            relation=version_relation(label,latest[sid].get("version"))
+            if relation == "older": old.append({"thread": "lead", "session": sid, "version": latest[sid].get("version")})
+            elif relation == "incomparable": incomparable.append({"thread":"lead","session":sid,"version":latest[sid].get("version")})
         result["old_sessions"] = old
+        result["incomparable_sessions"] = incomparable
     print(json.dumps(result, ensure_ascii=False) if a.json or a.sessions else label)
 
 
@@ -11702,12 +12764,15 @@ def cmd_context(a):
             except ValueError:
                 continue
         sid = event.get("session_id") if isinstance(event, dict) else None
+        host_key = hashlib.sha256(socket.gethostname().encode()).hexdigest()[:8]
+        st.setdefault("versions", {})[host_key] = {"version": label, "at": now()}
+        save(d, st, {"ev": "session-start-version"})
         if sid and not st.get("write_lock"):  # H9: which version each session started on
             with (d / "session-versions.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps({"session": sid, "version": label, "at": os.environ.get("TW_NOW") or now(),
                                     "cwd": str(Path.cwd()), "config_dir": os.environ.get("CLAUDE_CONFIG_DIR") or
                                     str(Path.home() / ".claude")}) + "\n")
-    except Exception:
+    except (Exception, SystemExit):
         pass
     pw = permission_warning(st) if not in_worktree else ""
     reminder = thread_reminder(st, me) if in_worktree else lead_reminder(st)
@@ -12871,7 +13936,8 @@ def main():
     x.add_argument("--append", action="store_true")
 
     x = s.add_parser("feature", help="feature ledger")
-    x.add_argument("action", choices=["add", "set", "list"]); x.add_argument("name", nargs="?", default="")
+    x.add_argument("action", choices=["add", "set", "list", "move", "import", "reconcile"]); x.add_argument("name", nargs="?", default="")
+    x.add_argument("--file"); x.add_argument("--to"); x.add_argument("--why")
     x.add_argument("--phase"); x.add_argument("--req", action="append", nargs="+"); x.add_argument("--task", action="append", nargs="+")
     x.add_argument("--status", choices=["planned", "building", "landed", "dropped"]); x.add_argument("--evidence"); x.add_argument("--reason")
     x.add_argument("--json", action="store_true"); x.add_argument("--done-since"); x.set_defaults(f=cmd_feature)
@@ -12879,8 +13945,8 @@ def main():
     x.add_argument("--strict", action="store_true"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_reconcile)
     x = s.add_parser("wrapup", help="end-of-round ledger self-check")
     x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_wrapup)
-    x = s.add_parser("sprint", help="summarize sprint progress")
-    x.add_argument("--since"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_sprint)
+    x = s.add_parser("sprint", help="summarize sprint progress, beta feedback or stop checklist")
+    x.add_argument("action", nargs="?", choices=["start", "end", "beta", "feedback", "stop-all"]); x.add_argument("--until"); x.add_argument("--goal"); x.add_argument("--since"); x.add_argument("--version"); x.add_argument("--try", dest="try_items", action="append"); x.add_argument("--text"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_sprint)
 
     x = s.add_parser("init", help="create .teamwork/ in a project folder")
     x.add_argument("project")
@@ -12902,6 +13968,9 @@ def main():
     x.add_argument("--relead", action="store_true", help="seat the new lead after `screen relead` (failed opening screen)")
     x.add_argument("--mode", choices=PERMISSION_MODES, help="the lead session's own permission mode (check it at "
                    "start): threads cannot be looser, so a lead below auto is reported, never silently downgraded")
+    x.add_argument("--spawn-probe", choices=["ok", "refused", "untested"]); x.add_argument("--opened-by")
+    x.add_argument("--note")
+    x.add_argument("--desktop", action="store_true")
     x.set_defaults(f=cmd_lead)
 
     x = s.add_parser("succ", help="record, verify and complete a session handover")
@@ -12951,9 +14020,11 @@ def main():
     x.add_argument("--root", default=".", help="root folder for --all-projects")
     x.set_defaults(f=lambda a: cmd_nav_all(a) if a.all_projects else cmd_nav(a))
     x = s.add_parser("notice", help="record and handle turn notices")
-    x.add_argument("action", choices=["add", "list", "done"]); x.add_argument("--thread"); x.add_argument("--session")
+    x.add_argument("action", choices=["add", "list", "done", "sweep"]); x.add_argument("--thread"); x.add_argument("--session")
     x.add_argument("--ref"); x.add_argument("--kind", choices=["turn-end", "done", "blocked", "failed", "needs-user"])
     x.add_argument("--text", "--note", dest="text"); x.add_argument("--json", action="store_true"); x.add_argument("--all", action="store_true")
+    x.add_argument("--sessions"); x.add_argument("--events", action="append", help="events JSON file; pair with --session")
+    x.add_argument("--event-session", dest="sessions_for_events", action="append", help=argparse.SUPPRESS)
     x.set_defaults(f=cmd_notice)
     x = s.add_parser("nudge", help="record one rate-limited thread nudge")
     x.add_argument("thread"); x.add_argument("--text"); x.set_defaults(f=cmd_nudge)
@@ -13041,7 +14112,8 @@ def main():
     x.add_argument("--need-thread", metavar="NAME", help="a thread's NEED-THREAD (message or STATUS need_thread line): "
                    "recorded once per (thread, name); a repeat is refused so it is not handled twice")
     x.add_argument("--again", action="store_true", help="record a new NEED-THREAD request after the earlier one was answered")
-    x.add_argument("--default", type=int, metavar="N", help="apply a reversible default to question N")
+    x.add_argument("--default", metavar="N|ACTION", help="apply a reversible default to question N, or state a thread's default action")
+    x.add_argument("--minutes", type=int)
     x.add_argument("--undoable", action="store_true")
     x.add_argument("--proposal", help="record a proposal waiting for the user's answer")
     x.add_argument("--external", action="store_true")
@@ -13081,9 +14153,10 @@ def main():
     x.add_argument("--ledger-line", action="store_true", help="print the ledger line on this card whatever "
                    "prefs ledger_line_every says")
     x.add_argument("--json", action="store_true")
+    x.add_argument("--all", action="store_true")
     x.set_defaults(f=cmd_card)
     x = s.add_parser("docs", help="links to the documents the user opens: set board|ledger|features --link URL, list")
-    x.add_argument("action", choices=["set", "list"])
+    x.add_argument("action", choices=["set", "list", "refreshed"])
     x.add_argument("which", nargs="?", choices=list(DOC_KINDS))
     x.add_argument("--link", metavar="URL")
     x.add_argument("--note", help="one line saying what the document is")
@@ -13159,6 +14232,7 @@ def main():
         + ", ".join(f"{k}={v}" for k, v in QUOTA_DEFAULTS.items())
     )
     x.add_argument("--set", nargs="*")
+    x.add_argument("--grant-use", choices=["archive", "schedule"]); x.add_argument("--what")
     x.add_argument("--user-said", metavar="WORDS", help="the user's words, needed to turn review/primary gates off")
     x.set_defaults(f=cmd_prefs)
     x = s.add_parser("screen", help="shadow session readiness checks")
@@ -13174,6 +14248,7 @@ def main():
     x = s.add_parser("quota", help="read local usage windows and quota tier (lead)")
     x.add_argument("--due", action="store_true", help="report whether a quota check is due")
     x.add_argument("--weekly", action="store_true")
+    x.add_argument("--simulate-pct", type=int, help="simulate a quota percentage for isolated checks")
     x.add_argument("--config-dir", action="append", metavar="DIR")
     x.add_argument("--codex-dir", metavar="DIR")
     x.add_argument("--json", action="store_true")
@@ -13184,6 +14259,7 @@ def main():
     x.add_argument("--model", choices=MODELS)
     x.add_argument("--result", choices=["ok", "redo"])
     x.add_argument("--why")
+    x.add_argument("--tokens", type=int); x.add_argument("--minutes", type=float); x.add_argument("--count", type=int)
     x.add_argument("--summary", action="store_true")
     x.add_argument("--json", action="store_true")
     x.add_argument("--deny", choices=MODEL_TYPES)
@@ -13198,11 +14274,12 @@ def main():
     x.add_argument("--why", choices=["quota", "connection", "other"]); x.add_argument("--until"); x.add_argument("--note")
     x.set_defaults(f=cmd_model_status)
     x = s.add_parser("selfcheck", help="check this lead session and project setup")
-    x.add_argument("--mode"); x.add_argument("--model"); x.add_argument("--served-model"); x.add_argument("--served"); x.add_argument("--desktop", action="store_true"); x.add_argument("--effort"); x.add_argument("--want-effort")
+    x.add_argument("--mode"); x.add_argument("--model", "--configured-model", dest="model"); x.add_argument("--served-model", "--last-served-model", dest="served_model"); x.add_argument("--served"); x.add_argument("--desktop", action="store_true"); x.add_argument("--effort"); x.add_argument("--want-effort")
     x.add_argument("--seats-used", type=int); x.add_argument("--seats-max", type=int, default=32)
-    x.add_argument("--brief", action="store_true"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_selfcheck)
+    x.add_argument("--brief", action="store_true"); x.add_argument("--json", action="store_true"); x.add_argument("--gpt-probe", action="store_true"); x.set_defaults(f=cmd_selfcheck)
     x = s.add_parser("version", help="show this skill copy and active sessions")
     x.add_argument("--sessions", action="store_true")
+    x.add_argument("--notify", action="store_true"); x.add_argument("--leads", action="store_true"); x.add_argument("--root")
     x.add_argument("--json", action="store_true")
     x.set_defaults(f=cmd_version)
     x = s.add_parser(
@@ -13212,7 +14289,7 @@ def main():
     x.add_argument("thread")
     x.set_defaults(f=cmd_worker_prompt)
     x = s.add_parser("req", help="user requests ledger: add / link / set / close / list / import")
-    x.add_argument("action", choices=["add", "link", "set", "close", "drop", "list", "import", "migrate"])
+    x.add_argument("action", choices=["add", "link", "set", "close", "drop", "list", "import", "migrate", "confirm"])
     x.add_argument("args", nargs="*", help='add: "<text>"; link: R<n> T1 [T2]; set/close: R<n>; import: <file.md>')
     x.add_argument("--id", help="add: explicit id (default next R<n>)")
     x.add_argument("--tasks", help="comma list of task ids to link")

@@ -50,7 +50,7 @@ If the platform's safety check stops one of your steps, do not look for another 
 | `UPDATE` | Real progress or a change of plan, only when the lead asked for updates or something important changed. |
 | `DONE` | The task's "done when" is met **and your independent review passed or was capped** (below). Say what changed, where (branch, commit, files, PR), how you verified it (exact test/check command and result), and the review: verdict, rounds, findings, what you fixed, what is deferred, and the reviewed commit as a full SHA (`reviewed: <sha>`): the lead merges exactly that commit, so push nothing after it, or have the new commits reviewed and report the new SHA. Include `primary: seen|not seen|pending-real — <how> — <evidence>`, `tests: ran|not run (<why>)`, and `base: <sha>`. Repeat the TASK's `Dispatch: v<N>` line, so a DONE sent twice is counted once. |
 | `BLOCKED` | You cannot continue. Say exactly what you need and from whom. |
-| `QUESTION` | You need a decision only the user or another owner can make. |
+| `QUESTION` | You need a decision only the user or another owner can make. State the question and a reversible default in your message or STATUS as `默认：<what I'll do> · N 分钟后按默认做` (in English: `Default: <what I'll do> · I'll follow the default in N minutes`). Do not run `TW ask`; the lead records it with `TW ask --from <thread> --default "<action>" --minutes N`. |
 | `HANDOFF` | Work that belongs to another thread (see below). |
 | `MEMORY` | A fact or decision the whole project should remember. The lead decides whether to add it. |
 | `NEED-THREAD` | The work needs a new thread (a new area, or more than you can carry). You never start sessions yourself: ask the lead, which decides and creates it. Cloud threads cannot message the lead: write the same fields on the `need_thread:` line of your STATUS block instead (and ask the user here). Body: `name:` suggested thread name; `kind:` rc, or cloud with the reason (it never touches the project folder and never needs to message rc threads); `why:`; `takes over:` task ids or areas it would own; `owns:` paths or topics. |
@@ -198,6 +198,7 @@ When you receive `RECALL`: stop at a safe point (if your last turn ended with "[
 - Talk only to sessions in your roster. Other teamwork projects may run in the same Remote Control folder: never read, message or edit their sessions or their `.teamwork/` folders.
 - Steps that need the user's explicit approval (publishing, creating repos, pushing to a shared remote, opening PRs, deleting, sending anything outside): do not ask the user here and do not wait. Prepare everything up to that step (commit on your branch, dry run, draft), then send `QUESTION` (rc) or set `waiting_on: user` (cloud) describing the exact step. The lead asks the user in its chat and does it itself.
 - Never wait silently. Whenever you need something (a decision, an answer, a permission, another thread's work), say it out loud the same turn: rc threads send it to the lead (`QUESTION` / `BLOCKED`) or ask the user directly in this chat; cloud threads ask the user here and set `waiting_on`. A `waiting_on` that only sits in your STATUS block is not enough: nobody may read it. Do not repeat things that are already settled (check MEMORY.md and the lead's latest messages first).
+- If you ask the lead a question and include `--default "<reversible preparation>"` with `TW ask`, continue that preparation after the configured minutes if unanswered. Say `按默认做：<action>` in the next STATUS; do not take outward or irreversible action by default.
 - If a tool asks for permission, only the user can approve it in your session; the lead cannot. Tell the user in this chat which tool and why, and also put it in STATUS as `waiting_on: permission <tool>`.
 - **Do not make the user click.** The user should not have to watch you. Every permission prompt you cause stops you until they come back. So:
   - put scratch files, test repos and review exports under `/tmp` (or `$TMPDIR`), never in other folders outside your worktree (on rc computers set up by `install.py`, reading and `cd` there do not ask); nothing private goes there, other sessions share it (private scratch: see Privacy);
@@ -220,6 +221,10 @@ When you receive `RECALL`: stop at a safe point (if your last turn ended with "[
 - **Name the limit.** When you stop on a quota or spend limit, say which one (the session's 5-hour limit, a monthly spend cap, another tool's quota) and when it resets, if the message says; `waiting_on: limit <which>, resets <when>` in STATUS. Do not guess a reset time.
 
 ## STATUS block (end EVERY turn with it)
+
+## Sprint deadline
+
+When the lead sends a `SPRINT` message with a deadline, treat it as a hard stop. Stop adding scope at the deadline and deliver the current usable version on the base SHA, with a concise DONE report that says what is usable and what remains.
 
 The lead reads this from your transcript. Keep each field to one line; write `-` when empty.
 

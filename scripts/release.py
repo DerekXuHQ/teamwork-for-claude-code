@@ -23,15 +23,32 @@ import tempfile
 
 CLONE = Path(__file__).resolve().parents[1]
 
+LABELS = {
+    "en": {
+        "heading": "{skill} release comparison ({since}, {days} days each side)",
+        "quota": "quota used per day: before {before}; after {after}",
+        "prompts": "permission prompts per day: before {before}; after {after}",
+        "missing": "data missing: {items}", "missing_value": "data missing",
+    },
+    "zh": {
+        "heading": "{skill} 版本对比（{since}，前后各 {days} 天）",
+        "quota": "每日额度用量：之前 {before}；之后 {after}",
+        "prompts": "每日权限提示：之前 {before}；之后 {after}",
+        "missing": "数据缺失：{items}", "missing_value": "数据缺失",
+    },
+}
+
 
 def configs(args):
+    skill = getattr(args, "skill", "teamwork")
     if args.config_dir:
         return [Path(p).expanduser() for p in args.config_dir]
     home = Path(os.environ.get("HOME", str(Path.home())))
-    found = [p for p in home.glob(".claude*") if (p / "skills" / "teamwork").exists() or
-             (p / "skills" / "teamwork").is_symlink()]
+    found = [p for p in home.glob(".claude*") if ((p / "skills" / skill).exists() or
+             (p / "skills" / skill).is_symlink() or skill != "teamwork" and (p / "skills").is_dir())]
     extra = os.environ.get("CLAUDE_CONFIG_DIR")
-    if extra and (Path(extra).expanduser() / "skills" / "teamwork").exists():
+    if extra and ((Path(extra).expanduser() / "skills" / skill).exists() or (Path(extra).expanduser() / "skills" / skill).is_symlink() or
+                  skill != "teamwork" and (Path(extra).expanduser() / "skills").is_dir()):
         found.append(Path(extra).expanduser())
     return list(dict.fromkeys(found))
 
@@ -40,27 +57,27 @@ def announce(args, message):
     print(message if args.apply else "would " + message)
 
 
-def index_file(config):
-    return config / "teamwork-releases" / "index.json"
+def index_file(config, skill="teamwork"):
+    return config / f"{skill}-releases" / "index.json"
 
 
-def read_index(config):
-    f = index_file(config)
+def read_index(config, skill="teamwork"):
+    f = index_file(config, skill)
     if f.exists():
         return json.loads(f.read_text(encoding="utf-8"))
     return {"releases": [], "current": None, "previous": None}
 
 
 def write_index(args, config, data):
-    f = index_file(config)
+    f = index_file(config, args.skill)
     announce(args, f"write {f}")
     if args.apply:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
-def _link(config):
-    return config / "skills" / "teamwork"
+def _link(config, skill="teamwork"):
+    return config / "skills" / skill
 
 
 def _point(link, target):
@@ -80,16 +97,16 @@ def switch_all(args, plan, check=None):
     for config, target, _ in plan:
         if not (Path(target) / "SKILL.md").exists() and not (check and not args.apply and (Path(check) / "SKILL.md").exists()):
             raise ValueError(f"{config}: {target} is missing or incomplete; nothing changed")
-        announce(args, f"switch {_link(config)} -> {target}")
+        announce(args, f"switch {_link(config, args.skill)} -> {target}")
     if not args.apply:
         for config, _, data in plan:
             write_index(args, config, data)
         return
-    done, olds = [], {c: (index_file(c).read_text(encoding="utf-8") if index_file(c).exists() else None)
+    done, olds = [], {c: (index_file(c, args.skill).read_text(encoding="utf-8") if index_file(c, args.skill).exists() else None)
                       for c, _, _ in plan}
     try:
         for config, target, _ in plan:
-            link = _link(config)
+            link = _link(config, args.skill)
             old = os.readlink(link) if link.is_symlink() else None
             _point(link, target)
             done.append((link, old))
@@ -105,11 +122,11 @@ def switch_all(args, plan, check=None):
         for c, text in olds.items():
             try:
                 if text is not None:
-                    index_file(c).write_text(text, encoding="utf-8")
-                elif index_file(c).exists():
-                    index_file(c).unlink()  # an index this run created goes again
+                    index_file(c, args.skill).write_text(text, encoding="utf-8")
+                elif index_file(c, args.skill).exists():
+                    index_file(c, args.skill).unlink()  # an index this run created goes again
             except OSError:
-                bad.append(str(index_file(c)))
+                bad.append(str(index_file(c, args.skill)))
         raise ValueError(f"switch failed ({e}); " + (f"could not put back: {', '.join(bad)}" if bad else
                                                     "every config dir is back where it was")) from e
 
@@ -159,7 +176,7 @@ def publish(args, dirs, repo):
             "at": at, "channel": "release"}, indent=2) + "\n", encoding="utf-8")
         plan = []
         for config in dirs:  # stage everywhere first; nothing points at a snapshot until all are in place
-            data = read_index(config)
+            data = read_index(config, args.skill)
             if data.get("current") == name or (data.get("current") and any(
                     r["name"] == data["current"] and r["sha"] == sha for r in data["releases"])):
                 print(f"{config}: {data['current']} is already {sha[:7]}: nothing to publish")
@@ -167,7 +184,7 @@ def publish(args, dirs, repo):
             if any(r["name"] == name for r in data["releases"]):
                 raise ValueError(f"{config}: a release named {name} exists already (another commit in the same "
                                  "second?); wait a second and publish again")
-            dest = config / "teamwork-releases" / name
+            dest = config / f"{args.skill}-releases" / name
             announce(args, f"install snapshot {dest}")
             if args.apply and dest.exists():  # left by an interrupted run? only a complete copy of this commit counts
                 try:
@@ -192,7 +209,7 @@ def publish(args, dirs, repo):
 def rollback(args, dirs, repo):
     plan = []
     for config in dirs:  # check every dir before any link moves
-        data = read_index(config)
+        data = read_index(config, args.skill)
         h = history(data)
         if args.to:
             name, h = args.to, h + [args.to]
@@ -202,7 +219,7 @@ def rollback(args, dirs, repo):
             raise ValueError(f"{config}: no previous release; nothing changed")
         if name != "edge" and not any(r["name"] == name for r in data["releases"]):
             raise ValueError(f"{config}: release {name} is not in the index; nothing changed")
-        target = repo if name == "edge" else config / "teamwork-releases" / name
+        target = repo if name == "edge" else config / f"{args.skill}-releases" / name
         data["history"], data["previous"], data["current"] = h, (h[-2] if len(h) >= 2 else None), name
         plan.append((config, target, data))
     switch_all(args, plan)
@@ -211,7 +228,7 @@ def rollback(args, dirs, repo):
 def edge(args, dirs, repo):
     plan = []
     for config in dirs:
-        data = read_index(config)
+        data = read_index(config, args.skill)
         data["history"] = history(data) + ["edge"]
         data["previous"], data["current"] = data.get("current"), "edge"
         plan.append((config, repo, data))
@@ -227,13 +244,13 @@ def status(args, dirs, repo):
     main_sha = main.stdout.strip() if main.returncode == 0 else None
     rows = []
     for config in dirs:
-        link = config / "skills" / "teamwork"
+        link = _link(config, args.skill)
         target = str(link.resolve()) if link.exists() else None
-        data = read_index(config)
+        data = read_index(config, args.skill)
         if target == str(repo.resolve()):
             point = f"edge: {target}"
         else:
-            rel = next((r for r in data["releases"] if target == str((config / "teamwork-releases" / r["name"]).resolve())), None)
+            rel = next((r for r in data["releases"] if target == str((config / f"{args.skill}-releases" / r["name"]).resolve())), None)
             point = f"release: {rel['name']} ({rel['sha'][:7]})" if rel else f"other: {target}"
         current = next((r for r in data["releases"] if r["name"] == data.get("current")), None)
         behind = None
@@ -254,22 +271,103 @@ def status(args, dirs, repo):
                 print(f"  {r['name']} {r['sha'][:7]} {r.get('note', '')}")
 
 
+def compare(args):
+    since = None
+    for config in configs(args):
+        try:
+            data=json.loads(index_file(config,args.skill).read_text(encoding="utf-8"))
+            rel=next((x for x in data.get("releases",[]) if x.get("name")==args.since),None)
+            if rel: since=rel.get("at"); break
+        except (OSError,ValueError): pass
+    if since is None:
+        try: since=datetime.datetime.fromisoformat(args.since).isoformat()
+        except ValueError:
+            try: since=datetime.datetime.strptime(args.since,"%Y%m%d-%H%M%S").isoformat()
+            except ValueError:
+                print(f"release time missing for {args.since}; quota and permission-prompt data unavailable")
+                return
+    try: start=datetime.datetime.fromisoformat(str(since).replace("Z","+00:00"))
+    except ValueError: start=datetime.datetime.strptime(str(since),"%Y%m%d-%H%M%S")
+    cutoff=(start-datetime.timedelta(days=args.days)).date().isoformat()
+    end=(start+datetime.timedelta(days=args.days)).date().isoformat()
+    daily={"before":{},"after":{}}; missing=[]; prompt_daily={"before":{},"after":{}}
+    projects=Path(args.projects).expanduser()
+    candidates=[projects,*projects.glob("*")]
+    ledgers=[p/".teamwork" for p in candidates if (p/".teamwork"/"log.jsonl").exists()]
+    language="en"
+    if len(ledgers)==1:
+        try: language=json.loads((ledgers[0]/"state.json").read_text(encoding="utf-8")).get("prefs",{}).get("language","en")
+        except (OSError,ValueError,AttributeError): pass
+    zh=str(language).lower().replace("_","-").startswith("zh")
+    if not ledgers: missing.append("teamwork ledgers")
+    quota_rows=[]; prompt_rows=[]
+    for ledger in ledgers:
+        try: rows=[json.loads(x) for x in (ledger/"log.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+        except (OSError,ValueError): continue
+        for row in rows:
+            if row.get("simulated") is True:
+                continue
+            date=str(row.get("t") or row.get("at", ""))[:10]
+            side="before" if cutoff <= date < start.date().isoformat() else "after" if start.date().isoformat() <= date <= end else None
+            if not side: continue
+            ev=str(row.get("ev", "")).lower()
+            if "quota" in ev:
+                used=row.get("used_pct", row.get("used", row.get("tokens", row.get("pct"))))
+                if isinstance(used,(int,float)): daily[side][date]=max(daily[side].get(date,float("-inf")),used)
+            kind=str(row.get("kind", "")).lower()
+            prompted=(ev == "notice-add" and kind == "needs-user" or
+                      ev == "sweep-notice" and kind in ("approval", "needs-user") or
+                      ev in ("thread-set", "thread-status") and row.get("waiting_for") == "permission")
+            if prompted:
+                prompt_rows.append((side,date)); prompt_daily[side][date]=prompt_daily[side].get(date,0)+1
+        for name in ("quota-log.jsonl","quota.jsonl","quota-log.ndjson"):
+            try: quota_rows += [json.loads(x) for x in (ledger/name).read_text(encoding="utf-8").splitlines() if x.strip()]
+            except (OSError,ValueError): pass
+    for row in quota_rows:
+        date=str(row.get("t") or row.get("at") or row.get("date", ""))[:10]
+        side="before" if cutoff <= date < start.date().isoformat() else "after" if start.date().isoformat() <= date <= end else None
+        used=row.get("used_pct",row.get("used",row.get("tokens",row.get("pct"))))
+        if side and isinstance(used,(int,float)) and row.get("simulated") is not True: daily[side][date]=max(daily[side].get(date,float("-inf")),used)
+    if not daily["before"] and not daily["after"]: missing.append("quota usage log")
+    if not prompt_rows: missing.append("permission-prompt events")
+    def avg(vals): return sum(vals.values())/len(vals) if vals else None
+    qbefore=avg(daily["before"]); qafter=avg(daily["after"])
+    pbefore=sum(prompt_daily["before"].values())/args.days if prompt_rows else None
+    pafter=sum(prompt_daily["after"].values())/args.days if prompt_rows else None
+    lang=LABELS["zh" if zh else "en"]
+    print(lang["heading"].format(skill=args.skill,since=args.since,days=args.days))
+    q_before=qbefore if qbefore is not None else lang["missing_value"]
+    q_after=qafter if qafter is not None else lang["missing_value"]
+    p_before=f"{pbefore:.2f}" if pbefore is not None else lang["missing_value"]
+    p_after=f"{pafter:.2f}" if pafter is not None else lang["missing_value"]
+    print(lang["quota"].format(before=q_before,after=q_after))
+    print(lang["prompts"].format(before=p_before,after=p_after))
+    if missing: print(lang["missing"].format(items=("、" if zh else ", ").join(dict.fromkeys(missing))))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--repo", type=Path, default=CLONE)
     p.add_argument("--config-dir", action="append")
+    p.add_argument("--skill", default="teamwork")
     sub = p.add_subparsers(dest="command", required=True)
-    x = sub.add_parser("publish"); x.add_argument("--ref", default="main"); x.add_argument("--note", default=""); x.add_argument("--apply", action="store_true")
-    x = sub.add_parser("rollback"); x.add_argument("--to"); x.add_argument("--apply", action="store_true")
-    x = sub.add_parser("edge"); x.add_argument("--apply", action="store_true")
-    x = sub.add_parser("status"); x.add_argument("--json", action="store_true"); x.set_defaults(apply=False)
+    def skill_arg(x): x.add_argument("--skill", default=argparse.SUPPRESS)
+    x = sub.add_parser("publish"); skill_arg(x); x.add_argument("--ref", default="main"); x.add_argument("--note", default=""); x.add_argument("--apply", action="store_true")
+    x = sub.add_parser("rollback"); skill_arg(x); x.add_argument("--to"); x.add_argument("--apply", action="store_true")
+    x = sub.add_parser("edge"); skill_arg(x); x.add_argument("--apply", action="store_true")
+    x = sub.add_parser("status"); skill_arg(x); x.add_argument("--json", action="store_true"); x.set_defaults(apply=False)
+    x = sub.add_parser("compare"); skill_arg(x); x.add_argument("--since", required=True); x.add_argument("--days", type=int, default=7); x.add_argument("--projects", default=".")
     a = p.parse_args()
+    if a.command == "compare" and a.days < 1:
+        p.error("compare --days must be a positive whole number")
     repo = a.repo.resolve()
     dirs = configs(a)
+    if a.command == "compare":
+        compare(a); return
     if not dirs:
         sys.exit("no config dir with skills/teamwork found under ~/.claude*; pass --config-dir")
-    bad = [str(c / "skills" / "teamwork") for c in dirs if a.command != "status" and
-           (c / "skills" / "teamwork").exists() and not (c / "skills" / "teamwork").is_symlink()]
+    bad = [str(_link(c, a.skill)) for c in dirs if a.command != "status" and
+           _link(c, a.skill).exists() and not _link(c, a.skill).is_symlink()]
     if bad:  # all config dirs move together or none does: never leave them on different versions
         sys.exit(f"refusing: {', '.join(bad)} is a real folder, not a link (a copy install); nothing changed. "
                  "Move it aside yourself, then run again")

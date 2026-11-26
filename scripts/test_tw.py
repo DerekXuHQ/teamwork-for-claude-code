@@ -26,6 +26,7 @@ import quota  # noqa: E402
 import tw  # noqa: E402
 
 TW = Path(os.environ.get("TW_TEST_SCRIPT", Path(__file__).resolve().parent / "tw.py"))
+RELEASE = Path(__file__).resolve().parent / "release.py"
 # bash-guard logs its own errors inside each test's temporary project.
 WALK = ["planned", "approved", "dispatched", "working", "review", "done"]
 
@@ -373,6 +374,497 @@ class TwCase(unittest.TestCase):
         return json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
 
+class T70PrimaryOutcome(unittest.TestCase):
+    def test_work_kind_routing_and_quota_slowdown_on_real_cli(self):
+        with tempfile.TemporaryDirectory(prefix="tw-t70-outcome-") as tmp:
+            root = Path(tmp); subprocess.run(["git", "init", "-q", str(root)], check=True)
+            env = {k: v for k, v in os.environ.items() if k not in ("TEAMWORK_DIR", "CLAUDE_CONFIG_DIR")}
+            def run(*args):
+                p = subprocess.run([sys.executable, str(TW), "-C", str(root), *args], cwd=root, env=env,
+                                   capture_output=True, text=True)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                return p
+            run("init", "demo", "--short", "DM")
+            run("lead", "--session", "s1")
+            run("task", "add", "T1", "--title", "Chinese documents", "--work-kind", "docs-zh")
+            run("task", "add", "T2", "--title", "Code work", "--work-kind", "code")
+            run("task", "add", "T3", "--title", "Manual precise code", "--work-kind", "code", "--no-scripts")
+            run("plan", "approve", "--user-said", "approved for this CLI demonstration")
+            ready = run("ready")
+            hints = json.loads(ready.stdout)["route_hints"]
+            self.assertEqual([hints[x]["route"] for x in ("T1", "T2", "T3")], ["fable", "gpt", "claude"])
+            self.assertEqual(hints["T3"]["why"], "no-scripts")
+            quota = run("quota", "--simulate-pct", "70")
+            pace_run = run("ready")
+            pace = json.loads(pace_run.stdout)["pace"]
+            self.assertEqual(pace, {"tier": "burn-fable", "checkin_minutes": 20,
+                                    "quota_every_minutes": 120, "slowed": True})
+            self.assertTrue(any("额度到 70%" in s or "Quota at 70%" in s for s in
+                                (pace_run.stderr, quota.stdout, quota.stderr)))
+            self.assertEqual(json.loads(pace_run.stdout)["stuck"], {})
+            self.assertEqual(json.loads(pace_run.stdout)["urgent_unacked"], [])
+            state = json.loads((root / ".teamwork" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["notices"], [])
+
+    def test_real_cli_primary_outcome_transcript(self):
+        with tempfile.TemporaryDirectory(prefix="tw-t70-primary-") as tmp:
+            root = Path(tmp)
+            env = {k: v for k, v in os.environ.items() if k not in ("TEAMWORK_DIR", "CLAUDE_CONFIG_DIR")}
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            transcript = []
+            def run(*args):
+                r = subprocess.run([sys.executable, str(TW), "-C", str(root), *args], cwd=root, env=env,
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                transcript.append("$ tw.py " + " ".join(args) + "\n" + r.stdout.rstrip())
+                return r.stdout
+            def run_result(*args):
+                r = subprocess.run([sys.executable, str(TW), "-C", str(root), *args], cwd=root, env=env,
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                transcript.append("$ tw.py " + " ".join(args) + "\n" + r.stdout.rstrip())
+                return r
+            run("init", "demo", "--short", "DM", "--goal", "demo app")
+            run("lead", "--session", "s1")
+            run("prefs", "--set", "language=zh", "standing_grants=schedule", "--user-said", "schedule this work")
+            self.assertIn("实测通过", run("selfcheck"))
+            run("board")
+            for tid, title, kind, extra in (("T1", "Chinese documents", "docs-zh", []),
+                                            ("T2", "Code work", "code", []),
+                                            ("T3", "Manual code", "code", ["--no-scripts"])):
+                run("task", "add", tid, "--title", title, "--work-kind", kind, *extra)
+            run("plan", "approve", "--user-said", "approved for the CLI demonstration")
+            ready = json.loads(run("ready"))
+            self.assertEqual([ready["route_hints"][tid]["route"] for tid in ("T1", "T2", "T3")],
+                             ["fable", "gpt", "claude"])
+            run("quota", "--simulate-pct", "72")
+            pace = json.loads(run("ready"))["pace"]
+            self.assertEqual(pace["tier"], "burn-fable")
+            run("thread", "add", "docs", "--session", "session-docs")
+            sessions = root / "sessions.json"
+            sessions.write_text(json.dumps({"data": [{"id": "session-docs", "title": "[DM] docs · result",
+                                                       "status": "completed", "status_bucket": "review_ready",
+                                                       "updated_at": "2026-11-24T19:00:00Z",
+                                                       "tags": ["teamwork:DM", "teamwork-thread:docs"]}],
+                                            "has_more": False}), encoding="utf-8")
+            events = root / "events.json"
+            events.write_text(json.dumps({"data": [
+                {"id": "assistant-1", "type": "assistant", "created_at": "2026-11-24T18:59:00Z",
+                 "data": {"assistant": {"text": "DONE: docs delivered"}}},
+                {"id": "result-1", "type": "result", "created_at": "2026-11-24T19:00:00Z",
+                 "data": {"result": {"subtype": "success"}}}]}), encoding="utf-8")
+            run("notice", "sweep", "--sessions", str(sessions), "--events", str(events), "--session", "session-docs")
+            run("sprint", "start", "--until", "23:59", "--goal", "ship the demo")
+            run("sprint", "beta", "--version", "v1", "--try", "sign in")
+            run("sprint", "stop-all")
+            run("prefs", "--grant-use", "schedule", "--what", "schedule the next review")
+            card = run("card", "--kind", "done", "--head", "交付结果")
+            self.assertIn("长期授权：排期 1 次", card.splitlines()[-1])
+            (root / "PRIMARY-TRANSCRIPT.txt").write_text("\n\n".join(transcript) + "\n", encoding="utf-8")
+
+
+class T70Acceptance(TwCase):
+    def _changed_result(self):
+        self.tw("thread", "add", "ui")
+        self.tw("plan", "approve", "--user-said", "approved")
+        self.tw("task", "add", "T1", "--title", "fix result", "--owner", "ui", "--accept", "fix is reviewed")
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("req", "add", "fix the result", "--id", "R1", "--tasks", "T1")
+        for status in ("reported", "waiting_user", "open", "reported"):
+            self.tw("req", "set", "R1", "--status", status)
+        self.tw("task", "set", "T1", "--status", "working")
+
+    def test_changed_result_is_not_confirmable_nor_done_on_the_card(self):
+        self._changed_result()
+        bad = self.tw("req", "confirm", "R1", "--user-said", "confirmed", ok=False)
+        self.assertIn("R1", bad.stderr)
+        self.assertEqual(self.state()["requests"]["R1"]["status"], "reported")
+        self.assertNotIn("R1", self.tw("req", "confirm", "--all", "--user-said", "confirmed", ok=False).stdout)
+        card = self.tw("card", "--kind", "done", "--head", "review", "--all").stdout
+        done = card.split("## Done", 1)[1].split("##", 1)[0] if "## Done" in card else ""
+        self.assertNotIn("R1", done)
+
+    def test_pace_change_under_handover_lock_notices_without_failing(self):
+        self.tw("quota", "--simulate-pct", "75")
+        st = self.state(); st.pop("pace_notice_tier", None); st["write_lock"] = {"ho": "HO1"}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        before = (self.dir / ".teamwork" / "state.json").read_text(encoding="utf-8")
+        r = self.tw("ready")
+        self.assertIn("75%", r.stderr)
+        json.loads(r.stdout)
+        self.assertEqual((self.dir / ".teamwork" / "state.json").read_text(encoding="utf-8"), before)
+
+    def test_release_compare_reads_real_ledger_times_and_skips_simulations(self):
+        st=self.state(); st["prefs"]["language"]="zh"
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        rows=[
+            {"t":"2026-11-09T10:00:00-05:00","ev":"quota-usage","used_pct":25},
+            {"t":"2026-11-09T11:00:00-05:00","ev":"quota-usage","used_pct":40},
+            {"t":"2026-11-09T12:00:00-05:00","ev":"quota-usage","used_pct":99,"simulated":True},
+            {"t":"2026-11-09T13:00:00-05:00","ev":"notice-add","kind":"needs-user"},
+            {"t":"2026-11-09T14:00:00-05:00","ev":"notice-add","kind":"turn-end"},
+            {"t":"2026-11-10T10:00:00-05:00","ev":"quota-usage","used_pct":80},
+            {"t":"2026-11-10T11:00:00-05:00","ev":"sweep-notice","kind":"approval"},
+            {"t":"2026-11-10T12:00:00-05:00","ev":"other","snap_waiting_for":"permission"},
+            {"t":"2026-11-10T13:00:00-05:00","ev":"quota-usage","used_pct":100,"simulated":True},
+        ]
+        (self.dir/".teamwork"/"log.jsonl").write_text("".join(json.dumps(x)+"\n" for x in rows),encoding="utf-8")
+        result=subprocess.run([sys.executable,str(RELEASE),"compare","--since","2026-11-10","--days","1","--projects",str(self.dir)],cwd=self.dir,env=self.env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn("之前 40.0；之后 80.0",result.stdout)
+        self.assertIn("每日权限提示：之前 1.00；之后 1.00",result.stdout)
+
+    def test_model_log_accepts_token_and_minute_usage(self):
+        self.tw("task","add","T1","--title","Write a paragraph")
+        self.tw("model-log","--task","T1","--type","docs-zh","--model","fable","--result","ok","--tokens","345","--minutes","3")
+        row=json.loads((self.dir/".teamwork"/"model-log.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual((row["tokens"],row["minutes"]),(345,3.0))
+
+    def test_weekly_model_comparison_falls_back_to_same_kind_rework_rate(self):
+        st=self.state(); st["prefs"]["language"]="zh"
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        day=dt.date.today().isoformat(); rows=[]
+        for kind in ("docs-zh", "docs-en", "code"):
+            for i in range(3):
+                rows.extend([{"model":"fable","work_kind":kind,"result":"redo" if i==0 else "ok","at":day+"T10:00:00+00:00"},
+                             {"model":"opus","work_kind":kind,"result":"redo" if i<2 else "ok","at":day+"T10:01:00+00:00"}])
+        (self.dir/".teamwork"/"model-log.jsonl").write_text("".join(json.dumps(x)+"\n" for x in rows),encoding="utf-8")
+        out=self.tw("quota","--weekly").stdout
+        self.assertIn("返工率",out); self.assertIn("Fable 更省",out)
+
+    def test_session_start_preserves_ledger_save_time(self):
+        st=self.state(); st["updated"]="2026-11-01T12:34:00+00:00"
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        output=self.context()
+        after=self.state()
+        self.assertEqual(after["updated"],"2026-11-01T12:34:00+00:00")
+        self.assertIn("As of 12:34 (2026-11-01)",output)
+
+    def test_sprint_deadline_and_ready_json_streams(self):
+        self.env["TW_NOW"]="2026-11-24T20:00:00-05:00"
+        self.tw("sprint","start","--until","19:00")
+        self.assertTrue(self.state()["sprint"]["until"].startswith("2026-11-25T19:00"))
+        bad=self.tw("sprint","start",ok=False)
+        self.assertIn("--until needs HH:MM",bad.stderr)
+        st=self.state(); st["sprint"]["until"]="2026-11-24T19:00:00-05:00"
+        st["sprint"]["base"]="HEAD"
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        ready=self.tw("ready")
+        self.assertIn("Sprint ended",ready.stderr)
+        self.assertIsInstance(json.loads(ready.stdout),dict)
+
+    def test_beta_tracks_landed_features_added_at_same_timestamp(self):
+        self.env["TW_NOW"]="2026-11-24T12:00:00-05:00"
+        empty=self.tw("sprint","beta","--version","v1")
+        self.assertIn("No new landed features",empty.stdout)
+        st=self.state(); st["features"]["F1"]={"name":"Same-second feature","phase":"MVP","status":"landed","landed_at":"2026-11-24T12:00:00-05:00"}
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        next_beta=self.tw("sprint","beta","--version","v2")
+        self.assertIn("Same-second feature",next_beta.stdout)
+
+    def test_sweep_real_list_sessions_and_list_events_shapes(self):
+        self.tw("lead", "--session", "lead-demo")
+        self.tw("thread", "add", "docs", "--session", "session-docs")
+        row={"id":"session-docs","title":"[DM] docs · report","status":"idle","status_bucket":"blocked",
+             "updated_at":"2026-11-24T19:00:00Z","tags":["teamwork:DM","teamwork-thread:docs"],
+             "post_turn_summary":{"needs_action":"approval required"},"connection_status":"connected",
+             "configured_model":"fable","session_context":{"model":"fable"},
+             "external_metadata":{"last_served_model":"gpt"}}
+        sessions=self.dir/"real-list-sessions.json"
+        sessions.write_text(json.dumps({"data":[row],"has_more":False,"last_id":"session-docs"}),encoding="utf-8")
+        events=self.dir/"real-list-events.json"
+        events.write_text(json.dumps({"data":[{"id":"evt-1","type":"control_request","data":{"control_request":{"request":{"subtype":"can_use_tool","tool_name":"mcp__claude-code-remote__send_message"}}},"created_at":"2026-11-24T19:00:01Z"}]}),encoding="utf-8")
+        self.tw("notice","sweep","--sessions",str(sessions),"--events",str(events),"--session","session-docs")
+        state=self.state(); kinds={x["kind"] for x in state["notices"]}
+        self.assertTrue({"needs-user","model-fallback"}.issubset(kinds))
+        self.assertNotIn("turn-end",kinds)  # a blocked row cannot also claim the turn ended
+        self.assertEqual(state["threads"]["docs"]["waiting_for"],"permission")
+        # The real API also returns bare lists and one get_session object.
+        sessions.write_text(json.dumps([row]),encoding="utf-8"); self.tw("notice","sweep","--sessions",str(sessions))
+        sessions.write_text(json.dumps(row),encoding="utf-8"); self.tw("notice","sweep","--sessions",str(sessions))
+        state=self.state(); last=state.get("last_sweep_at")
+        sessions.write_text(json.dumps({"data":[dict(row,id="unmatched-session",thread="docs")],"has_more":False}),encoding="utf-8")
+        out=self.tw("notice","sweep","--sessions",str(sessions)).stdout
+        self.assertIn("sweep matched 0 of 1 sessions",out)
+        self.assertEqual(self.state().get("last_sweep_at"),last)
+
+    def test_lead_probe_and_opened_by_alone_persist(self):
+        self.tw("lead","--spawn-probe","ok")
+        self.tw("lead","--opened-by","desktop")
+        self.tw("lead","--desktop")
+        self.assertTrue(self.state()["lead"]["desktop"])
+        check=json.loads(self.tw("selfcheck","--json").stdout)
+        items={x["item"]:x for x in check["items"]}
+        self.assertEqual(items["spawn"]["how"],"tested")
+        self.assertEqual(items["spawn"]["ok"],True)
+        self.assertEqual(items["opened_by"]["detail"],"this lead was opened by another session: the user must still pick Auto on a trusted device")
+        self.assertIn("on the desktop",check["first_line"])
+
+    def test_sweep_detects_permission_fallback_interruption_and_deliverable(self):
+        self.tw("lead", "--session", "lead-session")
+        st=self.state()
+        st["threads"]["worker"]={"kind":"rc","status":"working","session_id":"worker-session","title":"worker"}
+        st["tasks"]["T1"]={"title":"Build output","owner":"worker","status":"working","dispatch_v":2}
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        sessions=self.dir/"sessions.json"
+        sessions.write_text(json.dumps({"data":[{"thread":"worker","session_id":"worker-session","status":"completed","status_bucket":"review_ready","updated_at":"2026-11-24T12:00:00-05:00","configured_model":"fable","external_metadata":{"last_served_model":"gpt"}}],"has_more":False}),encoding="utf-8")
+        events=self.dir/"events.json"
+        events.write_text(json.dumps({"data":[{"id":"evt-assistant","type":"assistant","created_at":"2026-11-24T11:59:00-05:00","data":{"assistant":{"text":"DONE deliverable: https://example.invalid/output"}}},{"id":"evt-result","type":"result","created_at":"2026-11-24T12:00:00-05:00","data":{"result":{"subtype":"success"}}}]}),encoding="utf-8")
+        self.tw("notice","sweep","--sessions",str(sessions),"--events",str(events),"--session","worker-session")
+        st=self.state()
+        self.assertEqual(st["threads"]["worker"]["last_seen_at"],"2026-11-24T12:00:00-05:00")
+        kinds={x["kind"] for x in st["notices"]}
+        self.assertIn("model-fallback",kinds); self.assertIn("turn-end",kinds)
+        self.assertEqual(st["deliverables"][0]["source"],"auto (message not delivered)")
+        events.write_text(json.dumps({"data":[{"id":"evt-error","type":"result","created_at":"2026-11-24T12:01:00-05:00","data":{"result":{"subtype":"error_interrupted"}}}]}),encoding="utf-8")
+        sessions.write_text(json.dumps({"data":[{"thread":"worker","session_id":"worker-session","status":"review_ready","status_bucket":"review_ready","updated_at":"2026-11-24T12:01:00-05:00"}],"has_more":False}),encoding="utf-8")
+        self.tw("notice","sweep","--sessions",str(sessions),"--events",str(events),"--session","worker-session")
+        self.assertIn("interrupted",{x["kind"] for x in self.state()["notices"]})
+
+    def test_sweep_scans_all_events_by_turn_and_finds_text_before_result(self):
+        self.tw("thread", "add", "worker", "--session", "sid-old")
+        self.tw("thread", "add", "titleworker", "--session", "title-old")
+        st=self.state(); st["prefs"]["short_name"]="DM"; st["tasks"]["T1"]={"title":"Build output","owner":"worker","status":"working","dispatch_v":2}
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        session_file=self.dir/"sessions.json"
+        session_file.write_text(json.dumps({"data":[{"id":"sid-new","title":"Worker report","tags":["teamwork:DM","teamwork-thread:worker"],"status":"idle","status_bucket":"review_ready","updated_at":"2026-11-24T12:00:00Z"},
+            {"id":"title-new","title":"[DM] titleworker · preserve this phrase","tags":[],"status":"running"}]}),encoding="utf-8")
+        event_file=self.dir/"events.json"
+        transcript={"data":[
+            {"id":"u1","type":"user","created_at":"2026-11-24T11:59:00Z","message":"continue"},
+            {"id":"a1","type":"assistant","created_at":"2026-11-24T11:59:10Z","data":{"assistant":{"text":"The deliverable is https://example.invalid/from-turn-one"}}},
+            {"id":"r1","type":"result","created_at":"2026-11-24T11:59:20Z","data":{"result":{"subtype":"success"}}},
+            {"id":"u2","type":"user","created_at":"2026-11-24T11:59:30Z","message":"continue"},
+            {"id":"a2","type":"assistant","created_at":"2026-11-24T11:59:40Z","data":{"assistant":{"text":"DONE T1"}}},
+            {"id":"r2","type":"result","created_at":"2026-11-24T11:59:50Z","data":{"result":{"subtype":"error_tool"}}},
+        ]}
+        event_file.write_text(json.dumps(transcript),encoding="utf-8")
+        out=self.tw("notice","sweep","--sessions",str(session_file),"--events",str(event_file),"--session","sid-new").stdout
+        state=self.state(); kinds=[x["kind"] for x in state["notices"]]
+        self.assertGreaterEqual(kinds.count("turn-end"),1,(state["notices"],out))
+        self.assertIn("interrupted",kinds); self.assertIn("deliverable",kinds)
+        self.assertEqual(state["deliverables"][0]["link"],"https://example.invalid/from-turn-one")
+        self.assertEqual(state["threads"]["worker"]["sessions"][-1]["session_id"],"sid-new")
+        update=json.loads(out.splitlines()[-1])["sessions_to_update"][0]
+        self.assertEqual(update["title"],"[DM] worker · Worker report")
+        title_update=next(x for x in json.loads(out.splitlines()[-1])["sessions_to_update"] if x["session_id"]=="title-new")
+        self.assertEqual(title_update["title"],"[DM] titleworker · preserve this phrase")
+        self.assertEqual(self.state()["threads"]["titleworker"]["sessions"][-1]["session_id"],"title-new")
+
+    def test_sweep_events_only_records_approval_then_unblocks_thread(self):
+        self.tw("thread", "add", "worker", "--session", "sid-worker")
+        event_file=self.dir/"events.json"
+        approval={"id":"ask1","type":"control_request","created_at":"2026-11-24T12:00:00Z",
+                  "data":{"control_request":{"request":{"subtype":"can_use_tool","tool_name":"Bash"}}}}
+        event_file.write_text(json.dumps({"data":[approval]}),encoding="utf-8")
+        first=self.tw("notice","sweep","--events",str(event_file),"--session","sid-worker").stdout
+        state=self.state(); self.assertEqual(state["threads"]["worker"]["waiting_for"],"permission")
+        self.assertNotIn("turn-end",[x["kind"] for x in state["notices"]])
+        logged=[json.loads(line) for line in (self.dir/".teamwork"/"log.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(x.get("ev")=="sweep-notice" and x.get("kind")=="approval" for x in logged))
+        event_file.write_text(json.dumps({"data":[approval,
+            {"id":"ans1","type":"control_response","created_at":"2026-11-24T12:01:00Z"},
+            {"id":"result1","type":"result","created_at":"2026-11-24T12:02:00Z","data":{"result":{"subtype":"success"}}}]}),encoding="utf-8")
+        self.tw("notice","sweep","--events",str(event_file),"--session","sid-worker")
+        state=self.state(); self.assertEqual(state["threads"]["worker"]["status"],"working")
+        self.assertNotIn("waiting_for",state["threads"]["worker"])
+        self.assertTrue(next(x for x in state["notices"] if x["kind"]=="needs-user")["done"])
+
+    def test_sweep_unmatched_events_only_does_not_advance_poll_time(self):
+        before=self.state().get("last_sweep_at")
+        event_file=self.dir/"events.json"; event_file.write_text(json.dumps({"data":[]}),encoding="utf-8")
+        self.tw("notice","sweep","--events",str(event_file),"--session","stranger")
+        self.assertEqual(self.state().get("last_sweep_at"),before)
+
+    def test_cli_edge_cases_zh_filter_leads_and_docs(self):
+        self.env["TW_NOW"]="2026-11-24T20:00:00-05:00"
+        bad=self.tw("sprint","start","--until","25:99",ok=False)
+        self.assertNotIn("Traceback",bad.stderr); self.assertIn("--until",bad.stderr)
+        st=self.state(); st["requests"]={"R1":{"status":"reported","text":"reported"},"R2":{"status":"open","text":"open"}}
+        st["prefs"]["language"]="zh"
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        listed=json.loads(self.tw("req","list","--status","reported").stdout)
+        self.assertEqual(list(listed),["R1"])
+        quota=self.tw("quota","--simulate-pct","50").stdout
+        self.assertIn("额度模拟",quota)
+        self.assertTrue(self.state()["quota"]["simulated"])
+        quota_log=[json.loads(line) for line in (self.dir/".teamwork"/"log.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(next(x for x in quota_log if x.get("ev")=="quota-usage")["simulated"])
+        stop=self.tw("sprint","stop-all").stdout
+        self.assertIn("未记录",stop); self.assertIn("请手动停止本项目的 Codex 运行",stop)
+        self.tw("selfcheck","--mode","default")
+        check=self.tw("selfcheck","--mode","default").stdout
+        self.assertIn("未通过 模式",check); self.assertIn("；怎么弄：",check)
+        self.assertIn("实测通过 台账: state.json 和 BOARD.md",check)
+        prompt=(self.dir/".teamwork"/"log.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"simulated": true',prompt)
+        doc=Path(__file__).resolve().parents[1]/"templates"/"worker-protocol.md"
+        protocol=doc.read_text(encoding="utf-8")
+        self.assertIn("Do not run `TW ask`",protocol)
+        self.assertIn("TW ask --from <thread> --default",protocol)
+        skill=(Path(__file__).resolve().parents[1]/"SKILL.md").read_text(encoding="utf-8")
+        self.assertNotIn("**Lead command map.**",skill)
+        self.assertIn("--ledger-line` forces it",skill)
+        self.assertIn("TW deliverable add/set",skill)
+
+    def test_version_leads_skips_nonobject_and_unreadable_state(self):
+        root=self.dir/"projects"; root.mkdir()
+        for name, content in (("array", "[]"), ("bad", "{")):
+            project=root/name/".teamwork"; project.mkdir(parents=True)
+            (project/"state.json").write_text(content,encoding="utf-8")
+        result=subprocess.run([sys.executable,str(TW),"-C",str(self.dir),"version","--leads","--root",str(root)],
+                              cwd=self.dir,env=self.env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn("Traceback",result.stderr)
+
+    def test_thread_defaults_sprint_beta_confirmation_and_model_mismatch(self):
+        st=self.state(); old="2020-01-01T00:00:00+00:00"
+        st["questions"]=[{"from":"worker","text":"Which internal format?","t":old,"answered":False,"default_action":"prepare the reversible draft","default_after_minutes":5}]
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        self.tw("ready")
+        self.assertEqual(self.state()["questions"][0]["defaulted"]["by"],"thread")
+        self.tw("sprint","start","--until","23:59","--goal","ship a stable build")
+        self.assertIn("Sprint in progress",self.tw("board").stdout)
+        self.tw("sprint","beta","--version","v1","--try","sign in")
+        self.tw("sprint","feedback","--text","Button label is unclear")
+        self.assertEqual(self.state()["betas"][0]["status"],"waiting-feedback")
+        self.tw("sprint","stop-all"); self.assertTrue(self.state()["stopped_at"])
+        self.tw("req","add","Confirm this report")
+        self.tw("req","set","R1","--status","reported")
+        self.assertNotEqual(self.tw("req","confirm","R1",ok=False).returncode,0)
+        self.tw("req","confirm","R1","--user-said","I confirm this report")
+        self.assertEqual(self.state()["requests"]["R1"]["confirmed_by"],"I confirm this report")
+        check=json.loads(self.tw("selfcheck","--configured-model","opus","--last-served-model","fable","--json").stdout)
+        self.assertFalse(next(x for x in check["items"] if x["item"]=="model")["ok"])
+
+    def test_quota_weekly_only_compares_matching_work_kind_pairs(self):
+        self.tw("prefs","--set","language=zh")
+        monday=(dt.date.today()-dt.timedelta(days=dt.date.today().weekday())).isoformat()
+        rows=[]
+        for i in range(3):
+            rows.extend([{"model":"fable","work_kind":"docs-zh","tokens":100+i,"result":"ok","at":monday+"T10:00:00+00:00"},
+                         {"model":"opus","type":"docs-zh","tokens":200+i,"result":"ok","at":monday+"T10:01:00+00:00"}])
+        rows.extend([{"model":"fable","type":"code","tokens":1,"result":"ok","at":monday+"T10:02:00+00:00"}])
+        (self.dir/".teamwork"/"model-log.jsonl").write_text("\n".join(json.dumps(x) for x in rows)+"\n")
+        out=self.tw("quota","--weekly").stdout
+        self.assertIn("数据不足",out)
+
+
+class T70FeatureVisibility(TwCase):
+    def test_feature_import_move_reconcile_and_wrapup(self):
+        source = self.dir / "features.json"
+        source.write_text(json.dumps([{"id": "F7", "name": "Sign in", "phase": "MVP", "status": "planned"}]))
+        self.tw("feature", "import", "--file", str(source))
+        self.assertIn("unchanged 1", self.tw("feature", "import", "--file", str(source)).stdout)
+        self.tw("feature", "move", "F7", "--to", "V2", "--why", "user reprioritized")
+        self.assertIn("moved from MVP", self.tw("feature", "list").stdout)
+        source.write_text(json.dumps([{"id": "F7", "name": "Sign in", "phase": "MVP", "status": "building"}]))
+        diff = self.tw("feature", "reconcile", "--file", str(source), ok=False)
+        self.assertEqual(diff.returncode, 1)
+        self.assertIn("status differs", diff.stdout)
+        self.assertIn("Features done", self.tw("wrapup").stdout)
+
+    def test_feature_import_source_is_not_a_move_and_reimport_keeps_links(self):
+        self.tw("req", "add", "Board shows time")
+        source = self.dir / "features.json"
+        source.write_text(json.dumps([{"id": "B7", "name": "Board time", "phase": "一期", "status": "building",
+                                       "from": "R1、IL-13", "note": "doc B7"}], ensure_ascii=False), encoding="utf-8")
+        self.tw("feature", "import", "--file", str(source))
+        f = self.state()["features"]["B7"]
+        self.assertEqual((f["source"], f["reqs"]), ("R1、IL-13", ["R1"]))
+        self.assertNotIn("moved_from", f)
+        board = self.tw("board").stdout
+        self.assertNotIn("moved from R1", board)
+        self.tw("task", "add", "T9", "--title", "board time")
+        self.tw("feature", "set", "B7", "--task", "T9")
+        self.tw("feature", "import", "--file", str(source))
+        f = self.state()["features"]["B7"]
+        self.assertEqual((f["tasks"], f["reqs"]), (["T9"], ["R1"]))
+        for i in (2, 10):
+            self.tw("feature", "add", f"x{i}", "--phase", "一期")
+        self.assertRegex(self.tw("board").stdout, r"(?s)\*\*B7\*\*.*\*\*F1\*\*")
+
+    def test_feature_reconcile_matches_id_and_card_all_is_untruncated(self):
+        self.tw("feature", "add", "Original name", "--phase", "MVP")
+        source = self.dir / "features.json"
+        source.write_text(json.dumps([{"id": "F1", "name": "Renamed in file", "phase": "MVP", "status": "planned"}]))
+        self.assertEqual(self.tw("feature", "reconcile", "--file", str(source)).returncode, 0)
+        for n in range(30):
+            self.tw("feature", "add", f"Feature {n}", "--phase", "MVP", "--status", "building")
+        short = self.tw("card", "--kind", "status", "--head", "x").stdout
+        full = self.tw("card", "--kind", "status", "--head", "x", "--all").stdout
+        self.assertLessEqual(len(short.splitlines()), 25)
+        self.assertIn("+24 more (TW card --all)", short)
+        self.assertGreater(len(full.splitlines()), 25)
+        self.assertIn("Feature 29", full)
+
+    def test_selfcheck_records_probe_and_versions_without_promoting_saved_mode(self):
+        self.tw("lead", "--session", "s1", "--mode", "auto", "--spawn-probe", "refused",
+                "--opened-by", "another-session", "--note", "permission prompt")
+        result = json.loads(self.tw("selfcheck", "--json").stdout)
+        items = {row["item"]: row for row in result["items"]}
+        self.assertEqual((items["mode"]["how"], items["mode"]["ok"]), ("not-tested", None))
+        self.assertEqual((items["spawn"]["how"], items["spawn"]["ok"]), ("tested", False))
+        self.assertEqual((items["opened_by"]["how"], items["opened_by"]["ok"]), ("recorded", None))
+        versions = self.state()["versions"]
+        self.assertEqual(len(versions), 1)
+        self.assertRegex(next(iter(versions)), r"^[a-f0-9]{8}$")
+        self.assertNotIn("hostname", json.dumps(versions))
+        leads = self.tw("version", "--leads", "--root", str(self.dir)).stdout
+        self.assertIn("These 1 leads need you to pick Auto once", leads)
+
+    def test_selfcheck_reports_saved_mode_as_recorded(self):
+        self.tw("lead", "--session", "s1", "--mode", "auto")
+        result = json.loads(self.tw("selfcheck", "--json").stdout)
+        mode = next(row for row in result["items"] if row["item"] == "mode")
+        self.assertEqual((mode["how"], mode["ok"]), ("recorded", None))
+        self.assertIn("not tested", mode["detail"])
+
+    def test_standing_archive_grant_is_counted_automatically(self):
+        self.tw("prefs", "--set", "standing_grants=archive", "--user-said", "archive completed seats")
+        self.tw("thread", "add", "old", "--session", "old-session", "--status", "idle")
+        self.tw("thread", "reseat", "old", "--session", "new-session", "--reason", "context full")
+        self.tw("thread", "set", "old", "--status", "idle", "--from-status")
+        self.tw("archive", "verify", "old-session", "--stopped", "get_session confirmed idle",
+                "--config-dir", str(self.dir / "claude-config"))
+        self.tw("archive", "done", "old-session")
+        uses = self.state()["grant_uses"]
+        self.assertEqual(sum(row["grant"] == "archive" for row in uses), 1)
+        self.assertIn("standing grants: archive 1", self.tw("card", "--kind", "status", "--head", "archived").stdout)
+
+    def test_card_always_ends_with_ledger_and_omits_empty_sections(self):
+        out = self.tw("card", "--kind", "status", "--head", "x").stdout.rstrip().splitlines()
+        self.assertIn("Ledger", out[-1])
+        self.assertFalse(any(line.startswith("## ") for line in out[1:]))
+
+    def test_done_card_has_phase_feature_sections_and_grant_counts(self):
+        self.tw("feature", "add", "One", "--phase", "MVP")
+        self.tw("feature", "add", "Two", "--phase", "MVP")
+        self.tw("feature", "set", "F1", "--status", "landed", "--evidence", "merged")
+        self.tw("prefs", "--set", "standing_grants=schedule", "--user-said", "schedule low-priority work")
+        self.tw("prefs", "--grant-use", "schedule", "--what", "run weekly reports")
+        out = self.tw("card", "--kind", "done", "--head", "delivered").stdout
+        self.assertIn("Features done", out)
+        self.assertIn("Features not done yet", out)
+        self.assertIn("standing grants: schedule 1", out)
+        self.assertIn("Ledger", out.splitlines()[-1])
+
+    def test_docs_refreshed_and_version_notice_surface(self):
+        self.tw("docs", "set", "board", "--link", "https://example.invalid/board")
+        self.assertIn("refreshed", self.tw("docs", "list").stdout)
+        old = self.state()
+        self.tw("thread", "add", "old")
+        old = self.state()
+        old["threads"]["old"].update(status="working", session_id="old-session")
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(old))
+        (self.dir / ".teamwork" / "session-versions.jsonl").write_text(json.dumps({
+            "session": "old-session", "version": "release r20261120", "at": "2026-11-20T00:00:00+00:00"}) + "\n")
+        notice = self.tw("version", "--notify").stdout
+        self.assertIn("one side is a live clone", notice)
+        compared=json.loads(self.tw("version","--sessions").stdout)
+        self.assertEqual(compared["incomparable_sessions"][0]["thread"],"old")
+
+
 class SessionVersions(TwCase):
     def run_context(self, data):
         return subprocess.run([sys.executable, str(TW), "context"], cwd=self.dir, env=self.env,
@@ -391,7 +883,8 @@ class SessionVersions(TwCase):
         (self.dir / ".teamwork" / "session-versions.jsonl").write_text(
             json.dumps({"session": "s-old", "version": "old release", "at": "now", "cwd": str(self.dir)}) + "\n")
         got = json.loads(self.tw("version", "--sessions").stdout)
-        self.assertEqual(got["old_sessions"][0]["thread"], "api")
+        versions = got["old_sessions"] + got["incomparable_sessions"]
+        self.assertEqual(next(x["thread"] for x in versions if x["session"] == "s-old"), "api")
         self.tw("prefs", "--set", "skill_edge=/tmp/x")
         self.assertIn("tests unreleased teamwork", self.context())
         self.assertEqual(self.run_context("garbage").returncode, 0)
@@ -1731,6 +2224,31 @@ class Releases(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue((link / "keep").exists())
         self.assertEqual((self.configs[1] / "skills" / "teamwork").resolve(), self.repo)  # the other one did not move
+
+    def test_skill_is_published_to_its_own_link_and_index(self):
+        result=self.release("publish","--skill","docs","--apply")
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue((self.configs[0]/"skills"/"docs").is_symlink())
+        self.assertTrue((self.configs[0]/"docs-releases"/"index.json").exists())
+        self.assertFalse((self.configs[0]/"teamwork-releases"/"index.json").exists())
+        status=self.release("status","--skill","docs","--json")
+        self.assertEqual(status.returncode,0,status.stderr)
+        self.assertIn("release:",json.loads(status.stdout)["configs"][0]["link"])
+        self.assertEqual(self.release("edge","--skill","docs","--apply").returncode,0)
+        self.assertEqual(self.release("rollback","--skill","docs","--apply").returncode,0)
+        self.assertTrue((self.configs[0]/"skills"/"docs").resolve().is_relative_to(self.configs[0]/"docs-releases"))
+
+    def test_compare_reports_quota_and_permission_prompt_daily_rates(self):
+        project=self.root/"projects"/"demo"/".teamwork"; project.mkdir(parents=True)
+        rows=[{"ev":"quota-usage","used_pct":42,"at":"2026-11-20T10:00:00Z"},
+              {"ev":"notice-add","kind":"needs-user","at":"2026-11-20T10:01:00Z"},
+              {"ev":"quota-usage","used_pct":68,"at":"2026-11-22T10:00:00Z"},
+              {"ev":"permission-wait","at":"2026-11-22T10:01:00Z"}]
+        (project/"log.jsonl").write_text("\n".join(json.dumps(x) for x in rows)+"\n")
+        result=self.release("compare","--skill","docs","--since","2026-11-21","--days","7","--projects",str(self.root/"projects"))
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn("quota used per day",result.stdout)
+        self.assertIn("permission prompts per day",result.stdout)
 
     def test_all_or_none_and_safe_snapshots(self):
         self.assertEqual(self.release("publish", "--apply").returncode, 0)
@@ -4952,6 +5470,50 @@ class AuditFollowups(TwCase):
                                                     "--user-said", "Quixbar: edits only").stderr)
 
 
+class BoardIdleIsStandby(TwCase):
+    """Seated idle threads are on standby, not finished: the overview must not list them as completed."""
+    def test_idle_threads_are_standby_not_completed(self):
+        self.tw("prefs", "--set", "language=zh")
+        for n in ("ui", "api", "old"):
+            self.tw("thread", "add", n, "--session", "session_" + n)
+        self.tw("thread", "set", "ui", "--status", "idle")
+        self.tw("thread", "set", "api", "--status", "idle")
+        self.tw("thread", "set", "old", "--status", "resolved")
+        board = self.tw("board").stdout
+        overview = board.split("## 总览", 1)[1].split("\n## ", 1)[0]
+        self.assertNotRegex(overview, r"已完成[^\n]*ui")
+        self.assertRegex(overview, r"待命 2 个[^\n]*ui, api")
+        expanded = self.tw("board", "--all").stdout.split("## 总览", 1)[1].split("\n## ", 1)[0]
+        self.assertRegex(expanded, r"待命 2 个[^\n]*ui, api")
+        self.assertRegex(expanded, r"已完成 1 个：old")
+        threads = self.tw("threads").stdout
+        self.assertNotRegex(threads, r"已完成[^\n]*ui")
+        self.assertIn("待命 2 个", threads)
+
+
+class SweepBlockedWhileRunning(TwCase):
+    """A real list_sessions row can say status running and bucket blocked: the approval wait must stay on the board."""
+    def test_blocked_running_row_keeps_wait(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "api", "--session", "session_api")
+        rows = {"data": [{"id": "session_api", "title": "[TP] api · x", "status": "running", "status_bucket": "blocked",
+                          "updated_at": "2026-11-24T20:01:00Z", "tags": ["teamwork-thread:api"],
+                          "post_turn_summary": {"needs_action": "approve a permission prompt"}}], "has_more": False}
+        f = self.dir / "s.json"; f.write_text(json.dumps(rows), encoding="utf-8")
+        self.assertIn("api 在等你批准", self.tw("notice", "sweep", "--sessions", str(f)).stdout)
+        self.assertEqual(self.state()["threads"]["api"].get("waiting_for"), "permission")
+        self.assertIn("api", self.tw("board").stdout.split("## 总览", 1)[1].split("**进行中**")[0])
+        self.assertIn("未记录", self.tw("sprint", "stop-all").stdout)
+        self.assertNotIn("none recorded", self.tw("sprint", "stop-all").stdout)
+
+
+class LabelsBothLanguages(unittest.TestCase):
+    def test_every_label_has_english_and_chinese(self):
+        sys.path.insert(0, str(TW.parent)); import tw as twmod
+        en, zh = set(twmod.LABELS["en"]), set(twmod.LABELS["zh"])
+        self.assertEqual(sorted(zh - en), []); self.assertEqual(sorted(en - zh), [])
+
+
 class BoardBatch5(TwCase):
     def test_ready_json_stays_on_stdout_and_notice_is_stderr(self):
         self.tw("prefs", "--set", "language=zh")
@@ -6818,11 +7380,11 @@ class ReportCards(TwCase):
         out = self.tw("card", "--kind", "done", "--head", "Shipped the thing", "--since", self.T1,
                       "--link", "https://example.test/pr").stdout
         self.assertEqual(out.splitlines()[0], "[Delivery] Shipped the thing")
-        for head in ("## Done", "## In progress", "## Waiting on you"):
+        self.assertNotIn("## Done", out)  # empty sections are omitted
+        self.assertIn("F1 Old feature", out.split("## Features done")[1])  # current phase feature inventory is not time-filtered
+        self.assertNotIn("first thing", out)
+        for head in ("## In progress", "## Waiting on you", "## Features done", "## Features not done yet"):
             self.assertIn(head, out)
-        done = out.split("## Done")[1].split("## In progress")[0]
-        self.assertNotIn("Old feature", done)  # landed before --since
-        self.assertNotIn("first thing", done)
         doing = out.split("## In progress")[1].split("## Waiting on you")[0]
         self.assertIn("F2 New feature", doing)
         self.assertIn("T1 build it", doing)
@@ -6832,14 +7394,14 @@ class ReportCards(TwCase):
         self.assertEqual(out.splitlines()[-1],
                          "Ledger +2/−1 · waiting on you: 2 · GPT did 1 (T1 code) · https://example.test/pr")  # D1: names the work
         everything = json.loads(self.tw("card", "--kind", "status", "--head", "x", "--json").stdout)
-        self.assertEqual(sorted(everything), ["doing", "done", "head", "kind", "waiting"])  # English keys, no ledger
+        self.assertEqual(sorted(everything), ["doing", "done", "features_done", "features_not_done", "head", "kind", "ledger", "waiting"])
         self.assertIn("F1 Old feature", everything["done"])
         self.assertIn("R1 first thing", everything["done"])
 
     def test_ledger_line_only_when_asked_for(self):
         self.tw("req", "add", "one")
         line = "Ledger +"
-        self.assertNotIn(line, self.tw("card", "--kind", "status", "--head", "h").stdout)  # default: wrapup
+        self.assertIn(line, self.tw("card", "--kind", "status", "--head", "h").stdout)  # always on every card
         self.assertIn(line, self.tw("card", "--kind", "status", "--head", "h", "--ledger-line").stdout)
         self.assertIn(line, self.tw("card", "--kind", "done", "--head", "h").stdout)
         self.tw("prefs", "--set", "ledger_line_every=report")
@@ -6856,8 +7418,9 @@ class ReportCards(TwCase):
                            ("status", "进展")):
             self.assertEqual(self.tw("card", "--kind", kind, "--head", "结论").stdout.splitlines()[0], f"[{name}] 结论")
         out = self.tw("card", "--kind", "done", "--head", "已完成").stdout
-        for word in ("## 做完了", "## 在做", "## 等你", "（无）"):
-            self.assertIn(word, out)
+        self.assertIn("自 ", out)
+        self.assertNotIn("## 做完了", out)
+        self.assertNotIn("（无）", out)
         self.assertEqual(out.splitlines()[-1], "台账 +1/−0 · 等你 0 件 · GPT 做了 0 · https://example.test/ledger")
 
     def test_last_report_at_and_since_last_report(self):
@@ -6919,7 +7482,7 @@ class ReportCards(TwCase):
 
     def chain(self, rid="R1"):
         lines = self.tw("board").stdout.splitlines()
-        i = next(n for n, x in enumerate(lines) if x.startswith(f"- **{rid}**"))
+        i = next(n for n, x in enumerate(lines) if x.startswith(f"- **{rid}**") or x.startswith(f"- {rid}:"))
         return lines[i + 1].strip()
 
     def test_progress_chain_and_merged_mark(self):
@@ -7056,7 +7619,7 @@ class ReportCards(TwCase):
             self.assertEqual(after[key], before[key], key)
         self.assertEqual(after["tasks"]["T1"]["merged_sha"], "abc1234def")
         self.assertEqual(after["tasks"]["T1"]["merged_at"], before["tasks"]["T1"]["merged_at"])
-        self.assertEqual(after["prefs"]["ledger_line_every"], "wrapup")
+        self.assertEqual(after["prefs"]["ledger_line_every"], "report")
         self.assertEqual(self.tw("board").stdout, board)
 
 

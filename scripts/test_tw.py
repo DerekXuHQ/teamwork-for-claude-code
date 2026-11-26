@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -2288,10 +2289,14 @@ class Releases(unittest.TestCase):
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         pr.stdin.write(b'{"session_id": "session_01Zorblax"}')
         pr.stdin.flush()  # left open, as a host might
+        drained = [threading.Thread(target=f.read, daemon=True) for f in (pr.stdout, pr.stderr)]
+        for t in drained: t.start()  # read the output: pipe capacity can be as small as 512 bytes
         try:
-            pr.wait(timeout=5)  # the output is small: it fits the pipe without being read
+            pr.wait(timeout=5)  # exits without waiting for end of input
         finally:
             pr.stdin.close()
+            for t in drained: t.join(timeout=5)
+            pr.stdout.close(); pr.stderr.close()
         self.assertEqual(pr.returncode, 0)
         self.assertIn("session_01Zorblax", (proj / ".teamwork" / "session-versions.jsonl").read_text())
 
@@ -2910,6 +2915,80 @@ class Requests(TwCase):
         self.assertIn("dropped", self.tw("req", "link", "R2", "T3", ok=False).stderr)  # no linking dead work
         self.assertNotEqual(self.tw("req", "add", "x", "--tasks", "T2", ok=False).returncode, 0)
 
+    def test_m4_req_link_copies_original_words_to_task(self):
+        self.tw("req", "add", "keep the button blue")
+        self.tw("req", "link", "R1", "T1")
+        self.assertEqual(self.state()["tasks"]["T1"]["user_said"], "keep the button blue")
+
+    def test_m6_reopened_request_waits_for_task_change_and_redelivers(self):
+        self.tw("req", "add", "make button blue", "--tasks", "T1")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.tw("task", "set", "T1", "--status", "review")
+        self.assertEqual(self.req("R1")["status"], "delivered")
+        self.tw("req", "set", "R1", "--status", "reported")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.assertEqual(self.req("R1")["status"], "dispatched")
+        self.assertTrue(self.req("R1").get("reopened_at"))
+        self.tw("task", "set", "T1", "--status", "review")
+        self.assertEqual(self.req("R1")["status"], "delivered")
+
+    def test_m7_req_set_dispatched_delivers_completed_linked_task(self):
+        self.tw("req", "add", "blue")
+        self.tw("req", "link", "R1", "T1")
+        self.tw("task", "set", "T1", "--status", "working")
+        self.tw("task", "set", "T1", "--status", "review")
+        st = self.state(); st["requests"]["R1"]["status"] = "open"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        result = self.tw("req", "set", "R1", "--status", "dispatched")
+        self.assertEqual(self.req("R1")["status"], "delivered")
+        self.assertIn("delivered", result.stdout + result.stderr)
+
+    def test_m8_dispatched_text_change_needs_user_words_and_keeps_history(self):
+        self.tw("req", "add", "blue", "--tasks", "T1")
+        denied = self.tw("req", "set", "R1", "--text", "green", ok=False)
+        self.assertNotEqual(denied.returncode, 0)
+        changed = self.tw("req", "set", "R1", "--text", "green", "--user-said", "make it green")
+        self.assertEqual(self.req("R1")["text_history"][0]["text"], "blue")
+        self.assertEqual(self.req("R1")["text"], "green")
+
+    def test_m8_dispatched_text_cannot_be_cleared(self):
+        self.tw("req", "add", "blue", "--tasks", "T1")
+        before = self.req("R1").copy()
+        for text in ("", "   "):
+            denied = self.tw("req", "set", "R1", "--text", text, ok=False)
+            self.assertIn("text cannot be empty", denied.stderr)
+            self.assertEqual(self.req("R1"), before)
+
+    def test_m9_drop_warns_about_active_linked_task(self):
+        self.tw("req", "add", "stop work", "--tasks", "T1")
+        self.tw("task", "set", "T1", "--status", "dispatched")
+        self.tw("task", "set", "T1", "--status", "working")
+        result = self.tw("req", "drop", "R1", "--user-said", "stop")
+        self.assertIn("T1", result.stderr)
+
+    def test_m10_req_link_remove_unlinks_task(self):
+        self.tw("req", "add", "blue", "--tasks", "T1,T2")
+        self.tw("req", "link", "R1", "--remove", "T2")
+        self.assertEqual(self.req("R1")["tasks"], ["T1"])
+
+    def test_m10_req_link_remove_rejects_ended_request_with_set_message(self):
+        self.tw("req", "add", "blue", "--tasks", "T1")
+        self.tw("req", "drop", "R1", "--user-said", "stop")
+        remove = self.tw("req", "link", "R1", "--remove", "T1", ok=False)
+        set_text = self.tw("req", "set", "R1", "--text", "green", ok=False)
+        self.assertEqual(remove.stderr, set_text.stderr)
+
+    def test_m15_init_force_requires_words_and_saves_fixed_backup(self):
+        denied = self.tw("init", "demo", "--path", str(self.dir), "--force", ok=False)
+        self.assertNotEqual(denied.returncode, 0)
+        self.tw("init", "demo", "--path", str(self.dir), "--force", "--user-said", "replace the demo ledger")
+        self.assertTrue((self.dir / ".teamwork" / "state.json.bak").is_file())
+
+    def test_m17_resolved_thread_reactivation_prints_hint(self):
+        self.tw("thread", "set", "ui", "--status", "resolved")
+        result = self.tw("thread", "set", "ui", "--status", "working")
+        self.assertIn("changed from resolved", result.stderr)
+
     def test_a_drop_that_delivers_an_unlinked_request_survives_rebuild(self):
         """A move made by the scan over all requests is in the log, so rebuild keeps it."""
         self.tw("req", "add", "blue", "--tasks", "T1,T2")
@@ -3023,6 +3102,57 @@ class Review(TwCase):
         self.tw("task", "set", "T1", "--status", "done", "--skip-review", "docs typo", "--user-said", "ok")
         self.assertEqual(self.task()["review"]["result"], "skipped")
         self.assertEqual(self.task()["review"]["note"], "docs typo")
+
+    def test_m12_failed_latest_review_warns_when_review_gate_is_off(self):
+        self.tw("prefs", "--set", "require_review=false", "--user-said", "disable review for this demo")
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("task", "set", "T1", "--review", "fail", "--reviewer", "rev", "--review-note", "red")
+        st = self.state(); st["tasks"]["T1"]["primary_check"] = {"result": "seen", "how": "checked", "evidence": "proof"}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        result = self.tw("task", "set", "T1", "--status", "done")
+        self.assertIn("latest review failed", result.stderr)
+
+    def test_m19_done_warns_when_remaining_finding_has_no_followup(self):
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--rounds", "2",
+                "--checks", "pass", "--remaining", "document edge case", "--no-blocking")
+        result = self.tw("task", "set", "T1", "--status", "done")
+        self.assertIn("no follow-up task", result.stderr)
+
+    def test_m19_followups_apply_clears_done_warning(self):
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--rounds", "2",
+                "--checks", "pass", "--remaining", "document edge case", "--no-blocking")
+        self.tw("task", "followups", "T1", "--apply")
+        result = self.tw("task", "set", "T1", "--status", "done")
+        self.assertNotIn("no follow-up task", result.stderr)
+
+    def test_m20_legacy_review_without_cap_renders_question_mark(self):
+        st = self.state()
+        st["tasks"]["T1"].update(status="done", review={"result": "skipped", "reviewer": "lead"}, review_rounds=1)
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.assertIn("1/?", self.tw("task", "reviews").stdout)
+
+    def test_m25_skip_review_voids_prior_verdict_and_marks_followup(self):
+        self.tw("task", "set", "T1", "--status", "review")
+        self.tw("task", "set", "T1", "--review", "pass", "--reviewer", "rev", "--rounds", "2",
+                "--checks", "pass", "--remaining", "document edge case", "--no-blocking")
+        self.tw("task", "followups", "T1", "--apply")
+        self.tw("task", "set", "T1", "--status", "done", "--skip-review", "waived", "--user-said", "done")
+        task = self.task()
+        self.assertEqual(task["past_reviews"][-1].get("voided"), "review skipped")
+        self.assertEqual(self.state()["tasks"]["T1-f1"].get("parent_verdict_voided"), "review skipped")
+
+    def test_m14_dispatch_checks_file_lease_and_force_reason(self):
+        self.tw("prefs", "--set", "root_mode=off")
+        self.tw("thread", "add", "api")
+        self.tw("task", "add", "T2", "--owner", "ui", "--touches", "shared.py")
+        self.tw("task", "set", "T1", "--owner", "api", "--touches", "shared.py")
+        self.tw("plan", "approve", "--user-said", "approve the plan")
+        self.tw("task", "set", "T2", "--status", "dispatched")
+        refused = self.tw("task", "set", "T1", "--status", "dispatched", ok=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.tw("task", "set", "T1", "--status", "dispatched", "--force-lease", "--lease-reason", "user wants overlap")
 
     def test_bool_pref_on_missing_key(self):
         st = self.state()
@@ -4935,6 +5065,29 @@ class ReviewRounds(TwCase):
 
     def raw(self, *args):
         return self.tw(*args, ok=False, walk=False)
+
+    def test_t76_reviewer_suffix_rounds_and_fail_status(self):
+        base = ("task", "set", "T1", "--review", "pass", "--reviewer")
+        tail = ("--tests", "ran", "--base", "abcdef0")
+        for reviewer in ("ui/..", "ui/self", "ui/other"):
+            r = self.raw(*(base + (reviewer,) + tail))
+            self.assertNotEqual(r.returncode, 0, reviewer)
+        r = self.raw(*(base + ("ui/subagent",) + tail + ("--rounds", "3")))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("advanced by 3", r.stderr)
+
+    def test_t76_fail_cannot_set_review_status_and_cap_change_names_active_thread(self):
+        r = self.raw("task", "set", "T1", "--review", "fail", "--reviewer", "ui/subagent",
+                     "--tests", "ran", "--base", "abcdef0", "--status", "review")
+        self.assertNotEqual(r.returncode, 0)
+        self.tw("task", "set", "T1", "--status", "working")
+        r = self.raw("prefs", "--set", "review_max_rounds=2", "--user-said", "use two rounds")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ui", r.stderr)
+
+    def test_t76_format_controls_do_not_count_as_user_words(self):
+        r = self.raw("prefs", "--set", "require_review=false", "--user-said", "\u200b\ufeff")
+        self.assertNotEqual(r.returncode, 0)
 
     def test_t25_done_checks_final_pass_remaining_gate_stale_followups(self):
         ok = lambda *x: self.assertEqual(self.raw(*x).returncode, 0, x)
@@ -10218,7 +10371,7 @@ class SeatSwap2(TwCase):
 
     def test_init_force_uses_current_revision(self):
         self.tw("prefs", "--set", "language=en")
-        self.tw("init", "demo", "--force", "--goal", "g2")
+        self.tw("init", "demo", "--force", "--goal", "g2", "--user-said", "start over")
         self.assertEqual(self.state()["goal"], "g2")
 
     def test_succ_status_omits_terminal_next_step_and_shows_seated_followup(self):

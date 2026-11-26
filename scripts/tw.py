@@ -160,8 +160,12 @@ LABELS = {
         "overview": "Overview", "questions": "Waiting on the user", "roster": "Roster", "plan": "Plan",
         "requests": "Your requests (not closed)", "unreported": "Delivered, not yet reported to the user",
         "req_open": "open", "req_held": "held: waiting for your material", "req_dispatched": "dispatched", "req_delivered": "delivered (report it!)",
+        "req_ended_edit": "{r} has ended ({status}); register a new request instead of editing it",
         "req_reported": "reported", "req_closed": "closed", "req_proposed": "proposed (waiting for a yes)",
         "req_result_changed": "Result changed; waiting to deliver again", "gpt_model_line": "GPT model: {model}",
+        "req_drop_active": "Dropped {r}; recall active tasks: {tasks}", "task_done_fail_review": "{task}: latest review failed; verify the rework before treating it as complete",
+        "task_done_orphan_findings": "{task}: remaining findings have no follow-up task: {findings}",
+        "thread_resolved_active": "{thread}: status changed from resolved to {status}; confirm the thread is active",
         "req_dropped": "dropped", "req_waiting_user": "waiting for your decision", "req_wont": "won't do (reason)", "req_landed": "landed (evidence)", "req_remark": "remark", "remark_heading": "Remarks (not dispatched)", "default_heading": "Waiting for your confirmation", "promise_heading": "Open promises", "default_prefix": "Going ahead by default: ", "can_change": " (change it any time)", "rcpt_remark": "recorded as a remark {r}, not dispatched", "rcpt_given": "recorded as {r}, given to {who}", "rcpt_open": "recorded as {r}, not dispatched yet", "default_undoable": "only something that can be undone may be done by default; an irreversible step waits for the user (add --undoable when it can be undone)", "followup": "follow-up",
         "no_threads": "(no threads yet)",
         "t_created": "created", "t_updated": "updated", "t_reported": "reported", "t_closed": "closed",
@@ -572,8 +576,12 @@ LABELS = {
         "overview": "总览", "questions": "等你回答", "roster": "成员", "plan": "计划",
         "requests": "你提的事（未关闭）", "unreported": "已交付、还没回报给用户",
         "req_open": "待办", "req_held": "等你的材料", "req_dispatched": "已派", "req_delivered": "已交付（待回报！）",
+        "req_ended_edit": "{r} 已结束（{status}）；请登记新请求，不要编辑已结束的请求",
         "req_reported": "已回报", "req_closed": "已关闭", "req_proposed": "已提议（等你同意）",
         "req_result_changed": "结果已变，待重新交付", "gpt_model_line": "GPT 模型：{model}",
+        "req_drop_active": "已放弃 {r}；请召回仍在做的任务：{tasks}", "task_done_fail_review": "{task}：最近一次评审未通过；请核实返工结果后再视为完成",
+        "task_done_orphan_findings": "{task}：这些遗留项没有后续任务：{findings}",
+        "thread_resolved_active": "{thread}：线程从已解决改回 {status}；请确认线程已恢复",
         "req_dropped": "已放弃", "req_waiting_user": "等你定", "req_wont": "不做（附理由）", "req_landed": "已落地（附证据）", "req_remark": "备注", "remark_heading": "备注（不派）", "default_heading": "按默认做的决定", "promise_heading": "未完成的承诺", "default_prefix": "按默认做：", "can_change": "（可改）", "rcpt_remark": "记为备注 {r}，不派", "rcpt_given": "记为 {r}，交给 {who} 线程", "rcpt_open": "记为 {r}，待派", "default_undoable": "只有能撤回的事才能按默认做；不可撤回的要等用户（能撤回时加 --undoable）", "followup": "回访",
         "no_threads": "（还没有线程）",
         "t_created": "创建", "t_updated": "更新", "t_reported": "回报", "t_closed": "关闭",
@@ -934,6 +942,10 @@ def _lang_code(st):
 def lab(st, key, **kw):
     code = _lang_code(st)
     return LABELS.get(code, LABELS["en"]).get(key, LABELS["en"].get(key, key)).format(**kw)  # unknown: the key
+
+
+def meaningful_user_said(value):
+    return "".join(ch for ch in str(value or "") if unicodedata.category(ch) != "Cf").strip()
 
 
 MODEL_STATUS_LABELS = {
@@ -1798,8 +1810,9 @@ def render_reviews(st, only=None):
               for t, x in st["tasks"].items() if x.get("followup_of") == tid]
         left = "; ".join(rv.get("remaining") or []) or "-"
         test_line = review_tests_line(st, rv) if rv else "-"
+        shown_cap = rv.get("cap", cap) if "result" not in rv or "cap" in rv else "?"
         rows.append("| " + " | ".join(_cell(x) for x in (
-            tid, k.get("owner") or "-", k["status"], verdict or "-", f"{n}/{rv.get('cap', cap) or '-'}",
+            tid, k.get("owner") or "-", k["status"], verdict or "-", f"{n}/{shown_cap or '-'}",
             rv.get("reviewer") or "-", k.get("checks") or "-", test_line, left, ",".join(fu) or "-")) + " |")
     if not rows:
         return "(no reviews recorded)"
@@ -1808,7 +1821,7 @@ def render_reviews(st, only=None):
 
 
 def task_followups(d, st, a):
-    """One follow-up task per important finding left at a capped review; dry run unless --apply."""
+    """One follow-up task per important finding left at a pass or capped review; dry run unless --apply."""
     if a.id not in st["tasks"]:
         sys.exit(f"unknown task {a.id}")
     k = st["tasks"][a.id]
@@ -2204,6 +2217,10 @@ def cmd_init(a):
     d = find_dir(create_at=a.path)
     if (d / "state.json").exists() and not a.force:
         sys.exit(f"{d}/state.json already exists (use --force to overwrite)")
+    if a.force and (d / "state.json").exists():
+        if not (getattr(a, "user_said", None) or "").strip():
+            sys.exit("init --force requires --user-said: overwriting project state is the user's decision")
+        shutil.copy2(d / "state.json", d / "state.json.bak")
     if not re.fullmatch(NAME_RE, a.project):
         sys.exit("project name: lowercase letters/digits/hyphen, max 24 chars")
     short = a.short or default_short(a.project)
@@ -2279,7 +2296,7 @@ def cmd_init(a):
             encoding="utf-8",
         )
     gi = d / ".gitignore"
-    need_ig = ["state.json.tmp", "state.json.rebuilt", "state.json.bak-*", "PRIVATE.md", "private/"]
+    need_ig = ["state.json.tmp", "state.json.rebuilt", "state.json.bak", "state.json.bak-*", "PRIVATE.md", "private/"]
     have = gi.read_text(encoding="utf-8").splitlines() if gi.exists() else []
     if any(x not in have for x in need_ig):
         gi.write_text("\n".join(have + [x for x in need_ig if x not in have]) + "\n", encoding="utf-8")
@@ -2727,6 +2744,8 @@ def cmd_thread(a):
     if a.status and not session_change:
         if a.status not in THREAD_STATUSES:
             sys.exit(f"status must be one of {list(THREAD_STATUSES)}")
+        if t.get("status") == "resolved" and a.status in ("starting", "working", "waiting", "review", "landing"):
+            print(lab(st, "thread_resolved_active", thread=name, status=a.status), file=sys.stderr)
         t["status"] = a.status
         t.pop("disconnected", None)
     if a.disconnected:
@@ -3546,6 +3565,8 @@ def cmd_task(a):
         if a.rounds is not None and not 1 <= a.rounds <= 99:
             sys.exit("--rounds: 1 to 99")
         if a.review:
+            if a.review == "fail" and a.status not in (None, "working"):
+                sys.exit("--review fail permits only an omitted --status or --status working")
             if not a.tests:
                 sys.exit(lab(st, "g8_tests"))
             if a.tests == "not-run" and not (a.tests_why or "").strip():
@@ -3592,6 +3613,9 @@ def cmd_task(a):
             if a.rounds is not None and a.rounds < max(prev, 1):
                 sys.exit(f"{a.id}: {prev} review rounds are already recorded; --rounds only goes up "
                          "(the thread's own count, from its DONE)")
+            if a.rounds is not None and a.rounds > prev + 1:
+                print(f"{a.id}: --rounds advanced by {a.rounds - prev}; confirm the thread's reported count",
+                      file=sys.stderr)
             rounds = a.rounds if a.rounds is not None else prev + 1
             remaining = list(dict.fromkeys(x.strip() for x in re.split(r"\s*;\s*|\n", a.remaining or "") if x.strip()))
             if a.remaining is not None and a.review not in PASSING:
@@ -3662,6 +3686,14 @@ def cmd_task(a):
             if a.status == "dispatched" and k.get("needs_ask") and any(not q.get("answered") and q.get("task") == a.id for q in st.get("questions", [])):
                 sys.exit(lab(st, "beyond_wait", task=a.id))
             if a.status == "dispatched":
+                offered, blocked_lease, blocked_topic = plan_ready(st, [a.id])
+                if a.id in blocked_lease:
+                    reason = (getattr(a, "lease_reason", None) or "").strip()
+                    if not (getattr(a, "force_lease", False) and reason):
+                        conflict = blocked_lease[a.id]
+                        sys.exit(f"{a.id}: dispatch blocked by active work {conflict}; use --force-lease --lease-reason \"<reason>\" to override")
+                    k.setdefault("lease_overrides", []).append({"at": now(), "reason": reason})
+                    print(f"{a.id}: lease conflict overridden: {reason}", file=sys.stderr)
                 if cur == "recalled":
                     invalidate(k, ["redispatch"], st)
                 deps = list(dict.fromkeys(old_deps + (k.get("deps") or [])))  # clearing deps here skips nothing
@@ -3678,9 +3710,19 @@ def cmd_task(a):
                 sys.exit("--skip-review \"<reason>\" needs --user-said \"<the user's words>\": skipping review is "
                          "their call")
             if a.status == "done":
+                rv = k.get("review") or {}
+                if rv.get("result") == "fail":
+                    print(lab(st, "task_done_fail_review", task=a.id), file=sys.stderr)
+                remaining = rv.get("remaining") or []
+                opened = {x.get("followup_item") for x in st.get("tasks", {}).values()
+                          if x.get("followup_of") == a.id and x.get("status") not in ("dropped", "done")}
+                orphaned = [item for item in remaining if item not in opened]
+                if orphaned:
+                    print(lab(st, "task_done_orphan_findings", task=a.id, findings="; ".join(orphaned)), file=sys.stderr)
                 if (k.get("primary_check") or {}).get("result") == "pending-real" and said.strip():
                     k.setdefault("primary_waivers", []).append({"why": said.strip(), "at": now(), "kind": "pending-real-done"})
                 if a.skip_review:
+                    void("review skipped", change="replace")
                     k["review"] = {"result": "skipped", "note": a.skip_review.strip(), "user_said": said, "at": now()}
             if a.status == "working" and cur in ("review", "done"):
                 if k.get("review"):
@@ -3690,7 +3732,7 @@ def cmd_task(a):
                 return_to_working(k, "explicit status working", st)
             changes["status_to"] = k.get("status") if a.status else None
             k["status"] = a.status
-            k["updated"] = now()
+            k["updated"] = _later_than(now(), k.get("updated"))
             if a.status == "dispatched":
                 k["dispatch_v"] = int(k.get("dispatch_v") or 0) + 1
                 k["dispatched_at"] = now()
@@ -4348,7 +4390,7 @@ def reviewer_independent(reviewer, owner):
     rv, ow = norm_reviewer(reviewer), (owner or "").strip().lower()
     if not ow:
         return True
-    if rv == ow:
+    if rv in ("", ".", "self") or rv == ow:
         return False
     if "/" in rv:
         return True
@@ -4359,7 +4401,14 @@ def reviewer_independent(reviewer, owner):
 
 def norm_reviewer(x):
     import posixpath
-    return posixpath.normpath(x.strip().lower() or ".").strip("/")
+    value = (x or "").strip().lower()
+    if "/" in value:
+        base, suffix = value.split("/", 1)
+        suffix = suffix.strip("/")
+        if suffix not in {"subagent", "review"}:
+            value = base
+    normalized = posixpath.normpath(value or ".").strip("/")
+    return "" if normalized in ("", ".", "self") else normalized
 
 
 def roster_stale(st):
@@ -8252,6 +8301,13 @@ def cmd_prefs(a):
                 retitled[n] = new
     if a.set and (a.user_said or "").strip():
         st.setdefault("prefs_user_said", []).append({"t": now(), "set": a.set, "text": a.user_said.strip()})
+    new_cap = review_max(st)
+    if new_cap != old_cap:
+        active = sorted({t.get("owner") for t in st.get("tasks", {}).values()
+                         if t.get("status") in ("dispatched", "working", "blocked") and t.get("owner")})
+        if active:
+            print(f"review_max_rounds changed ({old_cap} -> {new_cap}); send FOLLOWUP to active threads: " +
+                  ", ".join(active), file=sys.stderr)
     if a.set:
         save(d, st, {"ev": "prefs", "set": a.set, **({"user_said": a.user_said.strip()}
                                                      if (a.user_said or "").strip() else {})})
@@ -9209,7 +9265,10 @@ def deliver_ready(st):
     """Requests whose live linked tasks are all in review or done move dispatched -> delivered. Returns the ids."""
     moved = []
     for r, q in st.get("requests", {}).items():
-        if q["status"] == "dispatched" and tasks_ready(st, q):
+        changed_after_reopen = not q.get("reopened_at") or any(
+            (st.get("tasks", {}).get(t, {}).get("updated") or "") >
+            q.get("reopened_task_updates", {}).get(t, "") for t in live_tasks(st, q))
+        if q["status"] == "dispatched" and tasks_ready(st, q) and changed_after_reopen:
             q["status"] = "delivered"
             q["updated"] = now()
             moved.append(r)
@@ -9227,6 +9286,8 @@ def undeliver(st):
                 st["tasks"].get(t, {}).get("status") in ("review", "done") for t in ts):
             q["status"] = "dispatched"
             q["updated"] = now()
+            q["reopened_at"] = now()
+            q["reopened_task_updates"] = {t: st.get("tasks", {}).get(t, {}).get("updated", "") for t in ts}
             moved.append(r)
     st.setdefault("_moved_reqs", []).extend(moved)
     return moved
@@ -9403,11 +9464,26 @@ def cmd_req(a):
     q = reqs[r]
     if a.action == "link":
         if q.get("status") == "remark": sys.exit("remark cannot have tasks")
+        if getattr(a, "remove", None):
+            if q["status"] in REQ_END:
+                sys.exit(lab(st, "req_ended_edit", r=r, status=q["status"]))
+            removed = list(a.remove) + csv(a.tasks)
+            if not removed:
+                sys.exit("usage: req link R<n> --remove T<n> [T<n> ...]")
+            q["tasks"] = [t for t in q.get("tasks", []) if t not in removed]
+            q["updated"] = now()
+            deliver_ready(st)
+            save(d, st, {"ev": "req-link", "req": r, "status": q["status"]})
+            print(json.dumps({r: q}, ensure_ascii=False)); return
         tasks = csv(",".join(a.args[1:])) + csv(a.tasks)
         if not tasks:
             sys.exit("usage: req link R<n> T1 [T2 ...]")
         check_tasks(st, tasks)
         q["tasks"] = list(dict.fromkeys(q.get("tasks", []) + tasks))
+        for tid in tasks:
+            task = st["tasks"][tid]
+            if not task.get("user_said") and q.get("text"):
+                task["user_said"] = q["text"]
         if not q.get("area") and tasks:
             q["area"]=next((area_of_task(st,st["tasks"][tid]) for tid in tasks if area_of_task(st,st["tasks"][tid])),None)
         if q["status"] in REQ_END:
@@ -9415,6 +9491,7 @@ def cmd_req(a):
         if q["status"] in ("reported", "landed"):
             # more work on something already reported: the user reopens it (reported -> dispatched)
             set_req_status(st, r, q, "dispatched", user_said=a.user_said)
+            q["reopened_at"] = now()
         if q["status"] == "open" and q.get("gate"):  # was proposed / reported / landed: the user's yes first
             set_req_status(st, r, q, "dispatched", user_said=a.user_said)
         if q["status"] == "open":
@@ -9423,12 +9500,21 @@ def cmd_req(a):
         deliver_ready(st)
     elif a.action == "set":
         if q["status"] in REQ_END:
-            sys.exit(f"{r} has ended ({q['status']}); register a new request instead of editing it")
+            sys.exit(lab(st, "req_ended_edit", r=r, status=q["status"]))
         was_held = q["status"] == "held"
         if (a.status and q.get("kind", "request") != "request" and a.status not in ("remark", "dropped")) \
                 or (getattr(a, "tasks", None) and q.get("kind", "request") != "request"):
             sys.exit(lab(st, "req_not_request"))
-        if a.text: check_never_raise(d, a.text, getattr(a, "override", None))
+        if a.text is not None:
+            if not a.text.strip():
+                sys.exit("request text cannot be empty")
+            check_never_raise(d, a.text, getattr(a, "override", None))
+            if q.get("status") not in ("open", "held") and a.text != q.get("text"):
+                if not (a.user_said or "").strip():
+                    sys.exit(f"{r}: changing dispatched request text requires --user-said")
+                q.setdefault("text_history", []).append({"text": q.get("text", ""), "at": now()})
+                q.setdefault("user_said", []).append({"t": now(), "to": q.get("status"), "text": a.user_said.strip()})
+        old_status = q.get("status")
         if a.status:
             if a.status == "wont":
                 if not (a.reason or "").strip(): sys.exit("wont requires --reason")
@@ -9441,12 +9527,17 @@ def cmd_req(a):
             sys.exit(f"{r} has no tasks: link the work first (`req link {r} T<n>`), which dispatches it")
         if was_held and a.status == "dispatched":
             deliver_ready(st)  # back from held after the work finished meanwhile (rework stays dispatched)
+        if old_status in ("reported", "delivered") and q.get("status") == "dispatched":
+            q["reopened_at"] = now()
+            q["reopened_task_updates"] = {t: st.get("tasks", {}).get(t, {}).get("updated", "") for t in live_tasks(st, q)}
         for k in ("where", "followup", "text", "phase", "category", "area"):
             v = getattr(a, k)
             if v is not None:
                 q[k] = _area_key(st,v) if k=="area" else _norm_category(v) if k=="category" else v
         if patchy_text(q.get("text", "")) and q.get("category") in (None,"bug","correction"): q["patchy"] = True
         else: q.pop("patchy",None)
+        if q.get("status") == "dispatched":
+            deliver_ready(st)
     elif a.action in ("close", "drop"):
         drop = a.action == "drop" or a.declined
         a.user_said = (a.user_said or "").strip()
@@ -9470,6 +9561,11 @@ def cmd_req(a):
             sys.exit(f"{r} was reported, but {', '.join(back)} went back to work since: report the new result "
                      "first (the user accepted an old one)")
         q["status"] = "dropped" if drop else "closed"
+        if drop:
+            active = [t for t in q.get("tasks", []) if st.get("tasks", {}).get(t, {}).get("status") in
+                      ("dispatched", "working", "blocked")]
+            if active:
+                print(lab(st, "req_drop_active", r=r, tasks=", ".join(active)), file=sys.stderr)
         q["closed_reason"] = "dropped" if drop else "accepted"
         q["closed_at"] = now()
         q.setdefault("user_said", []).append({"t": now(), "to": q["status"], "text": a.user_said})
@@ -13955,6 +14051,7 @@ def main():
     x.add_argument("--repo-url")
     x.add_argument("--base", help="base branch (default: the repo's default branch, else main)")
     x.add_argument("--force", action="store_true")
+    x.add_argument("--user-said", metavar="WORDS", help="init --force: the user's words authorising overwrite")
     x.add_argument("--short", help="short name, max 6 chars, used in titles/headers/tags (default: initials, e.g. TFCC)")
     x.set_defaults(f=cmd_init)
 
@@ -14031,7 +14128,7 @@ def main():
 
     x = s.add_parser("task", help="add or update a plan task")
     x.add_argument("action", choices=["add", "set", "followups", "reviews", "verify"],
-                   help="followups <id> [--apply]: one task per finding left at a capped review; reviews -: the table")
+                   help="followups <id> [--apply]: one task per finding left at a pass or capped review; reviews -: the table")
     x.add_argument("id", nargs="?", default="-")
     x.add_argument("--title")
     x.add_argument("--brief")
@@ -14075,6 +14172,8 @@ def main():
     x.add_argument("--suspect-cleared", action="store_true")
     x.add_argument("--checks", choices=["pass", "fail", "none"], help="tests / checks result on the branch")
     x.add_argument("--skip-review", metavar="REASON", help="mark done without review (recorded; needs --user-said)")
+    x.add_argument("--force-lease", action="store_true", help="set: override a dispatch lease conflict with --lease-reason")
+    x.add_argument("--lease-reason", help="set --force-lease: record why the user wants this overlap now")
     x.add_argument("--user-said", metavar="WORDS", help="the user's words: needed for --skip-review and dropping")
     x.add_argument("--no-primary", metavar="WHY", help="dispatch: record the user's primary-outcome waiver")
     x.add_argument("--req"); x.add_argument("--beyond"); x.add_argument("--override")
@@ -14293,6 +14392,7 @@ def main():
     x.add_argument("args", nargs="*", help='add: "<text>"; link: R<n> T1 [T2]; set/close: R<n>; import: <file.md>')
     x.add_argument("--id", help="add: explicit id (default next R<n>)")
     x.add_argument("--tasks", help="comma list of task ids to link")
+    x.add_argument("--remove", nargs="+", metavar="TASK", help="link: unlink these task ids")
     x.add_argument("--status", help="set: request status")
     x.add_argument("--reason"); x.add_argument("--evidence")
     x.add_argument("--remark", action="store_true")
@@ -14376,6 +14476,8 @@ def main():
     ).set_defaults(f=cmd_context)
 
     a = p.parse_args()
+    if hasattr(a, "user_said"):
+        a.user_said = meaningful_user_said(a.user_said)
     if a.C:
         os.environ["TEAMWORK_DIR"] = str(Path(a.C).expanduser().resolve() / ".teamwork")
         if a.cmd == "init" and a.path == ".":

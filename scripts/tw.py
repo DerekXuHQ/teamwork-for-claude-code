@@ -159,6 +159,7 @@ LABELS = {
         "requests": "Your requests (not closed)", "unreported": "Delivered, not yet reported to the user",
         "req_open": "open", "req_held": "held: waiting for your material", "req_dispatched": "dispatched", "req_delivered": "delivered (report it!)",
         "req_reported": "reported", "req_closed": "closed", "req_proposed": "proposed (waiting for a yes)",
+        "req_result_changed": "Result changed; waiting to deliver again", "gpt_model_line": "GPT model: {model}",
         "req_dropped": "dropped", "req_waiting_user": "waiting for your decision", "req_wont": "won't do (reason)", "req_landed": "landed (evidence)", "req_remark": "remark", "remark_heading": "Remarks (not dispatched)", "default_heading": "Waiting for your confirmation", "promise_heading": "Open promises", "default_prefix": "Going ahead by default: ", "can_change": " (change it any time)", "rcpt_remark": "recorded as a remark {r}, not dispatched", "rcpt_given": "recorded as {r}, given to {who}", "rcpt_open": "recorded as {r}, not dispatched yet", "default_undoable": "only something that can be undone may be done by default; an irreversible step waits for the user (add --undoable when it can be undone)", "followup": "follow-up",
         "no_threads": "(no threads yet)",
         "t_created": "created", "t_updated": "updated", "t_reported": "reported", "t_closed": "closed",
@@ -424,7 +425,7 @@ LABELS = {
         "succ_list_unreadable": "Cannot read {name} list", "succ_list_invalid": "Invalid {name} JSON", "succ_list_missing": "Missing {name} list",
         "succ_files_hint": "Files and commands are in facts.json; user rules are marked with ★ in words.md.", "succ_tasks": "Open tasks and done when",
         "succ_freeze_head": "Frozen head", "succ_archive_block_replaced": "still awaiting handover follow-up",
-        "succ_missing_transcript": "missing transcript: {path}", "succ_unreadable_transcript": "unreadable transcript: {path}", "succ_no_transcript": "no transcript found",
+        "succ_missing_transcript": "missing transcript: {path}", "succ_unreadable_transcript": "unreadable transcript: {path}", "succ_no_transcript": "no transcript found in {dirs}; pass --config-dir <DIR>",
         "succ_git_missing": "git head, dirty files and unpushed commits unavailable", "succ_timestamp_missing": "some transcript entries have no timestamp; stint filtering is partial",
         "succ_tests_void": "screening check, void",
         "succ_seat_card": "New lead: {sid} (https://claude.ai/code/{sid})\nScreen: {screen}; quiz: {score}/{total}\nThreads awaiting new lead acknowledgement: {threads}; pending requests: {requests}; questions awaiting the user: {questions}",
@@ -500,6 +501,7 @@ LABELS = {
         "requests": "你提的事（未关闭）", "unreported": "已交付、还没回报给用户",
         "req_open": "待办", "req_held": "等你的材料", "req_dispatched": "已派", "req_delivered": "已交付（待回报！）",
         "req_reported": "已回报", "req_closed": "已关闭", "req_proposed": "已提议（等你同意）",
+        "req_result_changed": "结果已变，待重新交付", "gpt_model_line": "GPT 模型：{model}",
         "req_dropped": "已放弃", "req_waiting_user": "等你定", "req_wont": "不做（附理由）", "req_landed": "已落地（附证据）", "req_remark": "备注", "remark_heading": "备注（不派）", "default_heading": "按默认做的决定", "promise_heading": "未完成的承诺", "default_prefix": "按默认做：", "can_change": "（可改）", "rcpt_remark": "记为备注 {r}，不派", "rcpt_given": "记为 {r}，交给 {who} 线程", "rcpt_open": "记为 {r}，待派", "default_undoable": "只有能撤回的事才能按默认做；不可撤回的要等用户（能撤回时加 --undoable）", "followup": "回访",
         "no_threads": "（还没有线程）",
         "t_created": "创建", "t_updated": "更新", "t_reported": "回报", "t_closed": "关闭",
@@ -762,7 +764,7 @@ LABELS = {
         "succ_list_unreadable": "无法读取{name}清单", "succ_list_invalid": "{name} JSON 无效", "succ_list_missing": "缺少{name}清单",
         "succ_files_hint": "当前文件与命令见 facts.json；用户规则句见 words.md 的 ★ 编号。", "succ_tasks": "未完成任务及 done when",
         "succ_freeze_head": "冻结 head", "succ_archive_block_replaced": "换届后续步骤尚未完成",
-        "succ_missing_transcript": "缺少对话记录：{path}", "succ_unreadable_transcript": "无法读取对话记录：{path}", "succ_no_transcript": "没有找到对话记录",
+        "succ_missing_transcript": "缺少对话记录：{path}", "succ_unreadable_transcript": "无法读取对话记录：{path}", "succ_no_transcript": "在以下目录未找到对话记录：{dirs}；可用 --config-dir <目录> 指定搜索目录",
         "succ_git_missing": "无法取得 git head、未提交改动和未推送提交", "succ_timestamp_missing": "部分对话记录没有时间戳；会话时间筛选不完整",
         "succ_tests_void": "体检内容，作废",
         "succ_seat_card": "新 lead：{sid}（https://claude.ai/code/{sid}）\n体检：{screen}；测验：{score}/{total}\n还有 {threads} 个线程待认新 lead；待办请求：{requests}；等用户回答：{questions}",
@@ -1060,6 +1062,13 @@ def unreported(st):
     return {r: q for r, q in st.get("requests", {}).items() if q["status"] == "delivered"}
 
 
+def result_changed(st, q):
+    """A gated reported result stays reported while its linked work is redone, with a visible redelivery notice."""
+    tasks = live_tasks(st, q)
+    return bool(q.get("gate") and q.get("status") == "reported" and tasks and
+                not all(st.get("tasks", {}).get(t, {}).get("status") == "done" for t in tasks))
+
+
 def render_requests(st, chain=False):
     reqs = [(r, q) for r, q in st.get("requests", {}).items() if q["status"] not in REQ_END and q["status"] != "remark"]
     if not reqs:
@@ -1073,6 +1082,8 @@ def render_requests(st, chain=False):
         extra = " · ".join(x for x in extra if x)
         if extra:
             line += f" — {extra}"
+        if result_changed(st, q):
+            line += f" — {lab(st, 'req_result_changed')}"
         if q.get("followup"):
             line += f" — {lab(st, 'followup')}: {_md(q['followup'])}"
         out.append(line)
@@ -1230,6 +1241,8 @@ def load(d):
 def log(d, event):
     with open(d / "log.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps({"t": now(), **event}, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def _with_save_lock(d, fn):
@@ -1298,6 +1311,12 @@ def _save_locked(d, st, event=None):
         sys.exit(lab(st, "lead_relead_locked") if disk_lock.get("relead") else lab(st, "lead_write_locked", ho=disk_lock.get("ho")))
     if disk.get("rev", 0) != st.get("_rev_loaded", 0):
         sys.exit(lab(st, "ledger_changed"))
+    log_events = _read_log(d)
+    log_rev = log_events[-1].get("rev") if log_events else 0
+    state_rev = disk.get("rev", 0)
+    if isinstance(log_rev, int) and not isinstance(log_rev, bool) and log_rev > state_rev:
+        print(f"log.jsonl is ahead of state.json (log rev {log_rev} > state rev {state_rev}); run `TW rebuild --apply`",
+              file=sys.stderr)
     if lock and not (event or {}).get("ev", "").startswith("succ-"):
         sys.exit(lab(st, "lead_relead_locked") if lock.get("relead") else lab(st, "lead_write_locked", ho=lock.get("ho")))
     _radar_update(st)
@@ -1306,24 +1325,42 @@ def _save_locked(d, st, event=None):
     touched = st.pop("_touched", [])
     moved_reqs = st.pop("_moved_reqs", [])
     loaded_rev = st.pop("_rev_loaded", 0)
-    st["rev"] = loaded_rev + 1
+    prior_event = log_events[-1] if log_events else {}
+    retry_rev = loaded_rev + 1
+    stamp_keys = ("t", "at", "time", "timestamp")
+    event_payload = {k: v for k, v in event.items() if k not in stamp_keys} if event else None
+    prior_payload = ({k: prior_event[k] for k in event_payload if k in prior_event}
+                     if event_payload is not None else None)
+    same_retried_event = (event is not None and log_rev == retry_rev and prior_payload == event_payload)
+    st["rev"] = loaded_rev if not event else retry_rev if same_retried_event else max(loaded_rev, log_rev or 0) + 1
     st["updated"] = now()
     tmp = d / f"state.json.tmp-{os.getpid()}"
     tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(d / "state.json")
-    st["_rev_loaded"] = st["rev"]
-    (d / "BOARD.md").write_text(render_board(st), encoding="utf-8")
+    log_event = None
     if event:
         more = {n: st["threads"][n] for n in touched if n in st["threads"] and n != event.get("thread")}
         snap = snapshots(st, event)
         if moved_reqs:
             snap["snap_reqs"] = {**snap.get("snap_reqs", {}),
                                  **{r: st["requests"][r] for r in moved_reqs if r in st.get("requests", {})}}
-        log(d, {**event, **snap, **({"snap_more_threads": more} if more else {})})
+        log_event = {**event, **snap, **({"snap_more_threads": more} if more else {}), "rev": st["rev"]}
+        if not same_retried_event:
+            log(d, log_event)
     for area in root_pending:
         log(d, {"ev": "root-pending", "area": area})
     for area in root_reraised:
         log(d, {"ev": "root-reraise", "area": area})
+    if log_event and os.environ.get("TW_TEST_SAVE_CRASH") == "before-state-replace": os._exit(86)
+    tmp.replace(d / "state.json")
+    st["_rev_loaded"] = st["rev"]
+    if log_event and os.environ.get("TW_TEST_SAVE_CRASH") == "after-state-replace": os._exit(87)
+    (d / "BOARD.md").write_text(render_board(st), encoding="utf-8")
+    for stale in d.glob("state.json.tmp-*"):
+        if re.fullmatch(r"state\.json\.tmp-\d+", stale.name) and (stale.is_file() or stale.is_symlink()):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
 
 
 def snapshots(st, ev):
@@ -2063,9 +2100,6 @@ def cmd_lead(a):
                  lab(st, "lead_write_locked", ho=st["write_lock"].get("ho")))
     if a.session is not None:
         a.session = a.session.strip()
-    if a.session and old and old != a.session and not a.force:
-        sys.exit(f"project {st['project']} already has lead {old}. One lead per project: check that session with "
-                 "get_session; if it is archived or the user says to take over, re-run with --force.")
     if a.session and old != a.session and _screen_failed(st, a.session):
         sys.exit(lab(st, "critical_screen_block"))
     if a.session and a.force and not getattr(a, "relead", False) and any(x.get("session") == a.session for x in st.get("lead_trials") or []):
@@ -2074,11 +2108,12 @@ def cmd_lead(a):
         latest = next((x for x in reversed(list(st.get("screens", {}).values())) if x.get("seat") == "lead" and x.get("session_id") == a.session), None)
         if latest and latest.get("verdict") != "pass":
             print(lab(st, "screen_gate_warning", seat="lead", verdict=_verdict_word(st, latest.get("verdict"))), file=sys.stderr)
-    if a.session is not None:
-        a.session = a.session.strip()
     if a.session and not_a_session(a.session, st):
         sys.exit(not_a_session(a.session, st).split(": a thread is")[0] + ": the lead is the user's own Remote "
                  "Control session; pass its id from get_session")
+    if a.session and old and old != a.session and not a.force:
+        sys.exit(f"project {st['project']} already has lead {old}. One lead per project: check that session with "
+                 "get_session; if it is archived or the user says to take over, re-run with --force.")
     if a.session and any(c.get("session_id")==a.session for h in st.get("handovers",{}).values() if _ho_open(h) for c in h.get("candidates",[])):
         sys.exit(lab(st,"succ_candidate_busy"))
     if a.session:
@@ -2125,11 +2160,20 @@ def cmd_lead(a):
 
 def _after(a, b):
     """ISO time a is later than b (offsets compared properly; missing a = never)."""
-    from datetime import datetime
+    left, right = _utc_timestamp(a), _utc_timestamp(b)
+    if left is None or (b and right is None):
+        return bool(a) and (not b or (a or "") > (b or ""))
+    return right is None or left > right
+
+
+def _utc_timestamp(value):
+    """Convert an ISO timestamp to UTC epoch seconds; a missing timezone means UTC."""
+    from datetime import datetime, timezone
     try:
-        return bool(a) and (not b or datetime.fromisoformat(a) > datetime.fromisoformat(b))
-    except (TypeError, ValueError):
-        return (a or "") > (b or "")
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+    except (AttributeError, TypeError, ValueError, OSError, OverflowError):
+        return None
 
 
 def _close_archived(st, sid, me, ts):
@@ -2211,7 +2255,7 @@ def _ho_open(rec):
     return rec.get("phase") not in ("aborted", "seated", "retired")
 
 
-SUBAGENT_ID_RE = r"(?i)a[0-9a-f]{8,}|(agent|subagent|task|toolu|reviewer|helper)([-_:].*|\d*)"
+SUBAGENT_ID_RE = r"(?i)a[0-9a-f]{8,}|(agent|subagent|task|toolu|reviewer|helper)([ :._-].*|\d*)|general_purpose|toolu\d+[A-Z0-9]+"
 
 
 def not_a_session(sid, st=None):
@@ -2220,7 +2264,7 @@ def not_a_session(sid, st=None):
     sid = (sid or "").strip()
     names = {"lead", "all", "user", "explore", "plan", "general-purpose", "worker", "explorer"} | {n.lower() for n in ((st or {}).get("threads") or {})}
     if sid and (re.fullmatch(SUBAGENT_ID_RE, sid) or sid.lower() in names):
-        what = "is a thread or role name" if sid.lower() in names else "looks like a subagent id"
+        what = "is a thread or role name" if sid.lower() in names else "looks like a subagent id or is not a recognised session id"
         return (f"{sid} {what}, not a session id: a thread is a remote session made with create_session (its id "
                 "starts with session_). Subagents are helpers inside one session and never hold a seat. If "
                 "create_session is not available, stop and tell the user; do not fall back to a subagent")
@@ -2272,13 +2316,17 @@ def _branch_problem(st, name, b):
             return f"--branch {b}: clashes with {n}'s branch {o['branch']}; one branch per thread"
     return None
 
-
 def cmd_thread(a):
     d = need(find_dir())
     st = load(d)
     name = a.name
+    if a.action == "set" and a.kind is not None and a.session is not None:
+        sys.exit("thread set accepts only one of --session and --kind at a time")
     if a.action != "add" and not (a.action == "set" and name == "all" and a.roster_sent) and name not in st["threads"]:
         sys.exit(f"unknown thread {name}; known: {', '.join(st['threads']) or '-'}")
+    if a.action == "reseat" and any(hid != getattr(a, "handover", None) and x.get("seat") == name and _ho_open(x) for hid, x in st.get("handovers", {}).items()):
+        sys.exit(lab(st, "seat_handover_open_hint"))
+
     if a.session is not None:
         a.session = a.session.strip()
     if getattr(a,"handover",None) is not None:
@@ -2326,10 +2374,16 @@ def cmd_thread(a):
             sys.exit("--kind and --cloud-reason change only while the thread is planned and has never had a session "
                      "(the user editing the plan); after that its kind is fixed: add a new thread")
         kind = a.kind or t0["kind"]
+        if kind == "cloud" and t0.get("kind") == "rc" and t0.get("worktree") and Path(t0["worktree"]).exists():
+            sys.exit(f"cannot change {name} from rc to cloud while its worktree exists: {t0['worktree']}")
         if kind == "cloud" and not (a.cloud_reason or t0.get("cloud_reason") if a.kind is None else a.cloud_reason or "").strip():
             sys.exit("a cloud thread needs --cloud-reason \"<why>\" (see thread add)")
+        if kind == "cloud" and a.cloud_reason is not None and not a.cloud_reason.strip():
+            sys.exit("a cloud thread needs a non-empty --cloud-reason")
         if kind == "rc" and a.cloud_reason is not None:
             sys.exit("--cloud-reason goes with --kind cloud; an rc thread needs no reason")
+        if kind == "rc" and t0.get("kind") == "cloud":
+            print(f"{name}: now rc; run `tw.py worktree {name}` before starting its session", file=sys.stderr)
     if a.session and a.action in ("add", "set", "reseat"):
         if a.action in ("set","reseat") and getattr(a,"handover",None) is None and any(
                 h.get("seat")==name and _ho_open(h) for h in st.get("handovers",{}).values()):
@@ -2418,8 +2472,6 @@ def cmd_thread(a):
                      "snap_threads": st["threads"]})
         print(json.dumps({"roster_version": st.get("roster_version", 0), "not_sent": roster_stale(st)}))
         return
-    if name not in st["threads"]:
-        sys.exit(f"unknown thread {name}; known: {', '.join(st['threads']) or '-'}")
     t = st["threads"][name]
     if a.waiting_for and (a.action not in ("set", "add") or (a.status or t.get("status")) != "waiting"):
         sys.exit("--waiting-for applies only to a thread in waiting status")
@@ -2430,7 +2482,7 @@ def cmd_thread(a):
     if a.kind is not None or a.cloud_reason is not None:  # planned seat, checked above: the user edited the plan
         t["kind"] = a.kind or t["kind"]
         if t["kind"] == "cloud":
-            t["cloud_reason"] = (a.cloud_reason or t.get("cloud_reason") or "").strip()
+            t["cloud_reason"] = (a.cloud_reason if a.cloud_reason is not None else t.get("cloud_reason") or "").strip()
             t.pop("worktree", None)
         else:
             t.pop("cloud_reason", None)
@@ -3077,7 +3129,7 @@ def cmd_task(a):
             "owner": a.owner,
             "deps": csv(a.deps),
             "accept": a.accept or "",
-            "touches": check_touches(a.touches),
+            "touches": check_touches(a.touches, st.get("repo", {}).get("path")),
             "topics": norm_topics(a.topics),
             **({"model": a.model.strip()} if (a.model or "").strip() else {}),
             **({"route": a.route} if a.route else {}),
@@ -3225,7 +3277,7 @@ def cmd_task(a):
             if a.primary.strip() and any(w in a.primary.lower() for w in PRIMARY_INTERNAL_WORDS):
                 print(lab(st, "primary_internal"), file=sys.stderr)
         if a.touches is not None:
-            k["touches"] = check_touches(a.touches)
+            k["touches"] = check_touches(a.touches, st.get("repo", {}).get("path"))
         if a.model is not None:
             if a.model.strip():
                 k["model"] = a.model.strip()
@@ -3464,7 +3516,7 @@ def cmd_plan(a):
         for k in st["tasks"].values():
             if k["status"] == "planned":
                 k["status"] = "approved"
-        save(d, st, {"ev": "plan-approved"})
+        save(d, st, {"ev": "plan-approved", "user_said": a.user_said.strip()})
     elif a.action == "reopen":
         st["plan_approved"] = False
         save(d, st, {"ev": "plan-reopened"})
@@ -3494,25 +3546,59 @@ _GLOB_TOK = re.compile(r"\*|\?|\[!?\]?[^\]]*\]")  # glob tokens as fnmatch reads
 def _expand_braces(p, limit=64):
     """'web/{a,b}.py' -> ['web/a.py', 'web/b.py'] (nested groups too). Past `limit` names the pattern is widened:
     the folder part from the first brace on becomes '**' (a superset across folders, so still conservative)."""
+    if p.count("{") != p.count("}"):
+        return ["**"]  # malformed syntax is uncertain; widen to avoid missing a lease collision
+
+    def group(x):
+        depth, start = 0, None
+        for i, ch in enumerate(x):
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}" and depth:
+                depth -= 1
+                if depth == 0:
+                    body = x[start + 1:i]
+                    parts, at, inner = [], 0, 0
+                    for j, c in enumerate(body):
+                        if c == "{": inner += 1
+                        elif c == "}" and inner: inner -= 1
+                        elif c == "," and not inner:
+                            parts.append(body[at:j]); at = j + 1
+                    if parts:
+                        parts.append(body[at:])
+                        return start, i + 1, parts
+                    nested = group(body)
+                    if nested:
+                        a, b, alts = nested
+                        return start + 1 + a, start + 1 + b, alts
+                    nested = group(x[i + 1:])
+                    if nested:
+                        a, b, alts = nested
+                        return i + 1 + a, i + 1 + b, alts
+                    return None
+        return None
+
     def count(x, depth=0):
-        m = re.search(r"\{([^{}]*,[^{}]*)\}", x)
-        if not m or depth > 12:
-            return 1 if not m else limit + 1
+        g = group(x)
+        if not g or depth > 12:
+            return 1 if not g else limit + 1
         n = 0
-        for alt in m.group(1).split(","):
-            n += count(x[:m.start()] + alt + x[m.end():], depth + 1)
+        for alt in g[2]:
+            n += count(x[:g[0]] + alt + x[g[1]:], depth + 1)
             if n > limit:
                 return n
         return n
     if count(p) > limit:
         head = p[:p.index("{")]
         return [head[:head.rfind("/") + 1] + "**"]
-    m = re.search(r"\{([^{}]*,[^{}]*)\}", p)
-    if not m:
+    g = group(p)
+    if not g:
         return [p]
     out = []
-    for alt in m.group(1).split(","):
-        out += _expand_braces(p[:m.start()] + alt + p[m.end():], limit)
+    for alt in g[2]:
+        out += _expand_braces(p[:g[0]] + alt + p[g[1]:], limit)
     return out
 
 
@@ -3571,7 +3657,8 @@ def _lease_forms_raw(p):
     a glob without '/' ('*.py') matches in any folder.
     Case-folded: on a case-insensitive disk Web/App.py and web/app.py are one file."""
     out = []
-    for q in _expand_braces(_norm_path(p).lower()):
+    import unicodedata
+    for q in _expand_braces(unicodedata.normalize("NFC", _norm_path(p)).casefold()):
         folder = q.endswith("/")
         segs = [x for x in q.strip("/").split("/") if x]
         if not segs:
@@ -3600,7 +3687,7 @@ def _split_touches(s):
     return [x.strip() for x in out if x.strip()]
 
 
-def check_touches(s):
+def check_touches(s, project=None):
     depth = 0
     for ch in s or "":
         depth += (ch == "{") - (ch == "}")
@@ -3609,6 +3696,28 @@ def check_touches(s):
     if depth != 0:
         sys.exit(f"--touches has unbalanced braces: {s}")
     out = _split_touches(s)
+    if project:
+        root = Path(project).resolve()
+        normalized = []
+        for x in out:
+            if Path(x).is_absolute():
+                p = Path(x).resolve()
+                try:
+                    x = p.relative_to(root).as_posix()
+                except ValueError:
+                    sys.exit(f"--touches must stay inside the project: {x}")
+            elif (root / x).resolve() == root:
+                sys.exit("--touches cannot name the project root")
+            for alt in _expand_braces(x):
+                if Path(alt).is_absolute():
+                    sys.exit(f"--touches brace alternatives must be relative to the project: {alt}")
+            if Path(x).resolve() == root:
+                sys.exit("--touches cannot name the project root")
+            normalized.append(x)
+        out = normalized
+    bad_class = [x for x in out if any("/" in m.group(0) for m in re.finditer(r"\[[^\]]*\]", x))]
+    if bad_class:
+        sys.exit(f"--touches glob character classes cannot contain '/': {', '.join(bad_class)}")
     bad = [x for x in out for y in _expand_braces(x) if _norm_path(y).startswith("../") or _norm_path(y) == ".."]
     if bad:
         sys.exit(f"--touches must stay inside the repo: {', '.join(bad)}")
@@ -3620,7 +3729,8 @@ class RealFile(str):
 
 
 def _file_segs(f):
-    return tuple(x for x in f.lower().split("/") if x)
+    import unicodedata
+    return tuple(x for x in unicodedata.normalize("NFC", f).casefold().split("/") if x)
 
 
 @functools.lru_cache(maxsize=65536)
@@ -3687,7 +3797,12 @@ def _subject_leads_with(subj, tids, rxs=None):
     rxs = rxs or [_ID_RX(t) for t in tids]
     head = re.match(r"\s*(?:\[([^\]]+)\]|\w+\(([^)]+)\)|([^\s:]+))", subj)
     lead = head and next((g for g in head.groups() if g), "")
-    return bool(lead) and (any(rx.fullmatch(lead.strip()) for rx in rxs) or lead.strip() in tids)
+    lead = (lead or "").strip()
+    candidates = {x.casefold() for x in tids}
+    parsed = [v.casefold() for v in re.split(r"\s*,\s*", lead.strip("[] "))]
+    bracket = bool(re.match(r"\s*\[", subj))
+    return bool(lead) and (any(rx.fullmatch(lead) for rx in rxs) or lead in candidates or
+                           (bracket and len(parsed) > 1 and bool(candidates.intersection(parsed))))
 
 
 _TOKEN_RX = re.compile(r"[A-Za-z0-9_]+(?:[.-][0-9A-Za-z]+)*")  # one id-like word, as _ID_RX delimits task ids
@@ -3752,13 +3867,24 @@ def _landed_files(git, base, br, files, tids):
         fork = git("merge-base", base, br).stdout.strip()
         if fork:
             rxs = [_ID_RX(t) for t in tids]
-            log = git("log", "-z", "--relative", "--no-renames", "--name-only", "--format=%x01%H %s",
+            log = git("log", "-z", "--relative", "--no-renames", "--name-only",
+                      "--format=%x01%H %s%x02%B%x03",
                       f"{fork}..{base}").stdout
-            for chunk in log.split("\x01")[1:]:
-                subj, _, names = chunk.partition("\x00")
-                sha, _, subj = subj.partition(" ")
-                if _subject_leads_with(subj, tids, rxs):
-                    todo = (set(files) - same) & set(_z(names[1:] if names.startswith("\n") else names))
+            chunks = log.split("\x01")[1:]
+            parsed = []
+            for chunk in chunks:
+                header, _, content = chunk.partition("\x02")
+                body, _, names = content.partition("\x03")
+                sha, _, subj = header.partition(" ")
+                parsed.append((sha, subj, body, names))
+            for chunk_index, chunk in enumerate(chunks):
+                sha, subj, body, names = parsed[chunk_index]
+                later = "\n".join(row[2] for row in parsed[:chunk_index])
+                # GitHub's `Reverts owner/repo#N` form has no commit SHA and is intentionally not inferred here.
+                if _subject_leads_with(subj, tids, rxs) and not re.search(
+                        rf"(?im)^This reverts commit {re.escape(sha[:7])}[0-9a-f]{{0,33}}\b.*$", later):
+                    names = names[2:] if names.startswith("\x00\n") else names[1:] if names.startswith("\n") else names
+                    todo = (set(files) - same) & set(_z(names))
                     if not todo:
                         continue
                     at_c, at_br = _blobs_at(git, sha, todo), _blobs_at(git, br, todo)
@@ -3791,13 +3917,16 @@ def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None, task=Non
     Files changed on the owner's branch vs base ([] when not a git repo or no branch). Problems go to warnings.
     unmerged_only: leave out files that have already landed on the base (done or recalled tasks)."""
     # the current owner's branch, and every earlier owner's: work a handed-over task left unmerged there still counts
-    seats = [{**st["threads"][n], "branch": branch_of(st, n)}
+    seats = [{**st["threads"][n], "name": n, "branch": branch_of(st, n)}
              for n in dict.fromkeys([k.get("owner") or ""] + list(k.get("past_owners") or [])) if n in st["threads"]]
     repo = st.get("repo", {}).get("path")
     if not seats or not repo:
         return []
     git = _git_cached(repo)
-    if git("rev-parse", "--git-dir").returncode != 0:
+    git_dir = git("rev-parse", "--git-dir")
+    if git_dir.returncode != 0:
+        if warnings is not None and git_dir.returncode == 127:
+            warnings.append("git is not available: real branch diffs are not checked")
         return []
     base = _base_ref(st, git)
     if base is None:
@@ -3805,7 +3934,7 @@ def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None, task=Non
             warnings.append(f"base branch {st.get('repo', {}).get('base') or 'main'} not found: real branch diffs "
                             "are not checked (fix repo.base)")
         return []
-    files, refs, past = [], [], set()
+    files, refs, past, current_owner_refs = [], [], set(), set()
     for owner in seats:
         two = [b for b in (owner["branch"], f"origin/{owner['branch']}")
                if git("rev-parse", "--verify", "--quiet", b).returncode == 0]
@@ -3816,9 +3945,14 @@ def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None, task=Non
                 two = [two[0]]
             # diverged (rebased, amended, force-pushed, or two sessions each holding work): both copies hold, so
             # work on either side is never dropped; a stale copy stops once it lands, is deleted or pruned
-        if task and owner is not st["threads"].get(k.get("owner") or "") and not set(two) & set(refs):
+        if task and owner["name"] != k.get("owner") and not set(two) & set(refs):
             past |= set(two)  # the current owner comes first, so a branch it shares is never filtered
+        elif task and owner["name"] == k.get("owner"):
+            current_owner_refs |= set(two)
         refs += [r for r in two if r not in refs]
+    if task:
+        lease_ids = {tid for tid, item in st.get("tasks", {}).items()
+                     if item.get("status") in LEASE_ACTIVE or item.get("status") in ("done", "recalled")}
     for br in refs:
         r = git("diff", "-z", "--relative", "--name-only", "--no-renames", f"{base}...{br}")  # a rename holds old and new
         if r.returncode != 0 and warnings is not None:
@@ -3826,6 +3960,9 @@ def branch_changes(st, k, warnings=None, unmerged_only=False, tid=None, task=Non
         got = [RealFile(f) for f in _z(r.stdout)]
         if br in past:
             theirs = _other_tasks_only(git, base, br, task, st["tasks"], got)
+            got = [f for f in got if f not in theirs]
+        elif br in current_owner_refs:
+            theirs = _other_tasks_only(git, base, br, task, lease_ids, got)
             got = [f for f in got if f not in theirs]
         if unmerged_only and got:
             gone = _landed_files(git, base, br, got, tid)
@@ -4159,6 +4296,8 @@ def cmd_ready(a):
                 "nested_child_sessions": nested_sessions,
                 "nested_session_metadata_gaps": nested_gaps,
                 "unreported_requests": {r: q["text"] for r, q in unreported(st).items()},
+                "result_changed_requests": {r: lab(st, "req_result_changed")
+                                            for r, q in st.get("requests", {}).items() if result_changed(st, q)},
                 "rc_capacity_note": "a Remote Control server holds 32 sessions by default, shared by every project and lead on it; cloud threads do not count",
                 **({"permission_warning": permission_warning(st)} if permission_warning(st) else {}),
             }
@@ -4457,8 +4596,17 @@ def cmd_ask(a):
             sys.exit('usage: ask "<question>" --from <thread>   or   ask --answer N ["<answer>"]')
         nt = (a.need_thread or "").strip().lower() or None
         if nt:
+            frm = (a.frm or "").strip().lower()
+            if frm != "lead" and frm not in st["threads"]:
+                sys.exit(f"ask --need-thread: unknown --from thread {a.frm!r}")
+            if frm != "lead" and st["threads"][frm].get("status") == "archived":
+                sys.exit(f"ask --need-thread: --from thread {frm} is archived")
+            if not re.fullmatch(NAME_RE, nt):
+                sys.exit("ask --need-thread: thread name must be lowercase letters/digits/hyphen, max 24 chars")
+            a.frm = frm
             for i, q in enumerate(st["questions"], 1):
-                if q.get("need_thread") == nt and q.get("from") == a.frm:
+                if q.get("need_thread") == nt and (q.get("from") or "").strip().lower() == a.frm \
+                        and (not getattr(a, "again", False) or not q.get("answered")):
                     sys.exit(f"{a.frm}'s request for a {nt} thread is already question {i}"
                              + (" (answered)" if q.get("answered") else "") + ": skip it (a STATUS line repeats "
                              "until the thread sees your ANSWER)")
@@ -4471,6 +4619,13 @@ def cmd_ask(a):
                 f"{decision_source_label(st, h['source'])}{lab(st, 'decided_source_sep')}{h['text']}" for h in possible[:3])),
                   file=sys.stderr)
         check_never_raise(d, a.text, getattr(a, "override", None))
+        if getattr(a, "again", False) and not nt:
+            sys.exit("ask --again requires --need-thread")
+        if nt and getattr(a, "again", False):
+            prior = any(q.get("need_thread") == nt and (q.get("from") or "").strip().lower() == a.frm
+                        and q.get("answered") for q in st["questions"])
+            if not prior:
+                sys.exit("ask --again applies only after the prior request was answered")
         st["questions"].append(
             {"from": a.frm, "text": a.text, "t": now(), "answered": False,
              **({"kind": "proposal"} if a.proposal else {}),
@@ -4757,7 +4912,7 @@ def cmd_sprint(a):
     doing=[f"{i} {f['name']}" for i,f in st.get("features",{}).items() if f.get("status")=="building"]+[f"{i} {x.get('title','')}" for i,x in st.get("tasks",{}).items() if x.get("status") in ("dispatched","working","blocked","review")]
     missed=[f"{i} {f['name']}" for i,f in st.get("features",{}).items() if f.get("status")=="planned" and f.get("phase")==ph]
     data={"in_round":landed,"still_working":doing,"missed":missed}
-    lines=["| "+" | ".join(lab(st,k) for k in data)+" |","| --- | --- | --- |","| "+" | ".join("<br>".join(v) or "-" for v in data.values())+" |"]
+    lines=["| "+" | ".join(lab(st,k) for k in data)+" |","| --- | --- | --- |","| "+" | ".join("<br>".join(_cell(x) for x in v) or "-" for v in data.values())+" |"]
     _json_or_text(a,data,lines)
 
 
@@ -5068,7 +5223,7 @@ def _wlen(text):
 USER_MSG_TRACES = (  # I2: what a message to the user should not carry
     ("commit-id", r"(?i)(?<![0-9a-z])(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-z])"),
     ("command-output", r"(?m)^\$ \S.*|Traceback \(most recent call last\)|^```(?:shell|bash)\b"),
-    ("local-path", r"/(?:Users|home)/\S*|\b[A-Za-z]:\\\S*"),
+    ("local-path", r"(?:^|(?<=[\s\"'(=]))(?:~/(?![=])\S*|/(?:Users|home|tmp|private|var/folders)/\S*|[A-Za-z]:\\\S*)"),
 )
 
 
@@ -5380,6 +5535,9 @@ def cmd_task_msg(a):
              *([f"Brief: {k['brief']}"] if k.get("brief") and k.get("brief") != k.get("title") else []), f"Done when: {k.get('accept') or '-'}"]
     if root_line: lines.append(root_line)
     route = (dispatch_model or {}).get("model") or k.get("route") or k.get("model")
+    gpt_model = st.get("prefs", {}).get("gpt_model")
+    if route == "gpt" and gpt_model:
+        lines.append(lab(st, "gpt_model_line", model=gpt_model))
     if route: lines.append(f"Route/Model: {route}" + (f" — {dispatch_model['reason']}" if dispatch_model and dispatch_model.get("reason") else ""))
     lines.append(f"Dispatch: v{v}")
     lines.extend(lab(st, "standing", text=x) for x in st.get("standing", []))
@@ -7392,7 +7550,15 @@ def cmd_quota(a):
         graded.append(((QUOTA_RANK.index(lv), tot or -1, sc or -1), i, r, lv, fl))
     _, pick, result, level, flags = max(graded, key=lambda g: (g[0], -g[1]))
     result.setdefault("notes", [])
+    result["notes"] = [f"config #{pick + 1}: {note}" for note in result["notes"]]
+    flags = sorted({flag for row in graded for flag in row[4]})
+    for _, i, other, _, _ in graded:
+        if i != pick:
+            result["notes"].extend(f"config #{i + 1}: {note}" for note in (other.get("notes") or []))
     result["notes"] += notes
+    for key, default in QUOTA_DEFAULTS.items():
+        if key in prefs and quota_reader.num(prefs.get(key)) is None:
+            result["notes"].append(f"invalid quota threshold {key}; using default {default}")
     if sum(g[3] != "unknown" for g in graded) > 1:
         result["notes"].append(f"most severe of {len(dirs)} config folders: #{pick + 1} ({dirs[pick]})")
     signature = {"tier": level, "flags": sorted(x for x in flags if x != "5h-tight")}  # 5h-tight: the lead's own
@@ -7687,7 +7853,7 @@ def opening_data(d, st):
     zh = _zh(st)
     for key, (question, scale, costs, _) in OPENING.items():
         if zh: question, scale, costs = OPENING_ZH[key]
-        prior = max((x for x in answers if x[1] == key), default=None)
+        prior = max((x for x in answers if x[1] == key), key=lambda x: (str(x[0]), str(x[2]), str(x[3])), default=None)
         rows.append({"key": key, "question": question, "scale": [{"step": s, "cost": c} for s, c in zip(scale, costs)],
                      "current": st.get("prefs", {}).get(key) or None,
                      "last": ({"value": prior[2], "text": prior[3], "at": prior[0]} if prior else None),
@@ -7840,9 +8006,11 @@ def cmd_selfcheck(a):
     lead_screen = next((x for x in reversed(list(st.get("screens", {}).values())) if x.get("seat") == "lead"), None)
     if lead_screen:
         items.append(item("screening", lead_screen.get("verdict") == "pass",
-                          _screen_label(st, "lead") or _verdict_word(st, "unscored"), "TW screen list"))
+                          _screen_label(st, "lead") or _verdict_word(st, "unscored"),
+                          f"TW screen ask lead --session {lead.get('session_id') or '<id>'}"))
     items.append(item("model", a.model == a.served_model if a.model and a.served_model else None,
                       f"served {a.served_model}, configured {a.model} (fallback)" if a.model and a.served_model and a.model != a.served_model else ""))
+    items.append(item("gpt_model", None, str(st.get("prefs", {}).get("gpt_model") or "not recorded")))
     items.append(item("effort", a.effort == a.want_effort if a.want_effort else None,
                       f"effort {a.effort}, wanted {a.want_effort}" if a.want_effort and a.effort != a.want_effort else ""))
     folder = Path(st.get("repo", {}).get("path") or (d.parent if d else "."))
@@ -8514,7 +8682,7 @@ _GUARD_ENCODINGS = ("utf-8", "utf-16-le", "utf-16-be", "gb18030", "big5", "shift
 
 
 def _needles(terms):
-    """Byte patterns for every term in every encoding a file may use, matched against data.lower()."""
+    """Escaped byte-regex alternatives for all supported encodings; phrase separators are matched together."""
     import unicodedata
     out = set()
     for t in terms:
@@ -8522,13 +8690,30 @@ def _needles(terms):
         for v in {x for f in forms for x in (f, f.lower(), f.upper(), f.title())}:
             for enc in _GUARD_ENCODINGS:
                 try:
-                    out.add(v.encode(enc).lower())
+                    parts = re.split(r"([ _-]+)", v)
+                    if len(parts) == 1:
+                        out.add(re.escape(v.encode(enc).lower()))
+                    elif all(parts[i] for i in range(0, len(parts), 2)):
+                        sep = re.escape(" ".encode(enc).lower()) + b"|" + re.escape("_".encode(enc).lower()) + b"|" + re.escape("-".encode(enc).lower())
+                        sep = b"(?:" + sep + b")+"
+                        out.add(b"".join(sep if i % 2 else re.escape(part.encode(enc).lower())
+                                          for i, part in enumerate(parts)))
+                        words = [parts[i] for i in range(0, len(parts), 2)]
+                        if all(len(re.findall(r"[A-Za-z]", word)) >= 4 for word in words):
+                            out.add(b"".join(re.escape(word.encode(enc).lower()) for word in words))
                 except (UnicodeEncodeError, LookupError):
                     continue
     return sorted((n for n in out if n), key=len)
 
 
-def _bytes_has(data, needles, depth=0):
+GUARD_UNIT_CAP = 256 * 1024 * 1024
+
+
+def _guard_unchecked(label, reason):
+    print(f"guard: following {label or 'file'} was not fully checked ({reason})", file=sys.stderr)
+
+
+def _bytes_has(data, needles, depth=0, label=""):
     """True if raw bytes hold any needle (case-insensitive for ASCII; other cases via the variants above).
     Zip-based files (docx, xlsx, pptx, odt, jar, zip) and gzip are opened and their contents checked too."""
     if isinstance(needles, str):
@@ -8536,44 +8721,105 @@ def _bytes_has(data, needles, depth=0):
     low = data.lower()
     if _hit(needles, low):
         return True
-    for alt in _decoded_views(data):  # \uXXXX, RTF \uN, &#N; / &amp;, %XX, XML split by tags
+    for alt in _decoded_views(data):  # escaped text, entities, percent encoding, and XML/HTML split tags
         if _hit(needles, alt):
             return True
+    compressed = data[:4] == b"PK\x03\x04" or data[:2] == b"\x1f\x8b" or data[:3] == b"BZh" or data[:6] == b"\xfd7zXZ\x00"
     if depth >= 2:
+        if compressed: _guard_unchecked(label or "archive", "nested deeper than 2 levels")
         return False
     import io
     if data[:5] == b"%PDF-":
-        return any(_bytes_has(x, needles, depth + 1) for x in _pdf_streams(data))
-    if data[:3] == b"BZh" or data[:6] == b"\xfd7zXZ\x00":
-        import bz2
-        import lzma
-        try:
-            dec = bz2.BZ2Decompressor() if data[:3] == b"BZh" else lzma.LZMADecompressor()
-            return _bytes_has(dec.decompress(data, max_length=256 * 1024 * 1024), needles, depth + 1)  # no bomb
-        except Exception:
-            return False
+        hit = False
+        for raw, partial in _pdf_streams(data):
+            hit = _bytes_has(raw, needles, depth + 1, label) or hit
+            if partial: _guard_unchecked(label or "PDF", f"stream decompressed beyond {GUARD_UNIT_CAP // (1024 * 1024)} MB")
+        return hit
+    if data[:2] == b"\x1f\x8b" or data[:3] == b"BZh" or data[:6] == b"\xfd7zXZ\x00":
+        import bz2, lzma, zlib
+        gzip = data[:2] == b"\x1f\x8b"
+        decoder = lambda: zlib.decompressobj(16 + zlib.MAX_WBITS) if gzip else \
+            (bz2.BZ2Decompressor() if data[:3] == b"BZh" else lzma.LZMADecompressor())
+        remaining, hit = data, False
+        while remaining:
+            dec = decoder()
+            try: raw = dec.decompress(remaining, GUARD_UNIT_CAP)
+            except (OSError, EOFError, ValueError, zlib.error, lzma.LZMAError):
+                _guard_unchecked(label or "compressed file", "corrupt compressed data"); break
+            hit = _bytes_has(raw, needles, depth + 1, label) or hit
+            tail = getattr(dec, "unconsumed_tail", b"")
+            if tail or (not dec.eof and len(raw) == GUARD_UNIT_CAP):
+                _guard_unchecked(label or "compressed file", f"member decompressed beyond {GUARD_UNIT_CAP // (1024 * 1024)} MB")
+                while not dec.eof:
+                    try: dec.decompress(dec.unconsumed_tail if gzip else b"", GUARD_UNIT_CAP)
+                    except (OSError, EOFError, ValueError, zlib.error, lzma.LZMAError): break
+                    if not gzip and dec.needs_input: break
+                if not dec.eof: break
+            elif not dec.eof:
+                _guard_unchecked(label or "compressed file", "truncated compressed member"); break
+            remaining = dec.unused_data
+        return hit
     if data[:4] == b"PK\x03\x04":
         import zipfile
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as z:
-                for info in z.infolist()[:2000]:
-                    if _bytes_has(info.filename.encode("utf-8", "replace"), needles, depth + 1):
+                infos = z.infolist()
+                if len(infos) > 2000:
+                    _guard_unchecked(label or "archive", "over 2000 entries")
+                for info in infos[:2000]:
+                    if _bytes_has(info.filename.encode("utf-8", "replace"), needles, depth + 1, label):
                         return True
-                    if info.file_size <= 64 * 1024 * 1024 and _bytes_has(z.read(info), needles, depth + 1):
+                    member_label = f"{label}/{info.filename}".strip("/")
+                    with z.open(info) as member:
+                        raw = member.read(GUARD_UNIT_CAP); partial = len(raw) == GUARD_UNIT_CAP and member.read(1) != b""
+                    if partial: _guard_unchecked(member_label, f"entry decompressed beyond {GUARD_UNIT_CAP // (1024 * 1024)} MB")
+                    if _bytes_has(raw, needles, depth + 1, member_label):
                         return True
         except Exception:
-            return False
-    elif data[:2] == b"\x1f\x8b":
-        import gzip
-        try:
-            return _bytes_has(gzip.decompress(data)[:256 * 1024 * 1024], needles, depth + 1)
-        except Exception:
+            _guard_unchecked(label or "archive", "corrupt zip")
             return False
     return False
 
 
 def _hit(needles, low):
-    return needles(low) if callable(needles) else any(n in low for n in needles)
+    if callable(needles): return needles(low)
+    if not needles: return False
+    return _compiled_needles(tuple(needles)).search(low) is not None
+
+
+@functools.lru_cache(maxsize=16)
+def _compiled_needles(needles):
+    """Compile the private-word alternatives once per list; a regex scan avoids N full substring scans per file."""
+    import re as _re
+    literal, other = [], []
+    special = b"\\. ^$*+?{}[]()|"
+    for pattern in needles:
+        if b"(?:" in pattern:
+            other.append(pattern); continue
+        value, i = bytearray(), 0
+        while i < len(pattern):
+            if pattern[i] == 92 and i + 1 < len(pattern) and pattern[i + 1] in special:
+                i += 1
+            elif pattern[i] in special:
+                break
+            value.append(pattern[i]); i += 1
+        else:
+            literal.append(bytes(value)); continue
+        other.append(pattern)
+    if len(literal) > 128:
+        trie = {}
+        for value in literal:
+            node = trie
+            for byte in value: node = node.setdefault(byte, {})
+            node[None] = {}
+        def emit(node):
+            choices = [b""] if None in node else []
+            choices += [(_re.escape(bytes((byte,))) + emit(child)) for byte, child in node.items() if byte is not None]
+            return choices[0] if len(choices) == 1 else b"(?:" + b"|".join(choices) + b")"
+        other.append(emit(trie))
+    else:
+        other.extend(_re.escape(value) for value in literal)
+    return _re.compile(b"(?:" + b"|".join(other) + b")")
 
 
 class HashedList:
@@ -8674,8 +8920,8 @@ def g(*a):  # any git error fails closed: a wrong base or no repo must never pri
 g("rev-parse", "--verify", "--quiet", base + "^{commit}")
 os.chdir(g("rev-parse", "--show-toplevel").decode("utf-8", "replace").strip())  # from a subfolder too: every file
 bad = []
-if hit(g("log", "-p", "-m", "--text", "--format=%an %ae %cn %ce %B", base + "..HEAD")): bad.append("commits")
-if hit(g("log", "--name-only", "--format=", base + "..HEAD")): bad.append("a file name in the commits")
+if hit(g("-c", "log.showRoot=true", "log", "--diff-merges=separate", "-p", "-m", "--text", "--format=%an %ae %cn %ce %B", base + "..HEAD")): bad.append("commits")
+if hit(g("-c", "log.showRoot=true", "log", "--diff-merges=separate", "--name-only", "--format=", base + "..HEAD")): bad.append("a file name in the commits")
 if hit(g("rev-parse", "--abbrev-ref", "HEAD")): bad.append("the branch name")
 for n in [x for x in g("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0") if x]:
     if not os.path.isfile(n):
@@ -8714,15 +8960,21 @@ def _decoded_views(data):
             c = int(m.group(1)) % 65536
             return "" if 0xD800 <= c <= 0xDFFF else chr(c)
         out.append(re.sub(r"\\u(-?\d{1,5}) ?(?:\\'[0-9a-fA-F]{2}|\?)?", rtf, t))
+    if re.search(r"\\x[0-9a-fA-F]{2}", t):
+        out.append(re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), t))
     if "&" in t and ";" in t:
         import html
         out.append(html.unescape(t))
     if re.search(r"%[0-9a-fA-F]{2}", t):
         from urllib.parse import unquote
         out.append(unquote(t, errors="replace"))
-    if "</" in t or "/>" in t:
+        if re.search(r"%25[0-9a-fA-F]{2}", t, re.I):
+            out.append(unquote(unquote(t, errors="replace"), errors="replace"))
+    if "</" in t or "/>" in t or re.search(r"<[^<>]{1,2000}>", t):
         import html
-        out.append(html.unescape(re.sub(r"<[^<>]{0,2000}>", "", t)))
+        stripped = re.sub(r"<[^<>]{0,2000}>", "", t)
+        compact = re.sub(r">\s+<", "><", t)
+        out.append(html.unescape(stripped + "\n" + re.sub(r"<[^<>]{0,2000}>", "", compact)))
     return [v.lower().encode("utf-8", "replace") for v in out]
 
 
@@ -8737,11 +8989,13 @@ def _pdf_streams(data):
         if end < 0:
             break
         raw = data[start:end]
+        partial = False
         try:
-            raw = zlib.decompressobj().decompress(raw, 256 * 1024 * 1024)
+            dec = zlib.decompressobj()
+            raw = dec.decompress(raw, GUARD_UNIT_CAP)
+            partial = bool(dec.unconsumed_tail)
         except zlib.error:
             pass
-        out.append(raw)
         strings = re.findall(rb"\(((?:\\.|[^\\)])*)\)", raw)
         hexes = re.findall(rb"<([0-9A-Fa-f\s]{2,})>", raw)
         joined = b"".join(re.sub(rb"\\(.)", rb"\1", x) for x in strings)
@@ -8751,7 +9005,8 @@ def _pdf_streams(data):
             except ValueError:
                 pass
         if joined:
-            out.append(joined)
+            raw += b"\n" + joined
+        out.append((raw, partial))
         if len(out) > 4000:
             break
     return out
@@ -8801,6 +9056,8 @@ def guard_scan(repo, rng, ref, terms, paths, worktree=True, refnames=(), hashed=
 
     def name_hits(where, name, show=None):
         shown = m(show if show is not None else name)
+        if any(_path_rule_hit(name, g) for g in paths):
+            shown = "(name hidden)"
         if _bytes_has(name.encode("utf-8", errors="replace"), needles):
             hits.append((f"{where} {shown}", "private word in a name"))
         for i, g in enumerate(paths, 1):
@@ -8810,12 +9067,12 @@ def guard_scan(repo, rng, ref, terms, paths, worktree=True, refnames=(), hashed=
     for rn in refnames:
         name_hits("ref name", rn)
     if rng:
-        raw = git("log", "--encoding=UTF-8", "-p", "-m", "--text", "--no-textconv", "--no-ext-diff", "--no-renames",
+        raw = git("-c", "log.showRoot=true", "log", "--diff-merges=separate", "--encoding=UTF-8", "-p", "-m", "--text", "--no-textconv", "--no-ext-diff", "--no-renames",
                   "--format=%x00commit %H%n%an <%ae>%n%cn <%ce>%n%B", *rng, text=False).stdout
         for chunk in raw.split(b"\x00commit ")[1:]:
             if _bytes_has(chunk, needles):
                 hits.append((f"history {chunk[:12].decode('ascii', 'replace')}", "private word"))
-        names = git("log", "-m", "--no-renames", "--name-only", "-z", "--format=", *rng, text=False).stdout
+        names = git("-c", "log.showRoot=true", "log", "--diff-merges=separate", "-m", "--no-renames", "--name-only", "-z", "--format=", *rng, text=False).stdout
         for n in {x.decode("utf-8", errors="replace").strip("\n") for x in names.split(b"\0")}:
             if n:
                 name_hits("history path", n)
@@ -8833,7 +9090,7 @@ def guard_scan(repo, rng, ref, terms, paths, worktree=True, refnames=(), hashed=
             size = int(head[2])
             data = out[nl + 1:nl + 1 + size]
             pos = nl + 1 + size + 1
-            if _bytes_has(data, needles):
+            if _bytes_has(data, needles, label=pth):
                 hits.append((f"{where}{m(pth)}", "private word"))
 
     def scan_tree(tree, label):
@@ -8898,7 +9155,7 @@ def guard_scan(repo, rng, ref, terms, paths, worktree=True, refnames=(), hashed=
                 data = os.readlink(fp).encode("utf-8", "replace") if fp.is_symlink() else fp.read_bytes()
             except OSError:
                 continue
-            if _bytes_has(data, needles):
+            if _bytes_has(data, needles, label=n):
                 hits.append((f"worktree {m(n)}", "private word"))
     return list(dict.fromkeys(hits))
 
@@ -8909,6 +9166,9 @@ def cmd_guard(a):
         terms, _, found = load_private(d, a.private)
         if not found:
             sys.exit(f"guard: no private list {d / 'PRIVATE.md'}")
+        missing = [str(Path(x).expanduser()) for x in (a.private or []) if not Path(x).expanduser().exists()]
+        if missing:
+            sys.exit("guard: no private list " + ", ".join(missing))
         # no home path here: it would hand the cloud thread a guessable user name, and a cloud container's home
         # differs anyway; the lead's own guard checks the home path when the branch comes back
         j = HashedList.make(terms)
@@ -8921,11 +9181,23 @@ def cmd_guard(a):
         d = need(find_dir())
         st = load(d)
         terms, paths, found = load_private(d, a.private)
+        missing = [str(Path(x).expanduser()) for x in (a.private or []) if not Path(x).expanduser().exists()]
+        if missing:
+            sys.exit("guard: no private list " + ", ".join(missing))
     terms = terms + [t for t in home_terms() if hashed is None and t.lower() not in {x.lower() for x in terms}]
     if not found:
         sys.exit(f"guard: FAILED, no private list: create {d / 'PRIVATE.md'} (tw.py init does; it may stay empty "
                  "if the user has nothing private)")
     repo = Path(a.repo or os.getcwd()).resolve()
+    if hashed is None and (repo / ".gitmodules").is_file():
+        print("guard: note: submodule contents are not scanned; inspect them separately", file=sys.stderr)
+    if hashed is None:
+        gitdir = subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-path", "info/grafts"], capture_output=True, text=True)
+        if gitdir.returncode == 0:
+            grafts = Path(gitdir.stdout.strip())
+            if not grafts.is_absolute(): grafts = repo / grafts
+            if grafts.exists():
+                sys.exit("guard: FAILED, .git/info/grafts changes the history view; remove grafts before scanning")
     genv = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
     git = lambda *x: subprocess.run(["git", "-C", str(repo), *x], capture_output=True, text=True, env=genv)
     ok = lambda r: git("rev-parse", "--verify", "--quiet", r + "^{commit}").returncode == 0
@@ -9543,8 +9815,7 @@ def _succ_bridge_locals(remote_session, config_dirs):
                     try: row=json.loads(line)
                     except ValueError: continue
                     local=row.get("session_id") if isinstance(row,dict) else None
-                    if isinstance(local,str) and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}",local.strip()):
-                        locals_found.add(local.strip())
+                    if isinstance(local, str) and local.strip(): locals_found.add(local.strip())
         except (OSError,UnicodeError): continue
     return locals_found
 
@@ -9597,7 +9868,7 @@ def _succ_transcript_rows(path, expected_session=None, config_dirs=None):
                 return []
             for row in rows:
                 owner=row.get("sessionId") or row.get("session_id")
-                if not owner or str(owner).strip() not in local_ids:
+                if owner and str(owner).strip() not in local_ids or not owner and p.stem not in local_ids:
                     return []
         else:
             if isinstance(raw_export,str):
@@ -9723,20 +9994,27 @@ def _pack_session(d, st, hid, rec, a):
         aside=base/"superseded"/now().replace(":","").replace("+","p"); aside.mkdir(parents=True,exist_ok=True)
         for p in old_files: p.rename(aside/p.name)
     gaps=[]; rows=[]; paths=[]
+    searched_dirs=[]
     for path in a.transcript or []:
         p=Path(path)
         if p.exists(): paths.append(p)
         else: gaps.append(lab(st,"succ_missing_transcript",path=path))
     cfg=list(dict.fromkeys([*(_config_dirs() if not a.config_dir else []), *(a.config_dir or [])]))
     if not a.transcript:
-        discovered=_find_transcripts(rec.get("old_session"),cfg)
-        for p in discovered:
-            rows.extend(_succ_transcript_rows(p,rec.get("old_session"),cfg))
-        if not discovered: gaps.append(lab(st,"succ_no_transcript"))
+        versions = d / "session-versions.jsonl"
+        if versions.exists():
+            for line in versions.read_text(encoding="utf-8", errors="replace").splitlines():
+                try: config_dir = json.loads(line).get("config_dir")
+                except (ValueError, AttributeError): continue
+                if isinstance(config_dir, str) and config_dir and config_dir not in cfg:
+                    cfg.append(config_dir)
+        searched_dirs = cfg
+        paths = _find_transcripts(rec.get("old_session"), cfg)
+
     skipped_answer_files=0
     for p in paths:
         try:
-            found=_succ_transcript_rows(p,rec.get("old_session"),cfg)
+            found=_succ_transcript_rows(p, rec.get("old_session"), cfg)
             child_record=bool(re.search(SUBAGENT_ID_RE, p.stem))
             answer_reference=_succ_answer_path(st,p.as_posix()) or any(_succ_answer_path(st,json.dumps(row,ensure_ascii=False)) for row in found)
             if child_record and answer_reference:
@@ -9749,6 +10027,10 @@ def _pack_session(d, st, hid, rec, a):
         except (OSError,ValueError): gaps.append(lab(st,"succ_unreadable_transcript",path=p))
     if skipped_answer_files: gaps.append(lab(st,"succ_skipped_answers",n=skipped_answer_files))
     if a.transcript and not rows: sys.exit("pack transcript contains zero readable records; unverified")
+    if not rows and not a.transcript:
+        dirs = ", ".join(searched_dirs) or "-"
+        gaps.append(f"Transcript extraction failed: no readable source rows were available; {lab(st, 'succ_no_transcript', dirs=dirs)}")
+
     seat_sessions=(st.get("threads",{}).get(rec["seat"]) or {}).get("sessions",[])
     stint=next((x for x in seat_sessions if x.get("session_id")==rec.get("old_session")),None)
     stint_from=_when(stint.get("from")) if stint else None
@@ -9818,7 +10100,9 @@ def _pack_session(d, st, hid, rec, a):
                 if name in ("Read","Edit","Write","NotebookEdit"):
                     target=inp.get("file_path") or inp.get("path")
                     if target: file_ops[str(target)]=name
-                if name=="Bash": tool_map[tid]={"command":inp.get("command","")}; commands.append(inp.get("command",""))
+                if name=="Bash":
+                    command=_succ_redact(str(inp.get("command") or ""))[0]
+                    tool_map[tid]={"command":command}; commands.append(command)
             if block.get("type")=="tool_result":
                 raw=_tool_result_text(block.get("content")); urls.update(re.findall(r"https?://[^\s)\]>]+",raw))
                 tid=block.get("tool_use_id")
@@ -10204,7 +10488,8 @@ def cmd_succ(a):
             a.transcript=list(a.transcript or [])+[a.from_transcript]
         base, gaps, written = _pack_session(d, st, hid, rec, a)
         raw=Path(base)/"raw/old.jsonl"
-        if not raw.is_file() or not any(line.strip() for line in raw.read_text(encoding="utf-8").splitlines()):
+        if (not raw.is_file() or not any(line.strip() for line in raw.read_text(encoding="utf-8").splitlines())) and not any(
+                "Transcript extraction failed" in str(gap) for gap in gaps):
             sys.exit("old session transcript not found; provide --transcript <jsonl> or --from-transcript <list_events export>")
         missing=_succ_pack_gate(base)
         if missing: sys.exit("退回重做 / return for rework: "+", ".join(missing))
@@ -10643,7 +10928,11 @@ def cmd_handover(a):
         capture = io.StringIO()
         with contextlib.redirect_stdout(capture):
             cmd_worker_prompt(argparse.Namespace(thread=a.thread))
-        print(capture.getvalue().rstrip() + "\n\n--- HANDOVER ---\n" + "\n".join(lines))
+        prompt = capture.getvalue().rstrip().splitlines()
+        old_sid = t.get("session_id")
+        prompt = [f"- {a.thread} | " + re.sub(r"session_id=[^|]+", "session_id=(new session, fill at reseat) ", line.split(" | ", 1)[1])
+                  if old_sid and line.startswith(f"- {a.thread} | ") else line for line in prompt]
+        print("\n".join(prompt) + "\n\n--- HANDOVER ---\n" + "\n".join(lines))
     else:
         print("\n".join(lines) + "\n" + lab(st, "handover_prompt_hint"))
     args = session_args(st, a.thread)
@@ -10681,6 +10970,7 @@ def rebuild_state(d, project=None, sessions=None, short=None):
     st = None
     notes = []
     old_short = None
+    old = None
     if (d / "state.json").exists():
         try:
             old = json.loads((d / "state.json").read_text(encoding="utf-8"))
@@ -10689,6 +10979,15 @@ def rebuild_state(d, project=None, sessions=None, short=None):
         except (OSError, ValueError, AttributeError):
             pass
     events = _read_log(d)
+    last_rev_index = {e["rev"]: i for i, e in enumerate(events)
+                      if isinstance(e.get("rev"), int) and not isinstance(e.get("rev"), bool)}
+    events = [e for i, e in enumerate(events)
+              if not (isinstance(e.get("rev"), int) and not isinstance(e.get("rev"), bool)
+                      and last_rev_index[e["rev"]] != i)]
+    if not events and isinstance(old, dict):
+        st = _blank_state(project or old.get("project") or "unknown", d.parent)
+        st["_prior_session_history"] = old.get("threads", {}) if isinstance(old.get("threads"), dict) else {}
+        notes.append("log.jsonl has no usable events: session history will be retained from state.json")
     if not project:  # the log lost its head: take the name from any later event, so nothing before it is skipped
         project = next((n for e in events for n in [(e.get("snap_meta") or {}).get("project") if isinstance(
             e.get("snap_meta"), dict) else None, e.get("project")] if isinstance(n, str) and n), None)
@@ -10706,6 +11005,23 @@ def rebuild_state(d, project=None, sessions=None, short=None):
             bad += 1
     if bad:
         notes.append(f"skipped {bad} log event(s) with unexpected content")
+    if st is not None:
+        for key in ("threads", "tasks", "requests", "screens", "handovers", "signals", "models", "features"):
+            value = st.get(key)
+            if key == "models" and value is None:
+                st[key] = {}
+            elif not isinstance(value, dict):
+                notes.append(f"discarded malformed snapshot field {key}")
+                st[key] = {}
+            else:
+                invalid = [k for k, v in value.items() if not isinstance(k, str) or not isinstance(v, dict)]
+                if invalid:
+                    notes.append(f"discarded {len(invalid)} malformed {key} snapshot row(s)")
+                    st[key] = {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, dict)}
+        for key in ("lead", "repo", "prefs", "envs"):
+            if not isinstance(st.get(key), dict):
+                notes.append(f"discarded malformed snapshot field {key}")
+                st[key] = {}
     if st is not None and not (st.get("prefs") or {}).get("short_name"):
         st.setdefault("prefs", {})["short_name"] = short or old_short or default_short(st["project"])
         if not (short or old_short):
@@ -10719,8 +11035,21 @@ def rebuild_state(d, project=None, sessions=None, short=None):
         for kv in (e.get("set") or []) if isinstance(e.get("set"), list) else []:
             if isinstance(kv, str) and kv.startswith("short_name="):
                 seen.add(kv.partition("=")[2])
+    if st is None and project:
+        st = _blank_state(project, d.parent)
     leads = {e["session"] for e in events if e.get("ev") in ("lead", "succ-relead-seat")
              and isinstance(e.get("session"), str)}
+    if st is not None and not leads and not (st.get("lead") or {}).get("session_id"):
+        project_labels = {f"teamwork:{st['project']}", f"teamwork:{tag(st)}"}
+        tagged = [s for s in sessions or [] if isinstance(s, dict) and isinstance(s.get("tags"), list)
+                  and project_labels.intersection(s["tags"])
+                  and isinstance(s.get("id") or s.get("session_id"), str)]
+        parents = {s.get("parent_session_id") for s in tagged if isinstance(s.get("parent_session_id"), str)}
+        if len(parents) == 1:
+            parent = next(iter(parents))
+            leads.add(parent)
+            st.setdefault("lead", {})["session_id"] = parent
+            notes.append(f"lead restored from shared parent_session_id: {parent}; check this is the lead")
     return _finish_rebuild(d, st, project, sessions, notes, short, sorted(x for x in seen if x), leads)
 
 
@@ -10728,6 +11057,23 @@ def _replay(st, e, project, notes, d):
         ev = e.get("ev", "")
         if not isinstance(ev, str):
             raise TypeError("ev")
+        snapshot_types = {"snap_meta": dict, "snap_screens": dict, "snap_handovers": dict,
+                          "snap_signals": dict, "snap_models": dict, "snap_threads": dict,
+                          "snap_more_threads": dict, "snap_tasks": dict, "snap_task": dict,
+                          "snap_reqs": dict, "snap_req": dict, "snap_questions": list,
+                          "snap_plan_approved": bool, "snap_roster_version": int,
+                          "snap_more_tasks": dict, "snap_issues": list, "snap_deliverables": list,
+                          "snap_decisions": list, "snap_promises": list, "snap_notices": list,
+                          "snap_features": dict, "snap_docs": dict, "snap_standing": list,
+                          "snap_qa_pending": list, "snap_archive": dict, "snap_archive_handoffs": list,
+                          "snap_archive_packs": dict, "snap_spawn_refusals": list,
+                          "snap_model_deny": list, "snap_write_lock": (dict, type(None)),
+                          "snap_lead_trials": list}
+        for field, expected in snapshot_types.items():
+            allowed = expected if isinstance(expected, tuple) else (expected,)
+            if field in e and type(e[field]) not in allowed:
+                notes.append(f"ignored malformed snapshot {field}")
+                e = {k: v for k, v in e.items() if k != field}
         if st is None:
             name = (e.get("snap_meta") or {}).get("project") or e.get("project") or project
             if not name:
@@ -10739,8 +11085,12 @@ def _replay(st, e, project, notes, d):
                 if v is not None:
                     st[k] = v
         if isinstance(e.get("snap_areas"), dict): st["areas"] = e["snap_areas"]
-        if isinstance(e.get("snap_screens"), dict): st["screens"] = e["snap_screens"]
-        if isinstance(e.get("snap_handovers"), dict): st["handovers"] = e["snap_handovers"]
+        if e.get("snap_screens") is not None:
+            if isinstance(e["snap_screens"], dict): st["screens"] = e["snap_screens"]
+            else: notes.append("ignored malformed snap_screens")
+        if e.get("snap_handovers") is not None:
+            if isinstance(e["snap_handovers"], dict): st["handovers"] = e["snap_handovers"]
+            else: notes.append("ignored malformed snap_handovers")
         if "snap_write_lock" in e:
             if e["snap_write_lock"] is None: st.pop("write_lock", None)
             else: st["write_lock"] = e["snap_write_lock"]
@@ -10760,11 +11110,18 @@ def _replay(st, e, project, notes, d):
             for kv in e.get("set") or []:
                 k, _, v = kv.partition("=")
                 st["prefs"][k] = _pref_value(v)
+        if ev == "prefs" and isinstance(e.get("user_said"), str) and e["user_said"].strip():
+            st.setdefault("prefs_user_said", []).append({"t": e.get("t"), "set": e.get("set"), "text": e["user_said"].strip()})
         elif ev == "plan-approved":
             st["plan_approved"] = True
+            if isinstance(e.get("user_said"), str) and e["user_said"].strip():
+                st.setdefault("plan_user_said", []).append({"t": e.get("t"), "text": e["user_said"].strip()})
         elif ev == "plan-reopened":
             st["plan_approved"] = False
         th = e.get("thread")
+        if th and not re.fullmatch(NAME_RE, th):
+            notes.append(f"ignored log thread name outside NAME_RE: {str(th)[:40]!r}")
+            th = None
         if th and (ev.startswith("thread") or ev == "worktree"):
             t = st["threads"].setdefault(th, _blank_thread(st, th, e.get("kind") or "rc"))
             if ev == "thread-add":
@@ -10778,7 +11135,7 @@ def _replay(st, e, project, notes, d):
                 t["summary"] = e["summary"]
             if ev == "worktree":
                 t["worktree"] = e.get("path")
-        if e.get("snap_thread") and th:
+        if isinstance(e.get("snap_thread"), dict) and th:
             st["threads"][th] = e["snap_thread"]
         if isinstance(e.get("snap_threads"), dict):
             st["threads"] = e["snap_threads"]
@@ -10792,13 +11149,13 @@ def _replay(st, e, project, notes, d):
                 k["owner"] = e["owner"]
             if e.get("status"):
                 k["status"] = e["status"]
-        if e.get("snap_task") and tk:
+        if isinstance(e.get("snap_task"), dict) and tk:
             st["tasks"][tk] = e["snap_task"]
-        if e.get("snap_tasks"):
+        if isinstance(e.get("snap_tasks"), dict):
             st["tasks"] = e["snap_tasks"]
         if isinstance(e.get("snap_more_tasks"), dict):  # tasks an event added besides its own (follow-ups)
             st["tasks"].update(e["snap_more_tasks"])
-        if e.get("snap_roster_version") is not None:
+        if isinstance(e.get("snap_roster_version"), int):
             st["roster_version"] = e["snap_roster_version"]
         if e.get("snap_model_deny") is not None:
             st["model_deny"] = e["snap_model_deny"]
@@ -10818,9 +11175,9 @@ def _replay(st, e, project, notes, d):
                 q["tasks"] = e["tasks"]
             if e.get("status"):
                 q["status"] = e["status"]
-        if e.get("snap_req") and r:
+        if isinstance(e.get("snap_req"), dict) and r:
             st["requests"][r] = e["snap_req"]
-        if e.get("snap_reqs"):
+        if isinstance(e.get("snap_reqs"), dict):
             st["requests"].update(e["snap_reqs"])
         elif ev == "req-import":
             missing = [x for x in e.get("ids", []) if x not in st["requests"]]
@@ -10840,6 +11197,8 @@ def _replay(st, e, project, notes, d):
         for k in ("issues", "deliverables", "qa_pending", "decisions", "promises", "notices", "features", "docs", "standing", "last_report_at"):
             if e.get(f"snap_{k}") is not None:
                 st[k] = e[f"snap_{k}"]
+        if isinstance(e.get("rev"), int) and not isinstance(e.get("rev"), bool):
+            st["rev"] = e["rev"]
         if e.get("snap_reconcile") is not None:
             st["reconcile"] = e["snap_reconcile"]
         if e.get("snap_quota") is not None:
@@ -10857,11 +11216,27 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
         st = _blank_state(project, d.parent)
         st.setdefault("prefs", {})["short_name"] = short or default_short(project)
         notes.append("no usable log: rebuilt from sessions and branches only")
+    prior_threads = st.pop("_prior_session_history", {})
+    if isinstance(prior_threads, dict):
+        for name, previous in prior_threads.items():
+            if isinstance(previous, dict) and previous.get("status") == "archived" and name not in st["threads"]:
+                archived = _blank_thread(st, name, previous.get("kind", "rc"))
+                archived.update({k: previous[k] for k in ("session_id", "status") if k in previous})
+                archived["sessions"] = [h for h in previous.get("sessions", []) if isinstance(h, dict)] \
+                    if isinstance(previous.get("sessions", []), list) else []
+                st["threads"][name] = archived
+    for thread in st.get("threads", {}).values():
+        if not isinstance(thread.get("sessions"), list):
+            thread["sessions"] = []
+        else:
+            thread["sessions"] = [h for h in thread["sessions"] if isinstance(h, dict)]
     # sessions from list_sessions (lead passes the JSON): tags teamwork:<short|project>, teamwork-thread:<name>.
     # Only names this project used: the default short name (initials) is used only when no short name is known
     # (then it is tag(st)), since another project can have the same initials.
     labels = {f"teamwork:{st['project']}", f"teamwork:{tag(st)}"}
     labels |= {f"teamwork:{x}" for x in ([short] if short else []) + list(earlier_shorts)}
+    if not (short or earlier_shorts):
+        labels.add(f"teamwork:{default_short(st['project'])}")
     # a thread is a session this project's lead created: one whose parent is some other session is not ours
     leads = {x for x in set(leads) | {(st.get("lead") or {}).get("session_id")} if x}
     ini = default_short(st["project"])
@@ -10876,13 +11251,24 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
     found = {}
     roster_changed = False
     for sess in sessions or []:
-        tags = set(sess.get("tags") or [])
+        if not isinstance(sess, dict):
+            notes.append("ignored malformed session row")
+            continue
+        raw_tags = sess.get("tags")
+        if not isinstance(raw_tags, list) or any(not isinstance(x, str) for x in raw_tags):
+            notes.append(f"ignored malformed tags for session {sess.get('id') or sess.get('session_id') or '?'}")
+            continue
+        tags = set(raw_tags)
         if not tags & labels or sess.get("archived") or sess.get("status") == "archived" \
                 or "archived" in str(sess.get("session_status") or "").lower():
             continue
         names = sorted({x.split(":", 1)[1] for x in tags if x.startswith("teamwork-thread:")})
         parent = sess.get("parent_session_id")
         sid0 = sess.get("id") or sess.get("session_id")
+        if not isinstance(parent, str):
+            parent = None
+        if not isinstance(sid0, str):
+            sid0 = None
         if leads and isinstance(parent, str) and parent and parent not in leads:
             notes.append(f"session {sid0} carries this project's tag but was created by a session that never led "
                          "it; ignored")
@@ -10901,15 +11287,25 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
                          f"({', '.join(n[:40] for n in names)}); ignored")
             continue
         name = names[0] if names else None
+        if name == "lead":
+            sid = sess.get("id") or sess.get("session_id")
+            if isinstance(sid, str) and not (st.get("lead") or {}).get("session_id"):
+                st.setdefault("lead", {})["session_id"] = sid
+                leads.add(sid)
+                notes.append(f"lead restored from session {sid}")
+            continue
         if name and not re.fullmatch(NAME_RE, name):
             notes.append(f"ignored session tag with an invalid thread name: {name[:40]!r}")
             continue
         if name:
             found.setdefault(name, []).append(sess)
     for name, ss in found.items():
-        ss.sort(key=lambda x: x.get("created_at") or "")
+        def session_time(x):
+            value = _utc_timestamp(x.get("created_at"))
+            return value if value is not None else float("-inf")
+        ss.sort(key=session_time)
         sid_of = lambda x: x.get("id") or x.get("session_id")
-        prior = st["threads"].get(name) or {}
+        prior = st["threads"].get(name) or prior_threads.get(name) or {}
         held, phist = prior.get("session_id"), prior.get("sessions") or []
         lead_sid = (st.get("lead") or {}).get("session_id")
         # never a session the lead or another live seat holds; prefer the current holder, then a session whose
@@ -10928,7 +11324,18 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
             continue
         kind = "cloud" if cur.get("environment_kind") == "anthropic_cloud" else "rc"
         t = st["threads"].setdefault(name, _blank_thread(st, name, kind))
+        if prior.get("sessions") and not t.get("sessions"):
+            t["sessions"] = [h for h in prior["sessions"] if isinstance(h, dict)]
+        if t.get("status") == "archived":
+            notes.append(f"{name}: archived seat skipped during session rebuild")
+            continue
         hist = t.setdefault("sessions", [])
+        cur_sid = sid_of(cur)
+        end = cur.get("created_at") or now()
+        for stint in hist:
+            if stint.get("session_id") != cur_sid and not stint.get("to"):
+                stint["to"] = end if not stint.get("from") or _after(end, stint["from"]) else stint.get("from")
+                stint["reason"] = "session retired (session list)"
         holder_from = next((h.get("from") for h in reversed(hist)
                             if h.get("session_id") == sid_of(cur) and not h.get("to")), None) or cur.get("created_at")
         for x in ss:
@@ -10944,13 +11351,8 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
             # an older listed session of this seat: an ended stint, never a second open one
             hist.append({"session_id": sid, "from": x.get("created_at"), "to": holder_from or now(),
                          "reason": "earlier session (session list)"})
-        sid = cur.get("id") or cur.get("session_id")
+        sid = cur_sid
         if sid and t.get("session_id") != sid:
-            for h in hist:
-                if h.get("session_id") != sid and not h.get("to"):
-                    end = cur.get("created_at") or now()
-                    h["to"] = end if not h.get("from") or _after(end, h["from"]) else now()  # never before from
-                    h["reason"] = "replaced (session list)"
             notes.append(f"{name}: session set to {sid} from the session list")
             t["session_id"] = sid
             _close_archived(st, sid, name, cur.get("created_at") or now())
@@ -10975,7 +11377,14 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
             st["threads"][name] = _blank_thread(st, name)
             notes.append(f"{name}: thread restored from branch {ref} (kind, owns, focus unknown)")
             roster_changed = True
+    def history_time(h):
+        value = _utc_timestamp(h.get("from"))
+        return value if value is not None else float("-inf")
     for name, t in st["threads"].items():
+        if isinstance(t.get("sessions"), list):
+            t["sessions"] = sorted((h for h in t["sessions"] if isinstance(h, dict)),
+                                   key=lambda h: (h.get("session_id") == t.get("session_id") and not h.get("to"),
+                                                  history_time(h)))
         for k, v in _blank_thread(st, name, t.get("kind", "rc")).items():
             t.setdefault(k, v)
         t["title"] = title_for(st, name)
@@ -11006,20 +11415,29 @@ def _load_sessions(path):
     pages, rows = [], []
     for doc in docs:
         for item in (doc if isinstance(doc, list) else [doc]):
-            pg = _tool_page(item, ("data", "sessions"))
-            if pg is not None:
-                pages.append(pg)
-                rows += [x for x in (pg.get("data") if isinstance(pg.get("data"), list) else pg.get("sessions"))
-                         if isinstance(x, dict)]
-            elif isinstance(item, dict):
-                rows.append(item)  # a plain row
+            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+                try:
+                    item = json.loads(item["text"])
+                except ValueError:
+                    pass
+            candidates = item if isinstance(item, list) else [item]
+            for row in candidates:
+                pg = _tool_page(row, ("data", "sessions"))
+                if pg is not None:
+                    pages.append(pg)
+                    rows += [x for x in (pg.get("data") if isinstance(pg.get("data"), list) else pg.get("sessions"))
+                             if isinstance(x, dict)]
+                elif isinstance(row, dict):
+                    rows.append(row)  # a plain row
     if pages and pages[-1].get("has_more"):
         sys.exit("--sessions: the last page has has_more true; page through list_sessions to the end and save "
                  "every page")
     seen, out = set(), []
     for x in rows:
         k = x.get("id") or x.get("session_id")
-        if k and k in seen:
+        if not isinstance(k, str):
+            continue
+        if k in seen:
             continue
         seen.add(k)
         out.append(x)
@@ -11037,7 +11455,9 @@ def cmd_rebuild(a):
         disk_rev = 0
     sessions = _load_sessions(a.sessions) if a.sessions else []
     st, notes = rebuild_state(d, a.project, sessions, a.short)
-    st["rev"] = disk_rev + 1
+    events = _read_log(d)
+    max_log_rev = max((e["rev"] for e in events if type(e.get("rev")) is int), default=0)
+    st["rev"] = max(disk_rev, max_log_rev) + 1
     if a.sessions and not any(isinstance(x, str) and x.startswith("teamwork:")
                               for sess in sessions for x in (sess.get("tags") or []) if isinstance(sess.get("tags"), list)):
         notes.append(f"--sessions {a.sessions}: {len(sessions)} session(s), none with a teamwork tag; nothing taken "
@@ -11076,6 +11496,17 @@ def cmd_rebuild(a):
         if a.apply and lost and kept < lost / 2 and not a.force:
             sys.exit(json.dumps({**summary, "refused": "the rebuild has far less than the current state; check the "
                                  "notes, then re-run with --apply --force if you are sure"}, ensure_ascii=False, indent=2))
+    if a.apply and not a.force and disk_rev > max_log_rev:
+        sys.exit("the last log rev is lower than state.json; the log may be truncated, so rebuild --apply needs --force after review")
+    if a.apply and not events and isinstance(old, dict):
+        previous_threads = old.get("threads", {}) if isinstance(old.get("threads"), dict) else {}
+        for name, previous in previous_threads.items():
+            if isinstance(previous, dict) and previous.get("status") == "archived" and name not in st["threads"]:
+                restored = _blank_thread(st, name, previous.get("kind", "rc"))
+                restored.update({k: previous[k] for k in ("session_id", "sessions", "status") if k in previous})
+                st["threads"][name] = restored
+                notes.append(f"{name}: retained archived session history from state.json")
+        preview.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
     if a.apply:
         if cur.exists():
             stamp = now()[:19].replace(':', '')
@@ -11085,9 +11516,10 @@ def cmd_rebuild(a):
                 bak = d / f"state.json.bak-{stamp}-{i}"
             bak.write_bytes(cur.read_bytes())
             summary["backup"] = str(bak)
+        log(d, {"ev": "rebuild", "rev": st["rev"], "notes": notes, "snap_threads": st["threads"],
+                "snap_roster_version": st.get("roster_version", 0)})
         preview.replace(cur)
         (d / "BOARD.md").write_text(render_board(st), encoding="utf-8")
-        log(d, {"ev": "rebuild", "notes": notes})
         summary["applied"] = True
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
@@ -11273,7 +11705,8 @@ def cmd_context(a):
         if sid and not st.get("write_lock"):  # H9: which version each session started on
             with (d / "session-versions.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps({"session": sid, "version": label, "at": os.environ.get("TW_NOW") or now(),
-                                    "cwd": str(Path.cwd())}) + "\n")
+                                    "cwd": str(Path.cwd()), "config_dir": os.environ.get("CLAUDE_CONFIG_DIR") or
+                                    str(Path.home() / ".claude")}) + "\n")
     except Exception:
         pass
     pw = permission_warning(st) if not in_worktree else ""
@@ -12607,6 +13040,7 @@ def main():
     x.add_argument("--from", dest="frm", default="lead")
     x.add_argument("--need-thread", metavar="NAME", help="a thread's NEED-THREAD (message or STATUS need_thread line): "
                    "recorded once per (thread, name); a repeat is refused so it is not handled twice")
+    x.add_argument("--again", action="store_true", help="record a new NEED-THREAD request after the earlier one was answered")
     x.add_argument("--default", type=int, metavar="N", help="apply a reversible default to question N")
     x.add_argument("--undoable", action="store_true")
     x.add_argument("--proposal", help="record a proposal waiting for the user's answer")

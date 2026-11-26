@@ -30,6 +30,7 @@ Never removes anything. Existing settings are merged, and a .bak copy is written
 """
 
 import argparse
+import functools
 import json
 import os
 import shutil
@@ -89,7 +90,7 @@ def _tw_hook(cmd, word):
                                  (len(head) > 3 and head[0] == '"' and head.endswith('" ') and '"' not in head[1:-2]))
 
 
-def temp_dirs(notes=None):
+def temp_dirs(notes=None, apply=False):
     """Folders sessions use for scratch work (reviews, test repos): /tmp and $TMPDIR, also in their resolved form
     (/private/tmp, /private/var/... on macOS). Inside them, reading and cd never prompt (and, in acceptEdits or
     auto, edits do not either)."""
@@ -108,6 +109,10 @@ def temp_dirs(notes=None):
         if r == "/" or Path(r) == HOME.resolve() or HOME.resolve().is_relative_to(Path(r)):
             notes is not None and notes.append(f"{p} is the root or holds the home folder: skipped")
             continue
+        if Path(r).is_relative_to(HOME.resolve()):
+            if notes is not None:
+                action = "was added" if apply else "would be added"
+                notes.append(f"{p} is inside the home folder and {action} to additionalDirectories")
         out += [p, r]
     return list(dict.fromkeys(out))
 
@@ -200,9 +205,40 @@ def folder_dirs(project, served):
     out = [str(Path(x).expanduser().resolve()) for x in (served, project) if x]
     if project:
         pj = Path(project).expanduser().resolve()
-        out.append(str(pj.parent / f"{pj.name}-worktrees"))
+        out.append(str(project_worktree_root(pj)))
     out.append(str(DEST.parent))
     return list(dict.fromkeys(out + temp_dirs()))
+
+
+@functools.lru_cache(maxsize=32)
+def _project_repo_path(pj):
+    """Resolve a project repo once per install run, including its one ambiguity note."""
+    states = [s for s in [pj / ".teamwork" / "state.json", *sorted(pj.glob("*/.teamwork/state.json"))] if s.is_file()]
+    projects = []
+    for state in states:
+        try:
+            repo = json.loads(state.read_text(encoding="utf-8")).get("repo", {}).get("path")
+            if repo:
+                projects.append((state, Path(repo).expanduser().resolve()))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    if len(projects) > 1:
+        chosen = projects[0]
+        print("  note: multiple teamwork projects found under --project: "
+              + ", ".join(str(state.parent.parent) for state, _ in projects)
+              + f"; using {chosen[1]}" + (" from --project itself" if chosen[0].parent.parent == pj else ""))
+    return projects[0][1] if projects else pj
+
+
+def project_repo_path(project):
+    """Use the repository root recorded by tw.py init --path when present."""
+    pj = Path(project).expanduser().resolve()
+    return _project_repo_path(pj)
+
+
+def project_worktree_root(project):
+    repo = project_repo_path(project)
+    return repo.parent / f"{repo.name}-worktrees"
 
 
 def folder_rules(pl, sl, a, dirs):
@@ -266,7 +302,8 @@ def merge_rules(perms, key, want, where=""):
 def edit_allow(project):
     """Edits inside the project folder and the rc threads' worktrees (`//` = absolute path in a permission rule)."""
     pj = Path(project).expanduser().resolve()
-    return [f"{tool}(/{root}/**)" for root in (str(pj), str(pj.parent / f"{pj.name}-worktrees"))
+    repo = project_repo_path(pj)
+    return [f"{tool}(/{root}/**)" for root in (str(pj), str(repo.parent / f"{repo.name}-worktrees"))
             for tool in ("Edit", "Write")]
 
 
@@ -286,7 +323,6 @@ COPY_SKIP = (
     "__pycache__", "*.pyc", ".pytest_cache", ".venv", "venv", "node_modules",
     ".DS_Store", ".idea", ".vscode", "*.bak", "*.swp",
 )
-
 
 def _git(cwd, *x):
     import subprocess
@@ -417,7 +453,7 @@ def main():
                                 for n in ("settings.json", "settings.local.json")]
     if a.project:
         pj = Path(a.project).expanduser().resolve()
-        wroot = pj.parent / f"{pj.name}-worktrees"
+        wroot = project_worktree_root(pj)
         checks += [w / ".claude" / "settings.local.json" for w in (sorted(wroot.iterdir()) if wroot.is_dir() else [])
                    if (w / ".git").exists()]
     for c in checks:
@@ -459,10 +495,10 @@ def main():
         raise SystemExit(f"  {USER_SETTINGS}: 'permissions' is not an object; fix the file by hand, then re-run")
     perms = s["permissions"]
     notes = []
-    dirs = temp_dirs(notes)
+    dirs = temp_dirs(notes, a.apply)
     if a.project:  # rc threads' worktrees sit next to the project folder, maybe outside the served folder
         pj = Path(a.project).expanduser().resolve()
-        dirs.append(str(pj.parent / f"{pj.name}-worktrees"))
+        dirs.append(str(project_worktree_root(pj)))
     wanted = [("ask", ASK, "always asked: deleting, archiving or renaming repos, visibility, default branch")]
     if not a.no_allow:
         wanted = [
@@ -535,7 +571,7 @@ def main():
         folder_rules(pl, load(pl), a, folder_dirs(a.project, a.served))
     if a.project:  # the project's existing worktrees get the same rules (tw.py worktree copies them into new ones)
         pj = Path(a.project).expanduser().resolve()
-        wroot = pj.parent / f"{pj.name}-worktrees"
+        wroot = project_worktree_root(pj)
         for wt in sorted(x for x in wroot.iterdir() if (x / ".git").exists()) if wroot.is_dir() else []:
             pl = wt / ".claude" / "settings.local.json"
             print(f"3.w worktree {wt.name}")

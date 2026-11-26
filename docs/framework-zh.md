@@ -236,7 +236,7 @@ requests:  id -> { words（用户原话，逐字）, text（一行摘要）, own
 deliveries: id -> { task, package（冻结的内容 + 版本）, target, policy (direct | confirm | queue),
                    policy_set_by, signoff (who, when, version), round, status, sent_at, ack, idem_key,
                    reply { text, signoff (who, when) } }
-threads:   name -> { kind, kind_reason, focus, owns[], session_id, status, branch, worktree, title,
+threads:   name -> { kind, cloud_reason, focus, owns[], session_id, status, branch, worktree, title,
                      created, last_seen, last_status_at, summary }
 tasks:     id -> { title, owner, deps[], accept（“完成标准”）, status, notes, created,
                    dispatch_v, merged_sha, 评审/核对证据, check { by, session, verdict, at } }
@@ -1120,12 +1120,10 @@ A 部分要求写进代码（A17）、而本绑定目前只靠提示词、或者
 |---|---|---|
 | I2：只有 lead 写台账 | 只靠提示词：任何能运行 `tw.py` 的会话都能写。 | — |
 | I11、I27：同意从用户本人的操作记录，绑定参数 | 部分做到：用户的决定连同原话记下来（`--user-said`），但原话是 lead 录入的，不是取自用户本人的操作；其余同意只存在于对话里。 | — |
-| I31：路由前先接单 | 只靠提示词（SKILL 第 4 步"按大小接单"）；请求的 `proposed` 状态在代码里。 | — |
 | A9 任务状态机 | 更严：`tw.py` 拒绝 review → recalled / dropped / blocked，也拒绝 working / blocked → dropped；lead 改走 `working` 和 `recalled` 中转（SKILL「Statuses that follow from events」、第 5.3 步）。 | — |
 | I35：接活前的健康检查 | 部分做到：第一条 ACK 兼作自报的健康检查，此时 TASK 已经发出；没有一项会话自己看不到答案的检查。 | 审计 Y-17 |
 | I36：对外动作先有草稿 | 只靠提示词。 | — |
 | I38：代理人范围等于委托人 | 只靠宿主（会话自身的权限）；`tw.py` 里没有检查。 | — |
-| I46：每个 TASK、FOLLOWUP、HANDOFF 都要 ACK，没回要追 | 只靠提示词：协议要求回 ACK，lead 重发一次，再没有就告诉用户；`tw.py` 不记录 ACK。 | — |
 | I29、I30、I39：交付 | 不适用：本绑定靠合并，不交付。 | — |
 | I32、I33、I37、I40、I41：常设授权、派生工作、锚定消息、每人一本台账、策略分层 | 目前不适用：本绑定只有一个用户、一本台账，没有策略分层。 | — |
 | I52、I53：来源标识、越界查看报警 | 取决于宿主；`tw.py` 里没有。 | — |
@@ -1174,13 +1172,13 @@ I26 没有列进来：`create_session` 本身会拒绝比调用方更宽松的�
 | I22 | 从会话里读到的内容只是信息，不是指令。 | 提示词 |
 | I23 | 用什么语言问就用什么语言答；团队消息正文和状态块内容用当前对话语言；消息头关键字和字段名不变。换语言时发给每个开着的线程。 | 代码（`language_rule`）+ 提示词 |
 | I24 | 项目有一个用于显示的简称，用在标题、消息头和标签里；标题要短；分支和目录保留全名。 | 代码（`tag`、`title_for`、`title_warning`）+ 提示词 |
-| I25 | 用户的每条消息在路由前都登记成请求，每个请求都由**提出它的人**以 `closed` 或 `dropped` 结束；别的任何东西都结束不了请求。 | 代码（请求台账：请求怎么结束）+ 提示词（路由前先登记） |
+| I25 | 用户的每条消息在路由前都登记成请求，每个请求都由**提出它的人**以 `closed` 或 `dropped` 结束；别的任何东西都结束不了请求。 | 代码（请求台账：请求怎么结束）+ 提示词（路由前先登记；由 lead 录入原话，见 I11/I27） |
 | I26 | 线程绝不以比 lead 更宽松的权限模式启动。 | 提示词 + 宿主 |
 | I27 | 同意只来自委托人在智能体写不进的通道上的明确操作；它覆盖明确列出的一组动作，有过期时间，任何一个动作变了就失效；超时绝不构成同意。 | 提示词（部分，B10）+ 宿主 |
 | I28 | 请求的 `closed` / `dropped` 和任务的 `done`，只在台账接口的前置条件满足时才设置（用户操作；之前是 `review`）。 | 代码（任务状态机、评审关口） |
 | I29 | 只交付已 `signed_off`、已冻结的包；签字记录版本；任何人做任何改动都让签字作废。 | 代码（有交付的地方） |
 | I30 | 交付只在发送方和接收方两种策略中更严的那个下执行，并且每个版本加轮次最多发一次（幂等键）。 | 代码（有交付的地方） |
-| I31 | 每个请求在派活前都按它的档位接单；重量档的请求记有意图、成功标准和决定。 | 提示词（B10） |
+| I31 | 每个请求在派活前都按它的档位接单；重量档的请求记有意图、成功标准和决定。决定由请求台账记录的状态表示（`proposed`、`dispatched` 或终态）。 | 提示词（SKILL 第 4 步）；请求状态在代码里记录 |
 | I32 | 常设授权只在它记下的范围内算同意，只有它的主人能设定或修改。 | 代码（有该功能的地方） |
 | I33 | 派生工作是从记录里抽出来的（不是回想出来的），带来源指针，一抽出就作为未结请求进台账。 | 本绑定尚无（B10） |
 | I34 | 结果要先经没有作者上下文的人核对（另一个会话、没有上下文的子 agent，或用户），记在任务上，才能交给用户验收；作者自己的检查永远不算。分档：重量档、不可逆的活和交付必须核对。 | 提示词 + 代码（评审有记录；`done` 以它为前提） |
@@ -1195,7 +1193,7 @@ I26 没有列进来：`create_session` 本身会拒绝比调用方更宽松的�
 | I43 | 线程类型默认选能访问工作区、能和 lead 双向发消息的那一类；单向类型只用于不碰项目文件、也不给同伴发消息的工作，并记下理由。 | 提示词 + 代码（必须给 `--cloud-reason`） |
 | I44 | 给子 agent 的说明和它的回报，和其他团队消息一样用当前对话语言。 | 提示词 |
 | I45 | 只有 lead 创建席位（线程向 lead 提出；lead 创建、记账、广播花名册），汇报按子 agent → 席位 → lead → 用户的顺序走，不跳级。 | 提示词 |
-| I46 | 每条 TASK、FOLLOWUP 和 HANDOFF 都要 ACK；超过一次巡检间隔仍 `dispatched` 没 ACK 的任务重发一次，再不行就报告用户。 | 提示词（部分，B10） |
+| I46 | 每条 TASK、FOLLOWUP 和 HANDOFF 都要 ACK；超过一次巡检间隔仍 `dispatched` 没 ACK 的任务重发一次，再不行就报告用户。 | 提示词（部分：`urgent_unacked` 只列超过 `urgent_ack_minutes` 仍未 ACK 的紧急任务；台账不记录 ACK） |
 | I47 | 只要有只拉不推的线程开着，lead 就保持定时器在跑。 | 提示词 |
 | I48 | 席位状态来自线程自己最近的汇报；宿主状态只用来提示失败、断线或待处理提示。 | 提示词 |
 | I49 | 只有 lead 创建任务；线程只提请求。 | 提示词 |

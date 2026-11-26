@@ -23,7 +23,7 @@ Projects facts come from https://code.claude.com/docs/en/claude-projects.md and 
 | Threads resolved by the user, after merge, or after a week idle | `resolved` set by the lead on merge or user request | No automatic one-week resolve. |
 | Continue in project: pull an existing cloud session in | `TW thread add <name> --session <existing id>` then send it a ROSTER and a FOLLOWUP | Works for rc and cloud sessions. |
 | Isolation: project-owned threads, hidden from the normal session list, own memory | Own folder, own Remote Control server/environment, own ledger, titles `[<project>] ...`, tags | Threads still show in the normal session list; `~/.claude/CLAUDE.md` still loads in rc threads. |
-| Notifications when Claude posts, a thread errors or needs input | App notifications per session; child-session failure events reach the lead | No single project-level notification switch. |
+| Notifications when Claude posts, a thread errors or needs input | App notifications per session; child-session failure events are documented but not seen in field tests (I9), so the lead's sweep is the backstop | No single project-level notification switch. |
 | 500 new threads/day; uses limits faster | No thread limit by default. Hard limit: a Remote Control server holds 32 sessions by default, across all projects on it; cloud threads don't count | Every thread is a full session: cost scales with thread count. |
 
 ## Known gaps

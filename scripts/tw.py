@@ -364,9 +364,21 @@ LABELS = {
         "signals_quiz_pass": "Half quiz {id}: passed", "signals_quiz_fail": "Half quiz {id}: incorrect answers; resend these facts", "signals_quiz_red": "{id} failed twice; seat marked red. Relay: {command}",
         "screen_stats_retake": "For a second screen on the same session: TW screen ask <seat> --session <id> --retake",
         "signals_quiz_usage": "Usage: signals quiz HQ<n> <seat> --answers <file>", "screen_sweep_running": "A screen sweep is already running",
-        "compact_mandatory": "Compacted {n} time(s). Before your next message, you must:\n1. Use Read to open {rules}; reread the Rules section (language, messages, approvals).\n2. Without looking anything up, answer this quiz. Put [quiz {id}] on the first answer line.\n{quiz}\n3. Continue as usual after answering.",
+        "compact_mandatory": "Compacted {n} time(s). Before your next message, you must:\nStep A. Use Read to open {rules}; reread the Rules section (language, messages, approvals).\nStep B. Without looking anything up, answer the quiz below; put [quiz {id}] on the first answer line, then one numbered answer per question.\nStep C. Then continue as usual.\nQuiz {id}:\n{quiz}",
+        "brief_language_zh": "Reply to the user in Chinese.", "brief_language_en": "Reply to the user in English.",
+        "brief_quiz_language_question": "What language should you use to reply to the user?",
+        "brief_lead": "You are {project} ({tag}) lead, session {session}.",
+        "brief_thread": "You are a thread of {project}, thread {name}, lead session {session}.",
+        "brief_lead_header": "Thread message header: [tw:{tag}] <TYPE> lead -> <thread> <task-id or ->",
+        "brief_thread_header": "Message header: [tw:{tag}] <TYPE> {name} -> <recipient> <task-id or ->",
+        "brief_lead_report": "Immediately report every thread message (ACK/UPDATE/DONE/blocked) to the user; report only in your own conversation, never back to the session that dispatched you.",
+        "brief_thread_report": "Report only to the lead; end every turn with a tw-status block. Send anything you need to wait on to the lead; do not leave it only in STATUS.",
+        "brief_privacy": "Private content (session IDs, email, home-directory paths, private project material) must never enter the repository or any public place.",
+        "brief_standing_more": "{n} more: tw.py memory --standing-list",
         "compact_thread_rules": "Use Read to open {rules}; reread the thread protocol sections Language, Messages and STATUS.",
         "compact_drift_unavailable": "Local transcript unavailable; drift signals were not calculated",
+        "compact_ambiguous": "compact_ambiguous: multiple project/seat matches: {candidates}",
+        "compact_quiz_unavailable": "compact_quiz_unavailable: could not save or load the required quiz",
         "compact_write_locked": "Compacted {n} time(s). Before your next message, you must:\n1. Use Read to open {rules}; reread the Rules section (language, messages, approvals).",
         "compact_v_unanswered": "unanswered", "compact_v_yes": "yes", "compact_v_no": "no",
         "compact_swap_reason": "repeated context compaction",
@@ -641,9 +653,21 @@ LABELS = {
         "signals_quiz_pass": "半份测验 {id}：通过", "signals_quiz_fail": "半份测验 {id}：有答错，补发这些事实", "signals_quiz_red": "{id} 连错两次，该席 signals 标红。接力命令：{command}",
         "screen_stats_retake": "同一张卡测两次：TW screen ask <seat> --session <id> --retake",
         "signals_quiz_usage": "用法：signals quiz HQ<n> <seat> --answers <文件>", "screen_sweep_running": "已有一个体检补考进程在运行",
-        "compact_mandatory": "刚被压缩（第 {n} 次）。下一条消息前必须先做完：\n1. 用 Read 打开 {rules}，重读 Rules 一节（语言、消息、审批）。\n2. 不查资料，直接答下面的小测；答案第一行写 [quiz {id}]。\n{quiz}\n3. 答完照常继续。",
+        "compact_mandatory": "刚被压缩（第 {n} 次）。下一条消息前必须先做完：\n第一步：用 Read 打开 {rules}，重读 Rules 一节（语言、消息、审批）。\n第二步：不查资料，直接答下面的小测；答案第一行写 [quiz {id}]，然后按题号逐题作答。\n第三步：答完照常继续。\n小测 {id}：\n{quiz}",
+        "brief_language_zh": "回复用户一律用中文。", "brief_language_en": "Reply to the user in English.",
+        "brief_quiz_language_question": "你该用什么语言回复用户？",
+        "brief_lead": "你是 {project}（{tag}）的 lead，会话 {session}",
+        "brief_thread": "你是 {project} 的线程 {name}，lead 会话 {session}",
+        "brief_lead_header": "线程消息头格式：[tw:{tag}] <TYPE> lead -> <thread> <task-id or ->",
+        "brief_thread_header": "消息头格式：[tw:{tag}] <TYPE> {name} -> <recipient> <task-id or ->",
+        "brief_lead_report": "线程发来的每条消息（ACK/UPDATE/DONE/blocked）都要马上转报用户；只在你自己的对话里报，不发回派单的会话",
+        "brief_thread_report": "只向 lead 汇报，每回合结尾写 tw-status 块；有要等的事就发给 lead，不能只写在 STATUS 里",
+        "brief_privacy": "私有内容（会话 ID、邮箱、家目录路径、私有项目资料）绝不进仓库或任何公开处",
+        "brief_standing_more": "还有 {n} 条：tw.py memory --standing-list",
         "compact_thread_rules": "用 Read 打开 {rules}，重读线程协议的 Language、Messages 和 STATUS 三节。",
         "compact_drift_unavailable": "记录不在本机，跑偏信号未算",
+        "compact_ambiguous": "compact_ambiguous：匹配到多个项目/席位：{candidates}",
+        "compact_quiz_unavailable": "compact_quiz_unavailable：必做小测无法保存或读取",
         "compact_write_locked": "刚被压缩（第 {n} 次）。下一条消息前必须先做完：\n1. 用 Read 打开 {rules}，重读 Rules 一节（语言、消息、审批）。",
         "compact_v_unanswered": "未答", "compact_v_yes": "是", "compact_v_no": "否",
         "compact_swap_reason": "多次压缩",
@@ -7366,25 +7390,37 @@ def _tool_error(blocks):
                for b in blocks)
 
 
+def _bridge_local_ids(session, config_dirs, local_id=None):
+    """Read the bridge for one Remote Control session and return its local session IDs."""
+    if not isinstance(session, str): return set()
+    suffix=session.removeprefix("session_")
+    if not suffix: return set()
+    ids=set()
+    for config in config_dirs:
+        bridge=Path(config).expanduser()/f"bridge-transcript-cse_{suffix}.jsonl"
+        if not bridge.is_file(): continue
+        try:
+            with bridge.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if not line.strip(): continue
+                    try: row=json.loads(line)
+                    except ValueError: continue
+                    sid=row.get("session_id") if isinstance(row,dict) else None
+                    if isinstance(sid,str) and sid.strip():
+                        ids.add(sid.strip())
+                        if local_id is not None and sid.strip()==local_id: return {local_id}
+        except (OSError,UnicodeError): continue
+    return ids
+
+
 def _find_transcripts(old_session, config_dirs):
     found = []
     for root in config_dirs:
         root = Path(root).expanduser()
         if not root.exists(): continue
         suffix = old_session.removeprefix("session_") if isinstance(old_session, str) else ""
-        bridges = [root / f"bridge-transcript-cse_{suffix}.jsonl"] if suffix else []
-        for bridge in bridges:
-            if not bridge.is_file(): continue
-            try:
-                ids=set()
-                with bridge.open(encoding="utf-8") as stream:
-                    for line in stream:
-                        if not line.strip(): continue
-                        try: row=json.loads(line)
-                        except ValueError: continue
-                        sid=row.get("session_id") if isinstance(row,dict) else None
-                        if isinstance(sid,str) and sid.strip(): ids.add(sid.strip())
-            except (OSError, UnicodeError): continue
+        ids=_bridge_local_ids(old_session,[root])
+        if ids:
             for proj in (root / "projects").glob("*"):
                 for sid in ids:
                     if not isinstance(sid, str): continue
@@ -7928,6 +7964,9 @@ def _signals_half_quiz(d,st,seat,compact_identity=None):
         question=_signals_p7(st,seat)
         answer=next((a for q,a in SCREEN_BANK["zh" if _zh(st) else "en"]["P7"] if q==question),"")
         material=[{"question":question,"keywords":_succ_keywords(answer)[:6],"fact":answer}]
+    lang_name="中文" if _zh(st) else "English"
+    language_question=lab(st,"brief_quiz_language_question")
+    material=[{"question":language_question,"keywords":[lang_name],"fact":language_question+" "+lang_name}]+material[:4]
     previous=(st.get("signals",{}).get(seat,{}) or {}).get("half_quiz",{})
     if compact_identity is not None and previous.get("at") and _when(previous.get("at")) and _when(compact_identity) and _when(previous.get("at")) >= _when(compact_identity)-dt.timedelta(seconds=1):
         existing=_keys_dir(st)/f"{seat}-{previous.get('id')}.json"
@@ -7949,7 +7988,7 @@ def _signals_p7(st,seat):
     return question
 
 
-def _after_compact(d,st,seat,local_session):
+def _after_compact(d,st,seat,local_session,skip_transcript=False):
     prior=(st.get("compactions") or {}).get(seat) or {}
     count=int(prior.get("count",0))+1 if prior.get("session")==local_session else 1
     at=now()
@@ -7977,7 +8016,33 @@ def _after_compact(d,st,seat,local_session):
         st=load(d)
     match=re.search(r"\b(HQ[0-9]+)\b",quiz_text)
     qid=match.group(1) if match else (st.get("signals",{}).get(seat,{}).get("half_quiz") or {}).get("id","")
-    return _compact_block(d,st,seat,count,qid,quiz_text,local_session)
+    return _compact_block(d,st,seat,count,qid,quiz_text,None if skip_transcript else local_session)
+
+
+def _brief_card(st,seat):
+    """Compact ledger-only identity and operating rules, kept at the head of mandatory context."""
+    zh=_zh(st); lead=st.get("lead") or {}; project=str(st.get("project") or "")
+    lead_session=str(lead.get("session_id") or "(see roster)")
+    lines=[lab(st,"brief_language_zh" if zh else "brief_language_en")]
+    if seat=="lead":
+        lines.append(lab(st,"brief_lead",project=project,tag=tag(st),session=lead_session))
+        lines.append(lab(st,"brief_lead_header",tag=tag(st)))
+        lines.append(lab(st,"brief_lead_report"))
+    else:
+        lines.append(lab(st,"brief_thread",project=project,name=seat,session=lead_session))
+        lines.append(lab(st,"brief_thread_header",tag=tag(st),name=seat))
+        lines.append(lab(st,"brief_thread_report"))
+    lines.append(lab(st,"brief_privacy"))
+    standing=[str(item).replace("\r"," ").replace("\n"," ")[:120] for item in st.get("standing",[]) if str(item).strip()]
+    room=15-len(lines)
+    shown=standing[:room]
+    remaining=len(standing)-len(shown)
+    if remaining and room:
+        shown=standing[:room-1]
+        remaining=len(standing)-len(shown)
+    lines.extend(shown)
+    if remaining: lines.append(lab(st,"brief_standing_more",n=remaining))
+    return "\n".join(lines)
 
 
 def _compact_quiz_text(d,st,seat,qid):
@@ -7994,8 +8059,9 @@ def _compact_block(d,st,seat,count,qid,quiz_text,local_session):
         rules=Path(__file__).resolve().parents[1]/"templates"/"worker-protocol.md"
         rules_line=lab(st,"compact_thread_rules",rules=rules)
     if st.get("write_lock"):
-        return lab(st,"compact_write_locked",n=count,rules=rules_line)+"\n\n"
-    required=lab(st,"compact_mandatory",n=count,rules=rules_line,id=qid,quiz=quiz_text)
+        return _brief_card(st,seat)+"\n"+lab(st,"compact_write_locked",n=count,rules=rules_line)+"\n\n"
+    quiz_body="\n".join(x for x in str(quiz_text).splitlines() if re.match(r"\s*[0-9]+\.",x)) or str(quiz_text)  # the questions only: the lead-facing heading says "send it to the seat"
+    required=lab(st,"compact_mandatory",n=count,rules=rules_line,id=qid,quiz=quiz_body)
     try:
         rows,found=_session_rows(local_session) if local_session else ([],False)
         if found:
@@ -8013,7 +8079,7 @@ def _compact_block(d,st,seat,count,qid,quiz_text,local_session):
     if count>=int(st.get("prefs",{}).get("lead_compact_swap",4)):
         command=f"TW succ start {seat} --reason \"{lab(st,'compact_swap_reason')}\""
         required+="\n"+lab(st,"compact_swap",command=command)
-    return required+"\n\n"
+    return _brief_card(st,seat)+"\n"+required+"\n\n"
 
 
 def _signals_quiz_grade_text(d,st,hqid,seat,raw):
@@ -12826,10 +12892,80 @@ def cmd_context(a):
         found = sorted({p.parent.parent for pat in ("*/.teamwork/state.json", "*/*/.teamwork/state.json")
                         for p in cwd.glob(pat)})
         if found:
-            names = ", ".join(f"{json.loads((f / '.teamwork' / 'state.json').read_text(encoding='utf-8'))['project']} ({f})"
-                              for f in found)
+            event=None; sid=None
+            try:
+                import select
+                import time
+                buf=b""; end=time.monotonic()+0.5; fd=sys.stdin.fileno()
+                while not sys.stdin.isatty() and time.monotonic()<end and select.select([fd],[],[],max(0,end-time.monotonic()))[0]:
+                    chunk=os.read(fd,65536)
+                    if not chunk: break
+                    buf+=chunk
+                    try:
+                        event=json.loads(buf.decode("utf-8")); break
+                    except ValueError:
+                        continue
+                sid=event.get("session_id") if isinstance(event,dict) else None
+            except Exception:
+                pass
+            config_dirs=_config_dirs()
+            mandatory=""; project_rows=[]; bridge_cache={}
+            for f in found:
+                project_dir=f/".teamwork"
+                try:
+                    st0=load(project_dir)
+                    project_name=str(st0.get("project") or f.name)
+                except Exception:
+                    st0=None; project_name=f.name
+                project_rows.append((f,project_dir,st0,project_name))
+            names = ", ".join(f"{name} ({f})" for f,_,_,name in project_rows)
+            try:
+                if event and sid and event.get("source")!="compact":
+                    for _,project_dir,st0,_ in project_rows:
+                        if not isinstance(st0,dict): continue
+                        for seat in {"lead":st0.get("lead") or {},**(st0.get("threads") or {})}:
+                            compact=(st0.get("compactions") or {}).get(seat) or {}
+                            check=(st0.get("signals",{}).get(seat) or {}).get("compact_check") or {}
+                            if compact.get("session")==sid and check.get("answered") is not True:
+                                qid=check.get("quiz") or ((st0.get("signals",{}).get(seat) or {}).get("half_quiz") or {}).get("id") or "HQ1"
+                                mandatory=_compact_block(project_dir,st0,seat,int(compact.get("count",1)),qid,_compact_quiz_text(project_dir,st0,seat,qid),None)
+                                break
+                        if mandatory: break
+                elif event and sid and event.get("source")=="compact":
+                    direct=[]; bridged=[]
+                    for f,project_dir,st0,name in project_rows:
+                        if not isinstance(st0,dict): continue
+                        seats={"lead":st0.get("lead") or {},**(st0.get("threads") or {})}
+                        for seat,rec in seats.items():
+                            if not isinstance(rec,dict): continue
+                            recorded=rec.get("session_id")
+                            if recorded in (sid,"session_"+str(sid)):
+                                direct.append((f,project_dir,st0,name,seat))
+                    if not direct:
+                        for f,project_dir,st0,name in project_rows:
+                            if not isinstance(st0,dict): continue
+                            seats={"lead":st0.get("lead") or {},**(st0.get("threads") or {})}
+                            for seat,rec in seats.items():
+                                if not isinstance(rec,dict): continue
+                                recorded=rec.get("session_id")
+                                if recorded:
+                                    if recorded not in bridge_cache:
+                                        bridge_cache[recorded]=_bridge_local_ids(recorded,config_dirs,sid)
+                                    if sid in bridge_cache[recorded]: bridged.append((f,project_dir,st0,name,seat))
+                    candidates=direct if direct else bridged
+                    if len(candidates)==1:
+                        _,project_dir,st0,_,seat=candidates[0]
+                        try: mandatory=_after_compact(project_dir,st0,seat,sid,skip_transcript=bool(direct))
+                        except Exception:
+                            mandatory=_brief_card(st0,seat)+"\n"+lab(st0,"compact_quiz_unavailable")+"\n\n"
+                    elif len(candidates)>1:
+                        listed=", ".join(f"{name}/{seat}" for _,_,_,name,seat in candidates)
+                        lang_st=candidates[0][2]
+                        mandatory=lab(lang_st,"compact_ambiguous",candidates=listed)+"\n"
+            except Exception:
+                mandatory=""
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext":
-                  f"teamwork projects below this folder: {names}. Only use one if the user asks; "
+                  mandatory+f"teamwork projects below this folder: {names}. Only use one if the user asks; "
                   "cd into its folder first (its own board then applies)."}}, ensure_ascii=False))
         return
     st = load(d)

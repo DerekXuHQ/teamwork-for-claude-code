@@ -70,6 +70,139 @@ def walk_args(run, args, state_file, prepare_primary=False):
             run("task", "set", args[2], "--status", step)
 
 
+class T81ServedFolderCompact(unittest.TestCase):
+    def setUp(self):
+        self.tmp=Path(tempfile.mkdtemp(prefix="tw-t81-")); self.oldcwd=Path.cwd()
+        self.served=self.tmp/"served"; self.served.mkdir(); self.project=self.served/"proj"; self.project.mkdir()
+        self.config=self.tmp/"cfg"; self.config.mkdir(); self.keys=self.tmp/"keys"; self.keys.mkdir()
+        self.env={k:v for k,v in os.environ.items() if k not in ("TEAMWORK_DIR","CLAUDE_CONFIG_DIR")}
+        self.env.update(TW_KEYS_DIR=str(self.keys),CLAUDE_CONFIG_DIR=str(self.config),TW_NOW=dt.datetime.now().astimezone().isoformat(timespec="seconds"))
+        self.cli("init","demo")
+        # Global -C precedes the subcommand.
+        self.cli("prefs","--set","language=zh")
+        os.chdir(self.served)
+    def tearDown(self): os.chdir(self.oldcwd); shutil.rmtree(self.tmp)
+    def cli(self,*args):
+        cmd=[sys.executable,str(TW)]
+        if args[0] not in ("-C",): cmd += ["-C",str(self.project)]
+        p=subprocess.run(cmd+list(map(str,args)),cwd=self.served,env=self.env,text=True,capture_output=True)
+        if p.returncode: self.fail(p.stderr or p.stdout)
+        return p
+    def state(self): return json.loads((self.project/".teamwork"/"state.json").read_text(encoding="utf-8"))
+    def save(self,st): (self.project/".teamwork"/"state.json").write_text(json.dumps(st,ensure_ascii=False),encoding="utf-8")
+    def sid(self): return str(uuid.uuid4())
+    def hook(self,session,source="compact"):
+        old=os.environ.copy(); os.environ.update(self.env)
+        oldstdin=sys.stdin; out=io.StringIO(); r,w=os.pipe(); os.write(w,json.dumps({"session_id":session,"source":source,"cwd":str(self.served)}).encode()); os.close(w); sys.stdin=os.fdopen(r,"r")
+        try:
+            with contextlib.redirect_stdout(out): tw.cmd_context(None)
+        finally: sys.stdin.close(); sys.stdin=oldstdin; os.environ.clear(); os.environ.update(old)
+        return json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
+    def bridge(self,remote,local):
+        path=self.config/f"bridge-transcript-cse_{remote.removeprefix('session_')}.jsonl"
+        path.write_text(json.dumps({"type":"system","session_id":local,"uuid":"fixture"})+"\n"+
+                        json.dumps({"type":"control_request","uuid":"fixture-2"})+"\n"+
+                        json.dumps({"type":"assistant","session_id":local,"uuid":"fixture-3"})+"\n",encoding="utf-8")
+
+    def test_00_served_folder_compact_emits_card_quiz_and_records_local_session(self):
+        local=self.sid(); remote="session_rc-fixture"; self.cli("lead","--session",remote); self.bridge(remote,local)
+        text=self.hook(local)
+        self.assertTrue(text.startswith("回复用户一律用中文。\n你是 demo（demo）的 lead，会话 session_rc-fixture"),text[:300])
+        self.assertIn("1. 你该用什么语言回复用户？",text)
+        self.assertIn("teamwork projects below this folder:",text)
+        self.assertEqual(self.state()["compactions"]["lead"]["session"],local)
+
+    def test_unmatched_served_folder_output_is_unchanged(self):
+        text=self.hook(self.sid())
+        self.assertEqual(text,"teamwork projects below this folder: demo ("+str(self.project)+"). Only use one if the user asks; cd into its folder first (its own board then applies).")
+
+    def test_thread_bridge_match_emits_thread_card(self):
+        local=self.sid(); remote="session_thread-fixture"
+        self.cli("thread","add","api","--session",remote); self.bridge(remote,local)
+        text=self.hook(local)
+        self.assertTrue(text.startswith("回复用户一律用中文。\n你是 demo 的线程 api，lead 会话"),text[:300])
+        self.assertIn("只向 lead 汇报",text)
+
+    def test_resume_pending_reprints_without_bridge_but_answered_does_not(self):
+        local=self.sid(); self.cli("lead","--session",local); self.hook(local)
+        from unittest.mock import patch
+        with patch.object(tw,"_bridge_local_ids",side_effect=AssertionError("bridge read")) as reader:
+            self.assertTrue(self.hook(local,"resume").startswith("回复用户一律用中文")); reader.assert_not_called()
+        st=self.state(); st["signals"]["lead"]["compact_check"]["answered"]=True; self.save(st)
+        with patch.object(tw,"_bridge_local_ids",side_effect=AssertionError("bridge read")) as reader:
+            text=self.hook(local,"resume"); reader.assert_not_called()
+        self.assertFalse(text.startswith("回复用户一律用中文"))
+
+    def test_standing_card_caps_at_fifteen_lines(self):
+        st=self.state(); st["standing"]=["rule-"+str(i) for i in range(30)]
+        card=tw._brief_card(st,"lead")
+        self.assertLessEqual(len(card.splitlines()),15); self.assertIn("还有 21 条：tw.py memory --standing-list",card)
+
+    def test_english_project_card_and_quiz_keyword(self):
+        self.cli("prefs","--set","language=en"); local=self.sid(); self.cli("lead","--session",local)
+        text=self.hook(local)
+        self.assertTrue(text.startswith("Reply to the user in English."))
+        key=json.loads((self.keys/"demo"/"lead-HQ1.json").read_text(encoding="utf-8"))
+        self.assertEqual(key["questions"][0]["keywords"],["English"])
+
+    def test_numbered_chinese_answer_passes_language_question(self):
+        local=self.sid(); self.cli("lead","--session",local); self.hook(local)
+        from unittest.mock import patch
+        questions=json.loads((self.keys/"demo"/"lead-HQ1.json").read_text(encoding="utf-8"))["questions"]
+        response="[quiz HQ1]\n1. 中文\n"+"\n".join(f"{i+1}. "+" ".join(q["keywords"]) for i,q in enumerate(questions[1:],start=1))
+        with patch.dict(os.environ,self.env):
+            passed,wrong=tw._signals_quiz_grade_text(self.project/".teamwork",self.state(),"HQ1","lead",response)
+        self.assertTrue(passed,wrong)
+
+    def test_bridge_collision_is_ambiguous_and_direct_match_wins(self):
+        local=self.sid(); remote="session_shared-rc"; self.cli("lead","--session",remote); self.bridge(remote,local)
+        other=self.served/"other"; other.mkdir()
+        p=subprocess.run([sys.executable,str(TW),"-C",str(other),"init","other"],cwd=self.served,env=self.env,text=True,capture_output=True)
+        self.assertEqual(p.returncode,0,p.stderr)
+        p=subprocess.run([sys.executable,str(TW),"-C",str(other),"lead","--session",remote],cwd=self.served,env=self.env,text=True,capture_output=True)
+        self.assertEqual(p.returncode,0,p.stderr)
+        bridge=self.config/f"bridge-transcript-cse_{remote.removeprefix('session_')}.jsonl"
+        bridge.write_text(json.dumps({"session_id":local})+"\n",encoding="utf-8")
+        text=self.hook(local)
+        self.assertIn("compact_ambiguous",text); self.assertNotIn("刚被压缩",text)
+        self.assertNotIn("compactions",self.state()); self.assertNotIn("compactions",json.loads((other/".teamwork"/"state.json").read_text()))
+        # Direct local-id match takes precedence over another project's bridge match.
+        self.cli("lead","--session",local,"--force")
+        text=self.hook(local)
+        self.assertIn("你是 demo",text); self.assertNotIn("compact_ambiguous",text)
+
+    def test_bridge_lookup_cached_once_and_skipped_for_direct_match(self):
+        from unittest.mock import patch
+        local=self.sid(); remote="session_cached-rc"; self.cli("lead","--session",remote); self.cli("thread","add","api","--session","session_api-rc")
+        st=self.state(); st["threads"]["api"]["session_id"]=remote; self.save(st); self.bridge(remote,local)
+        with patch.object(tw,"_bridge_local_ids",wraps=tw._bridge_local_ids) as reader:
+            self.hook(local); self.assertEqual(reader.call_count,1)
+        self.cli("lead","--session",local,"--force")
+        with patch.object(tw,"_bridge_local_ids",side_effect=AssertionError("bridge read")) as reader:
+            self.hook(local); reader.assert_not_called()
+
+    def test_resume_uses_compaction_local_session_even_when_ledger_is_rc(self):
+        local=self.sid(); remote="session_resume-rc"; self.cli("lead","--session",remote)
+        st=self.state(); st.setdefault("compactions",{})["lead"]={"session":local,"count":1}
+        st.setdefault("signals",{}).setdefault("lead",{})["compact_check"]={"answered":False,"quiz":"HQ1"}
+        self.save(st)
+        self.assertTrue(self.hook(local,"resume").startswith("回复用户一律用中文"))
+        st=self.state(); st["signals"]["lead"]["compact_check"]["answered"]=True; self.save(st)
+        self.assertFalse(self.hook(local,"resume").startswith("回复用户一律用中文"))
+
+    def test_bad_project_state_is_skipped_and_quiz_failure_keeps_card(self):
+        bad=self.served/"bad"; (bad/".teamwork").mkdir(parents=True); (bad/".teamwork"/"state.json").write_text("{")
+        local=self.sid(); self.cli("lead","--session",local)
+        with mock.patch.object(tw,"_after_compact",side_effect=OSError("keys unavailable")):
+            text=self.hook(local)
+        self.assertIn("compact_quiz_unavailable",text); self.assertIn("回复用户一律用中文",text); self.assertIn("bad (",text)
+
+    def test_standing_newlines_are_flattened_before_card_line_limit(self):
+        st=self.state(); st["standing"]=["first\nsecond\rthird"]+["rule-"+str(i) for i in range(30)]
+        card=tw._brief_card(st,"lead")
+        self.assertLessEqual(len(card.splitlines()),15); self.assertIn("first second third",card)
+
+
 class T80Compact(unittest.TestCase):
     def setUp(self):
         self.tmp=Path(tempfile.mkdtemp(prefix="tw-t80-")); self.oldcwd=Path.cwd()
@@ -98,24 +231,32 @@ class T80Compact(unittest.TestCase):
         folder=self.config/"projects"/"-tmp-project"; folder.mkdir(parents=True,exist_ok=True)
         path=folder/f"{session}.jsonl"; path.write_text("\n".join(json.dumps(x,ensure_ascii=False) for x in rows)+"\n",encoding="utf-8"); return path
 
+    def test_find_transcripts_reads_uuid_named_bridge(self):
+        session=self.sid(); bridged=self.sid(); project=self.config/"projects"/"fixture"; project.mkdir(parents=True)
+        transcript=project/f"{bridged}.jsonl"; transcript.write_text("{}\n",encoding="utf-8")
+        bridge=self.config/f"bridge-transcript-cse_{session}.jsonl"; bridge.write_text(json.dumps({"session_id":bridged})+"\n",encoding="utf-8")
+        self.assertIn(transcript,tw._find_transcripts(session,[self.config]))
+
     def test_00_compact_hook_quiz_sweep_and_board(self):
         session=self.sid(); self.cli("lead","--session",session)
         context=self.hook(session)
-        self.assertTrue(context.startswith("刚被压缩（第 1 次）")); self.assertIn("[quiz HQ1]",context); self.assertIn("1.",context)
+        self.assertTrue(context.startswith("回复用户一律用中文。")); self.assertIn("刚被压缩（第 1 次）",context); self.assertIn("[quiz HQ1]",context); self.assertIn("1.",context)
         question,answer=tw.SCREEN_BANK["zh"]["P7"][0]; base=dt.datetime.fromisoformat(self.env["TW_NOW"])
+        questions=json.loads((self.keys/"demo"/"lead-HQ1.json").read_text(encoding="utf-8"))["questions"]
+        quiz_answer="[quiz HQ1]\n"+"\n".join(f"{i+1}. "+" ".join(q["keywords"]) for i,q in enumerate(questions))
         stamps=[(base+dt.timedelta(seconds=i)).isoformat() for i in (-3,1,2)]
         self.record(session,[
             {"type":"user","isCompactSummary":True,"timestamp":stamps[0],"message":{"role":"user","content":"summary"}},
             {"type":"assistant","timestamp":stamps[1],"message":{"role":"assistant","content":[{"type":"tool_use","id":"read-ok","name":"Read","input":{"file_path":str(Path(tw.__file__).resolve().parents[1]/"SKILL.md")}}]}},
             {"type":"user","timestamp":stamps[1],"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"read-ok","content":"rules"}]}},
-            {"type":"assistant","timestamp":stamps[2],"message":{"role":"assistant","content":[{"type":"text","text":"[quiz HQ1]\n"+answer}]}}
+            {"type":"assistant","timestamp":stamps[2],"message":{"role":"assistant","content":[{"type":"text","text":quiz_answer}]}}
         ])
-        self.assertTrue(self.hook(session,"resume").startswith("刚被压缩（第 1 次）"))
+        self.assertTrue(self.hook(session,"resume").startswith("回复用户一律用中文。"))
         result=json.loads(self.cli("screen","sweep","--json").stdout)
         self.assertTrue(result["compact_checks"][0]["passed"],result); self.assertTrue(result["compact_checks"][0]["reread"],result)
         board=self.cli("board").stdout
         self.assertIn("压缩 1 次",board); self.assertIn("过",board); self.assertIn("重读规则：是",board)
-        self.assertFalse(self.hook(session,"resume").startswith("刚被压缩"))
+        self.assertFalse(self.hook(session,"resume").startswith("回复用户一律用中文。"))
 
     def test_compact_sweep_extracts_numbered_answers_after_quiz_marker(self):
         from unittest.mock import patch
@@ -220,7 +361,7 @@ class T80Compact(unittest.TestCase):
         session=self.sid(); self.cli("lead","--session",session)
         from unittest.mock import patch
         with patch.object(tw,"CONTEXT_LIMIT",150): text=self.hook(session)
-        self.assertTrue(text.startswith("刚被压缩"))
+        self.assertTrue(text.startswith("回复用户一律用中文。"))
         notice="\n...(truncated: read .teamwork/BOARD.md, INSTRUCTIONS.md, MEMORY.md)"
         self.assertLessEqual(len(text),150+len(notice))
 
@@ -240,7 +381,7 @@ class T80Compact(unittest.TestCase):
     def test_write_lock_still_emits_without_ledger_mutation(self):
         session=self.sid(); self.cli("lead","--session",session)
         st=self.state(); st["write_lock"]={"ho":"HO1"}; (self.project/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
-        text=self.hook(session); self.assertTrue(text.startswith("刚被压缩")); self.assertNotIn("lead",self.state().get("compactions",{}))
+        text=self.hook(session); self.assertTrue(text.startswith("回复用户一律用中文。")); self.assertNotIn("lead",self.state().get("compactions",{}))
         self.assertIn("重读 Rules 一节",text); self.assertNotIn("[quiz HQ",text); self.assertEqual(sum(line.startswith("1.") for line in text.splitlines()),1); self.assertNotIn("原始意图",text)
 
 

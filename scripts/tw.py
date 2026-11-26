@@ -303,6 +303,21 @@ LABELS = {
         "signals_quiz_pass": "Half quiz {id}: passed", "signals_quiz_fail": "Half quiz {id}: incorrect answers; resend these facts", "signals_quiz_red": "{id} failed twice; seat marked red. Relay: {command}",
         "screen_stats_retake": "For a second screen on the same session: TW screen ask <seat> --session <id> --retake",
         "signals_quiz_usage": "Usage: signals quiz HQ<n> <seat> --answers <file>", "screen_sweep_running": "A screen sweep is already running",
+        "compact_mandatory": "Compacted {n} time(s). Before your next message, you must:\n1. Use Read to open {rules}; reread the Rules section (language, messages, approvals).\n2. Without looking anything up, answer this quiz. Put [quiz {id}] on the first answer line.\n{quiz}\n3. Continue as usual after answering.",
+        "compact_thread_rules": "Use Read to open {rules}; reread the thread protocol sections Language, Messages and STATUS.",
+        "compact_drift_unavailable": "Local transcript unavailable; drift signals were not calculated",
+        "compact_write_locked": "Compacted {n} time(s). Before your next message, you must:\n1. Use Read to open {rules}; reread the Rules section (language, messages, approvals).",
+        "compact_v_unanswered": "unanswered", "compact_v_yes": "yes", "compact_v_no": "no",
+        "compact_swap_reason": "repeated context compaction",
+        "compact_alert": "This turn, tell the user: context was compacted {n} times. Drift signals: {drift}.",
+        "compact_alert_thread": "Tell the lead in STATUS that context was compacted {n} times. Drift signals: {drift}.",
+        "compact_swap": "Consider a successor: {command}",
+        "compact_board": "Compacted {n} times · post-compaction quiz {quiz}: {result} · rules reread: {reread}",
+        "compact_drift_summary": "drift: agent work {agents}, silent threads {threads}, big-picture replies missing required parts {big}",
+        "drift_self_work_line": "Self-work drift: {n} (agents {agents}, thread sends {sends})",
+        "drift_silent_line": "Silent-thread drift: {n} thread(s): {names}",
+        "drift_dajuguan_line": "Big-picture drift: {n} incomplete reply/replies",
+        "compact_check_item": "post-compaction self-check",
         "signals_quiz_reason": "failed the half quiz twice after compaction",
         "screen_retake_no_relead": "A statistics retake cannot open a lead replacement",
         "signal_color_red": "red", "signal_color_yellow": "yellow", "signal_color_green": "green", "signal_sep": "; ",
@@ -543,6 +558,21 @@ LABELS = {
         "signals_quiz_pass": "半份测验 {id}：通过", "signals_quiz_fail": "半份测验 {id}：有答错，补发这些事实", "signals_quiz_red": "{id} 连错两次，该席 signals 标红。接力命令：{command}",
         "screen_stats_retake": "同一张卡测两次：TW screen ask <seat> --session <id> --retake",
         "signals_quiz_usage": "用法：signals quiz HQ<n> <seat> --answers <文件>", "screen_sweep_running": "已有一个体检补考进程在运行",
+        "compact_mandatory": "刚被压缩（第 {n} 次）。下一条消息前必须先做完：\n1. 用 Read 打开 {rules}，重读 Rules 一节（语言、消息、审批）。\n2. 不查资料，直接答下面的小测；答案第一行写 [quiz {id}]。\n{quiz}\n3. 答完照常继续。",
+        "compact_thread_rules": "用 Read 打开 {rules}，重读线程协议的 Language、Messages 和 STATUS 三节。",
+        "compact_drift_unavailable": "记录不在本机，跑偏信号未算",
+        "compact_write_locked": "刚被压缩（第 {n} 次）。下一条消息前必须先做完：\n1. 用 Read 打开 {rules}，重读 Rules 一节（语言、消息、审批）。",
+        "compact_v_unanswered": "未答", "compact_v_yes": "是", "compact_v_no": "否",
+        "compact_swap_reason": "多次压缩",
+        "compact_alert": "这一回合要告诉用户：已压缩 {n} 次。跑偏信号：{drift}。",
+        "compact_alert_thread": "在 STATUS 里告诉 lead：已压缩 {n} 次。跑偏信号：{drift}。",
+        "compact_swap": "建议换座：{command}",
+        "compact_board": "压缩 {n} 次 · 压缩后小测 {quiz}：{result} · 重读规则：{reread}",
+        "compact_drift_summary": "跑偏：自己开 agent {agents} 次、沉默线程 {threads} 个、大局观回复缺项 {big} 条",
+        "drift_self_work_line": "自己开 agent：{n}（agent {agents} 次，派线程 {sends} 次）",
+        "drift_silent_line": "沉默线程：{n} 个（{names}）",
+        "drift_dajuguan_line": "大局观回复缺项：{n} 条",
+        "compact_check_item": "压缩后自检",
         "signals_quiz_reason": "压缩后测验两次不过",
         "screen_retake_no_relead": "统计用补考不能触发更换 lead",
         "signal_color_red": "红", "signal_color_yellow": "黄", "signal_color_green": "绿", "signal_sep": "；",
@@ -1113,6 +1143,10 @@ def _run_reconcile(st):
 STUCK_DEFAULT = 30  # minutes without a report before a working thread counts as possibly stuck
 
 
+def _thread_on_duty(t):
+    return isinstance(t, dict) and t.get("status") in ("working", "starting")
+
+
 def stuck_threads(st):
     """{thread: minutes since its last report} for working/starting threads silent longer than prefs.stuck_minutes."""
     limit = st.get("prefs", {}).get("stuck_minutes", STUCK_DEFAULT)
@@ -1122,7 +1156,7 @@ def stuck_threads(st):
         if t["status"] not in ("working", "starting", "waiting"):
             continue
         forced = bool(t.get("stuck_on"))
-        if not forced and (not limit or t["status"] not in ("working", "starting")):
+        if not forced and (not limit or not _thread_on_duty(t)):
             continue
         since = t.get("last_status_at") or t.get("created")
         if not since:
@@ -1511,6 +1545,7 @@ def render_roster(st, for_thread=None, board=False, all_threads=False):
     lines = [
         f"- lead | rc | session_id={lead.get('session_id') or '(unset)'} | coordinator: plans, routes, merges, talks to the user"
     ]
+    if _compact_label(st,"lead"): lines[0] += " | " + _compact_label(st,"lead")
     for name, t in st["threads"].items():
         if not all_threads and (t["status"] == "archived" or (board and (t["status"] == "resolved" or (t["status"] == "planned" and not t.get("session_id"))))):
             continue
@@ -1664,10 +1699,12 @@ def render_groups(st, board=False, all_threads=False):
                 out.append(f"- {t.get('title') or n} — {lab(st, 'waiting_for', why=lab(st, 'wait_' + t['waiting_for']))}: "
                            f"{t.get('summary') or '-'}")
                 if _screen_label(st, n): out.append(f"  {_screen_label(st, n)}")
+                if _compact_label(st,n): out.append(f"  {_compact_label(st,n)}")
                 continue
             out.append(
                 f"- {t.get('title') or n} ({t['kind']}) — {t.get('summary') or '-'}"
                 + (f" — {_screen_label(st, n)}" if _screen_label(st, n) else "")
+                + (f" · {_compact_label(st,n)}" if _compact_label(st,n) else "")
             )
     return "\n".join(out) or lab(st, "no_threads")
 
@@ -1962,6 +1999,7 @@ def cmd_init(a):
             "ledger_line_every": "wrapup",
             "screen_mode": "shadow", "screen_autograde": True, "signals_red_at": 3, "relay_max_per_day": 2, "succ_watchdog_minutes": 45,
             "signals_window_minutes": 30, "observe_minutes": 20, "grader_timeout_s": 300,
+            "lead_compact_alert": 2, "lead_compact_swap": 4, "drift_window_hours": 24,
             "root_mode": "on", "root_symptoms_at": 2, "root_rework_at": 2, "root_full_at": 4, "root_debt_at": 2, "root_fresh_at": 3,
             "archive_idle_days": 3,
             "reconcile_every": "wrapup", "selfcheck_every": "wrapup", "quota_every_minutes": 60,
@@ -4052,7 +4090,9 @@ def cmd_ready(a):
     for sid,rec in pending_screens:
         _, found = _session_rows(rec.get("session_id")) if rec.get("session_id") else ([],False)
         (local_screens if found else cloud_screens).append((sid,rec))
-    waiting_screens = len(local_screens)
+    pending_compacts=[(seat,rec) for seat,rec in (st.get("compactions") or {}).items() if not (st.get("signals",{}).get(seat) or {}).get("compact_check",{}).get("answered")]
+    local_compacts=[(seat,rec) for seat,rec in pending_compacts if rec.get("session") and _session_rows(rec.get("session"))[1]]
+    waiting_screens = len(local_screens)+len(local_compacts)
     if st.get("prefs", {}).get("screen_autograde", True):
         for sid,rec in cloud_screens:
             print(lab(st,"signals_cloud_grade",screen=sid,seat=rec.get("seat")),file=sys.stderr)
@@ -5939,6 +5979,75 @@ def _screen_label(st, seat):
     return label
 
 
+def _compact_label(st,seat):
+    c=(st.get("compactions") or {}).get(seat)
+    if not c: return ""
+    check=(st.get("signals",{}).get(seat) or {}).get("compact_check") or {}
+    q=check.get("quiz") or ((st.get("signals",{}).get(seat) or {}).get("half_quiz") or {}).get("id","?")
+    result=lab(st,"screen_v_pass" if check.get("passed") else "screen_v_fail") if check.get("answered") else lab(st,"compact_v_unanswered")
+    reread=lab(st,"compact_v_yes" if check.get("reread") else "compact_v_no") if check.get("answered") else lab(st,"compact_v_unanswered")
+    line=lab(st,"compact_board",n=c.get("count",0),quiz=q,result=result,reread=reread)
+    counts=(st.get("signals",{}).get(seat) or {}).get("counts",{})
+    if int(c.get("count",0))>=int(st.get("prefs",{}).get("lead_compact_alert",2)):
+        line+=" · "+lab(st,"compact_drift_summary",agents=(counts.get("drift_self_work",0)),threads=counts.get("drift_silent_threads",0),big=counts.get("drift_dajuguan",0))
+    return line
+
+
+def _compact_sweep(d,st):
+    results=[]
+    for seat,rec in (st.get("compactions") or {}).items():
+        current=(st.get("signals",{}).get(seat) or {}).get("compact_check") or {}
+        if current.get("answered"): continue
+        quiz=(st.get("signals",{}).get(seat) or {}).get("half_quiz") or {}
+        qid=quiz.get("id")
+        sid=rec.get("session")
+        if not qid or not sid: continue
+        rows,found=_session_rows(sid)
+        if not found: continue
+        quiz_at=_when(quiz.get("at"))
+        if not quiz_at: continue
+        answer_i=next((i for i,r in enumerate(rows) if _row_role(r)=="assistant" and (_when(r.get("timestamp") or r.get("created_at") or r.get("time")) or EPOCH)>quiz_at and re.search(rf"\[quiz\s+{re.escape(qid)}\]",_row_text(r),re.I)),None)
+        if answer_i is None: continue
+        compact_i=next((i for i in range(answer_i-1,-1,-1) if _row_is_compact(rows[i])),None)
+        answer=""; reread=False
+        if answer_i is not None:
+            read_start=compact_i+1 if compact_i is not None else 0
+            read_uses={}; read_results={}
+            for r in rows[read_start:answer_i]:
+                stamp=_when(r.get("timestamp") or r.get("created_at") or r.get("time"))
+                if compact_i is None and (not stamp or stamp<quiz_at): continue
+                role=_row_role(r)
+                for b in _row_content(r):
+                    if not isinstance(b,dict): continue
+                    if role=="assistant" and b.get("type") in ("tool_use","tool_call") and str(b.get("name") or "").lower()=="read":
+                        fp=str((b.get("input") or {}).get("file_path") or (b.get("arguments") or {}).get("file_path") or "")
+                        relevant=fp.endswith("SKILL.md") if seat=="lead" else bool(fp.endswith("worker-protocol.md") or fp.endswith("SKILL.md"))
+                        if relevant and b.get("id"): read_uses[str(b["id"])]=True
+                    elif b.get("type")=="tool_result" and b.get("tool_use_id"):
+                        result_text=_tool_result_text(b.get("content")).lstrip()
+                        read_results[str(b["tool_use_id"])]=not (b.get("is_error") or result_text.startswith("<tool_use_error>"))
+            reread=any(read_results.get(tool_id,False) for tool_id in read_uses)
+            chunks=[]
+            for r in rows[answer_i:]:
+                if _row_role(r) in ("user","peer"): break
+                if _row_role(r)=="assistant":
+                    text=_row_text(r)
+                    if not chunks:
+                        marker=re.search(rf"\[quiz\s+{re.escape(qid)}\]",text,re.I)
+                        if marker: text=text[marker.end():]
+                    chunks.append(text)
+            answer="\n".join(chunks)
+        checked=bool(answer_i is not None and answer.strip())
+        passed=False
+        if checked: passed,_=_signals_quiz_grade_text(d,load(d),qid,seat,answer)
+        item={"quiz":qid,"answered":checked,"passed":bool(passed),"reread":bool(reread),"count":rec.get("count",1),"at":now()}
+        def patch(current,latest):
+            current=current or {}; current["compact_check"]=item; return current
+        _patch_state(d,("signals",seat),patch,{"ev":"compact-check","seat":seat})
+        results.append({"seat":seat,**item})
+    return results
+
+
 def _observation_label(st, seat):
     obs = st.get("observations", {}).get(seat)
     current = _seat_session(st,seat)
@@ -6489,6 +6598,8 @@ def cmd_screen(a):
             try: fcntl.flock(lockfile,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError:
                 lockfile.close(); print(json.dumps({"graded":[],"skipped":[],"locked":True}) if a.json else lab(st,"screen_sweep_running")); return
+        compact_done=_compact_sweep(d,st)
+        st=load(d)
         done, skipped, cloud, failed = [], [], [], []
         for sid, rec in list(st.get("screens", {}).items()):
             if rec.get("status") not in ("asked","unscored") or rec.get("graded_at"): continue
@@ -6500,7 +6611,7 @@ def cmd_screen(a):
             if ok: _screen_grade_notice(d, st, sid, result, background=True)
             done.append({"screen": sid, "ok": ok, "verdict": result.get("verdict") if isinstance(result, dict) else None})
             if not ok: failed.append({"screen":sid,"why":str(result)})
-        output = {"graded": done, "scored":sum(x["ok"] for x in done), "failed":failed, "unanswered":skipped, "no_record":cloud, "skipped": skipped, "cloud":cloud}
+        output = {"graded": done, "compact_checks":compact_done, "scored":sum(x["ok"] for x in done), "failed":failed, "unanswered":skipped, "no_record":cloud, "skipped": skipped, "cloud":cloud}
         if a.json: print(json.dumps(output,ensure_ascii=False))
         else:
             print(lab(st,"screen_sweep_summary",scored=output["scored"],failed=len(failed),unanswered=len(skipped),no_record=len(cloud)))
@@ -6635,7 +6746,7 @@ def cmd_screen(a):
 
 
 def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
-    counts={"dissatisfaction":0,"denied_again":0,"decision_asked":0,"unsupported_done":0,"bypass_error":0,"fix_breaks":0,"compact":0}
+    counts={"dissatisfaction":0,"denied_again":0,"decision_asked":0,"unsupported_done":0,"bypass_error":0,"fix_breaks":0,"compact":0,"drift_self_work":0,"drift_silent_threads":0,"drift_dajuguan":0}
     end_at=_when(now())
     stamps=[_when(r.get("timestamp") or r.get("created_at") or r.get("time")) for r in rows]
     if not persist: end_at=max((x for x in stamps if x),default=end_at)
@@ -6645,6 +6756,32 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
         if stamp and stamp<cutoff: continue
         if not stamp: missing_time+=1
         recent.append(row)
+    hours=int(st.get("prefs",{}).get("drift_window_hours",24) or 24)
+    drift_cutoff=end_at-dt.timedelta(hours=hours)
+    drift_rows=[r for r,s in zip(rows,stamps) if s is None or s>=drift_cutoff]
+    agents=sends=big_missing=0
+    for row in drift_rows:
+        if _row_role(row)!="assistant": continue
+        blocks=_row_content(row); txt=_row_text(row)
+        for b in blocks:
+            if not isinstance(b,dict) or b.get("type") not in ("tool_use","tool_call"): continue
+            name=str(b.get("name") or "")
+            if name in ("Agent","Task"): agents+=1
+            if name.endswith("send_message"): sends+=1
+        if "【大局观" in txt or "[Big picture" in txt:
+            low=txt.lower()
+            zh_columns=all(x in txt for x in ("直接做","先提议","不做"))
+            en_columns=(bool(re.search(r"\b(?:do now|do)\b",low)) and bool(re.search(r"\b(?:propose first|propose)\b",low)) and bool(re.search(r"\bdrop\b",low)))
+            columns=zh_columns or en_columns
+            intent=bool(re.search(r"原始意图|\bintent\b",txt,re.I))
+            criterion=bool(re.search(r"成功标准|success criteri(?:on|a)\b",txt,re.I))
+            big_missing+=int(not (columns and intent and criterion))
+    if seat=="lead" and agents>=3 and agents>sends and any(_thread_on_duty(t) and t.get("session_id") for t in st.get("threads",{}).values()):
+        counts["drift_self_work"]=1
+    # silent threads are the board's own "possibly stuck" list: one rule, prefs.stuck_minutes
+    silent=[n for n in stuck_threads(st) if (st.get("threads",{}).get(n) or {}).get("session_id")] if seat=="lead" else []
+    counts["drift_silent_threads"]=len(silent)
+    counts["drift_dajuguan"]=big_missing
     denied=[]; turn_tools=False; insult=False; compact_identity=None
     for i,row in enumerate(recent):
         role=_row_role(row); typ=row.get("type") or (row.get("message") or {}).get("role"); blocks=_row_content(row); text=_row_text(row); low=text.lower()
@@ -6665,7 +6802,7 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
         if _tool_error(blocks) and _error_was_bypassed(recent,i): counts["bypass_error"]+=1
         if _row_is_compact(row):
             counts["compact"]+=1
-            compact_identity=row.get("uuid") or row.get("timestamp") or row.get("created_at")
+            compact_identity=row.get("timestamp") or row.get("created_at") or row.get("time") or row.get("uuid")
         if tool_use or role=="tool_result": turn_tools=True
     signals=sum(v for k,v in counts.items() if k!="compact")
     red_at=int(st.get("prefs",{}).get("signals_red_at",3) or 3)
@@ -6694,7 +6831,7 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
     relay=_succ_relay_count(st,seat); session=_seat_session(st,seat); previous=st.get("signals",{}).get(seat,{})
     sticky=[x for x in previous.get("sticky",[]) if x.get("session")==session]
     if sticky: color="red"
-    result={"seat":seat,"session_id":session,"counts":counts,"color":color,"color_label":lab(st,"signal_color_"+color),"bad_lines":bad_lines,"missing_timestamps":missing_time,"at":now(),"transcript":bool(rows),"relay_count_today":relay,"observation":st.get("observations",{}).get(seat),**{k:previous[k] for k in ("last_p7","half_quiz","quizzes","sticky","red_reason") if k in previous}}
+    result={"seat":seat,"session_id":session,"counts":counts,"color":color,"color_label":lab(st,"signal_color_"+color),"bad_lines":bad_lines,"missing_timestamps":missing_time,"at":now(),"transcript":bool(rows),"relay_count_today":relay,"observation":st.get("observations",{}).get(seat),"drift_self_work_detail":{"agents":agents,"sends":sends},"drift_silent_threads_names":silent,**{k:previous[k] for k in ("last_p7","half_quiz","quizzes","sticky","red_reason") if k in previous}}
     if sticky: result["red_reason"]=sticky[-1].get("reason") or lab(st,"signals_quiz_reason")
     result["history"]=(previous.get("history") or [])[-49:]+[{"session_id":session,"at":result["at"],"color":color,"bypass":counts["bypass_error"],"observation_bypass":(st.get("observations",{}).get(seat) or {}).get("bypass",0)}]
     lines=[]
@@ -6706,6 +6843,9 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
     if counts["compact"]:
         lines.append(lab(st,"signal_compact"))
         if persist: lines.append(_signals_half_quiz(d,st,seat,compact_identity))
+    if counts["drift_self_work"]: lines.append(lab(st,"drift_self_work_line",n=counts["drift_self_work"],agents=agents,sends=sends))
+    if counts["drift_silent_threads"]: lines.append(lab(st,"drift_silent_line",n=counts["drift_silent_threads"],names=", ".join(silent)))
+    if counts["drift_dajuguan"]: lines.append(lab(st,"drift_dajuguan_line",n=counts["drift_dajuguan"]))
     if (signals or counts["compact"]) and persist: lines.append(_signals_p7(st,seat))
     if seat=="lead":
         history=(st.get("lead") or {}).get("sessions",[])
@@ -6756,9 +6896,12 @@ def _signals_half_quiz(d,st,seat,compact_identity=None):
     words=_succ_keywords(task.get("accept") or "")
     if task_id and words: material.insert(0,{"question":lab(st,"succ_question_task",task=task_id),"keywords":words,"fact":task.get("accept") or ""})
     material=material[:5]
-    if not material: return lab(st,"signals_half_quiz_none")
+    if not material:
+        question=_signals_p7(st,seat)
+        answer=next((a for q,a in SCREEN_BANK["zh" if _zh(st) else "en"]["P7"] if q==question),"")
+        material=[{"question":question,"keywords":_succ_keywords(answer)[:6],"fact":answer}]
     previous=(st.get("signals",{}).get(seat,{}) or {}).get("half_quiz",{})
-    if compact_identity is not None and previous.get("compact_id")==str(compact_identity):
+    if compact_identity is not None and previous.get("at") and _when(previous.get("at")) and _when(compact_identity) and _when(previous.get("at")) >= _when(compact_identity)-dt.timedelta(seconds=1):
         existing=_keys_dir(st)/f"{seat}-{previous.get('id')}.json"
         if existing.exists():
             questions=json.loads(existing.read_text(encoding="utf-8"))["questions"]
@@ -6776,6 +6919,104 @@ def _signals_p7(st,seat):
     choices=[x[0] for x in bank if x[0]!=prev]; question=choices[0] if choices else bank[0][0]
     st.setdefault("signals",{}).setdefault(seat,{})["last_p7"]=question
     return question
+
+
+def _after_compact(d,st,seat,local_session):
+    prior=(st.get("compactions") or {}).get(seat) or {}
+    count=int(prior.get("count",0))+1 if prior.get("session")==local_session else 1
+    at=now()
+    if not st.get("write_lock"):
+        def patch(current,latest):
+            same=current and current.get("session")==local_session
+            return {"session":local_session,"count":int(current.get("count",0))+1 if same else 1,
+                    "at":(list(current.get("at",[])) if same else [])+[at]}
+        _patch_state(d,("compactions",seat),patch,{"ev":"compact","seat":seat})
+        st=load(d)
+        count=(st.get("compactions",{}).get(seat) or {}).get("count",count)
+    if st.get("write_lock"):
+        quiz_text=""
+    else: quiz_text=_signals_half_quiz(d,st,seat,at)
+    if not st.get("write_lock"):
+        sig=st.get("signals",{}).get(seat,{})
+        def save_quiz(current,latest):
+            current=current or {}
+            for key in ("half_quiz","last_p7"):
+                if key in sig: current[key]=sig[key]
+            qid=(sig.get("half_quiz") or {}).get("id")
+            current["compact_check"]={"quiz":qid,"answered":False,"passed":False,"reread":False,"count":count,"at":at}
+            return current
+        _patch_state(d,("signals",seat),save_quiz,{"ev":"compact-quiz","seat":seat})
+        st=load(d)
+    match=re.search(r"\b(HQ[0-9]+)\b",quiz_text)
+    qid=match.group(1) if match else (st.get("signals",{}).get(seat,{}).get("half_quiz") or {}).get("id","")
+    return _compact_block(d,st,seat,count,qid,quiz_text,local_session)
+
+
+def _compact_quiz_text(d,st,seat,qid):
+    keyfile=_keys_dir(st)/f"{seat}-{qid}.json"
+    questions=[]
+    try: questions=json.loads(keyfile.read_text(encoding="utf-8")).get("questions",[])
+    except (OSError,ValueError): pass
+    return lab(st,"signals_half_quiz_head",id=qid)+("\n"+"\n".join(f"{i+1}. {x.get('question','')}" for i,x in enumerate(questions)) if questions else "")
+
+
+def _compact_block(d,st,seat,count,qid,quiz_text,local_session):
+    if seat=="lead": rules_line=str(Path(__file__).resolve().parents[1]/"SKILL.md")
+    else:
+        rules=Path(__file__).resolve().parents[1]/"templates"/"worker-protocol.md"
+        rules_line=lab(st,"compact_thread_rules",rules=rules)
+    if st.get("write_lock"):
+        return lab(st,"compact_write_locked",n=count,rules=rules_line)+"\n\n"
+    required=lab(st,"compact_mandatory",n=count,rules=rules_line,id=qid,quiz=quiz_text)
+    try:
+        rows,found=_session_rows(local_session) if local_session else ([],False)
+        if found:
+            end_at=_when(now())
+            cutoff=end_at-dt.timedelta(hours=int(st.get("prefs",{}).get("drift_window_hours",24) or 24))
+            rows=[r for r in rows if not (_when(r.get("timestamp") or r.get("created_at") or r.get("time"))) or _when(r.get("timestamp") or r.get("created_at") or r.get("time"))>=cutoff]
+            analysis,_=_signals_analyze(d,st,seat,rows,persist=False)
+            counts=analysis["counts"]
+            drift=lab(st,"compact_drift_summary",agents=counts.get("drift_self_work",0),threads=counts.get("drift_silent_threads",0),big=counts.get("drift_dajuguan",0))
+        else: drift=lab(st,"compact_drift_unavailable")
+    except Exception:
+        drift=lab(st,"compact_drift_unavailable")
+    if count>=int(st.get("prefs",{}).get("lead_compact_alert",2)):
+        required+="\n"+lab(st,"compact_alert_thread" if seat!="lead" else "compact_alert",n=count,drift=drift)
+    if count>=int(st.get("prefs",{}).get("lead_compact_swap",4)):
+        command=f"TW succ start {seat} --reason \"{lab(st,'compact_swap_reason')}\""
+        required+="\n"+lab(st,"compact_swap",command=command)
+    return required+"\n\n"
+
+
+def _signals_quiz_grade_text(d,st,hqid,seat,raw):
+    keyfile=_keys_dir(st)/f"{seat}-{hqid}.json"
+    if not keyfile.exists(): return False,[]
+    items=json.loads(keyfile.read_text(encoding="utf-8")).get("questions",[])
+    try:
+        parsed=json.loads(raw)
+        answers=[str(parsed.get(str(i+1),parsed.get(item.get("question"),""))) for i,item in enumerate(items)] if isinstance(parsed,dict) else [str(x) for x in parsed]
+    except (ValueError,TypeError):
+        numbered={}
+        for line in raw.splitlines():
+            match=re.match(r"^\s*(\d+)\s*[.、．)）:：]\s*(.+)",line)
+            if match: numbered[int(match.group(1))]=match.group(2).strip()
+        if numbered: answers=[numbered.get(i+1,"") for i in range(len(items))]
+        else: answers=[line.strip() for line in raw.splitlines() if line.strip()]
+    answers=[x for x in answers if not re.match(r"^\s*\[quiz\s+HQ[0-9]+\]",x)]
+    wrong=[]
+    for i,item in enumerate(items):
+        answer=_succ_normalize(answers[i]) if i<len(answers) else ""
+        keywords=[k for k in item.get("keywords",[]) if k]
+        if not keywords or sum(_succ_hit(k,answer) for k in keywords)*2<=len(keywords): wrong.append(item)
+    passed=not wrong
+    sig=st.get("signals",{}).get(seat,{})
+    def patch(current,latest):
+        current=current or {}; quizzes=current.setdefault("quizzes",{}); prior=quizzes.get(hqid,{"attempts":0})
+        prior.update(at=now(),passed=passed,attempts=int(prior.get("attempts",0))+1)
+        if passed: prior["passed_at"]=now()
+        quizzes[hqid]=prior; return current
+    _patch_state(d,("signals",seat),patch,{"ev":"signals-quiz-grade","seat":seat,"quiz":hqid})
+    return passed,wrong
 
 
 def _screen_stats(d,st,replay=None):
@@ -6836,29 +7077,15 @@ def _screen_stats(d,st,replay=None):
 
 def _signals_quiz_grade(d,st,hqid,seat,answers_path):
     if not re.fullmatch(r"HQ[0-9]+",hqid or "") or seat not in st.get("threads",{}) and seat!="lead": sys.exit(lab(st,"screen_unknown_seat",seat=seat))
-    keyfile=_keys_dir(st)/f"{seat}-{hqid}.json"
-    if not keyfile.exists(): sys.exit(lab(st,"screen_unknown"))
-    key=json.loads(keyfile.read_text(encoding="utf-8")); items=key.get("questions",[])
-    raw=Path(answers_path).read_text(encoding="utf-8")
-    try:
-        parsed=json.loads(raw); answers=[str(parsed.get(str(i+1),parsed.get(item.get("question"),""))) for i,item in enumerate(items)] if isinstance(parsed,dict) else [str(x) for x in parsed]
-    except ValueError: answers=raw.splitlines()
-    correct=[]; wrong=[]
-    for i,item in enumerate(items):
-        answer=_succ_normalize(answers[i]) if i<len(answers) else ""
-        keywords=[k for k in item.get("keywords",[]) if k]
-        hits=sum(_succ_hit(k,answer) for k in keywords)
-        passed=bool(keywords) and hits*2>len(keywords)
-        correct.append(passed)
-        if not passed: wrong.append(item)
-    sig=st.setdefault("signals",{}).setdefault(seat,{"seat":seat,"session_id":_seat_session(st,seat),"history":[]})
-    quizzes=sig.setdefault("quizzes",{}); prior=quizzes.get(hqid,{"attempts":0})
-    prior["attempts"]+=1; prior["passed"]=not wrong; prior["at"]=now(); quizzes[hqid]=prior
+    passed,wrong=_signals_quiz_grade_text(d,st,hqid,seat,Path(answers_path).read_text(encoding="utf-8"))
+    if not wrong and not passed: sys.exit(lab(st,"screen_unknown"))
+    sig=load(d).setdefault("signals",{}).get(seat,{})
+    prior=(sig.get("quizzes") or {}).get(hqid,{"attempts":1})
     lines=[]
     if wrong:
         lines.append(lab(st,"signals_quiz_fail",id=hqid))
-        lines.extend(f"{i+1}. {item.get('fact') or item.get('question')}" for i,item in enumerate(items) if not correct[i])
-        if prior["attempts"]>=2:
+        lines.extend(f"{i+1}. {item.get('fact') or item.get('question')}" for i,item in enumerate(wrong))
+        if prior.get("attempts",1)>=2:
             reason=lab(st,"signals_quiz_reason")
             sig["color"]="red"; sig["color_label"]=lab(st,"signal_color_red"); sig["red_reason"]=reason
             sticky=sig.setdefault("sticky",[])
@@ -6867,10 +7094,19 @@ def _signals_quiz_grade(d,st,hqid,seat,answers_path):
             command=lab(st,"signals_relay_command",seat=seat,signals=reason)
             lines.append(lab(st,"signals_quiz_red",id=hqid,command=command))
     else:
-        prior["passed_at"]=now(); lines.append(lab(st,"signals_quiz_pass",id=hqid))
-        sig["sticky"]=[x for x in sig.get("sticky",[]) if not (x.get("kind")=="quiz_red" and x.get("id")==hqid and x.get("session")==_seat_session(st,seat))]
-        if not sig["sticky"]: sig.pop("red_reason",None)
-    save(d,st,{"ev":"signals-quiz-grade","seat":seat,"quiz":hqid,"attempt":prior["attempts"]})
+        lines.append(lab(st,"signals_quiz_pass",id=hqid))
+    if (wrong and prior.get("attempts",1)>=2) or passed:
+        def mark(current,latest):
+            current=current or {}; sticky=current.get("sticky",[])
+            sticky[:]=[x for x in sticky if not (x.get("kind")=="quiz_red" and x.get("id")==hqid and x.get("session")==_seat_session(latest,seat))]
+            if wrong:
+                reason=lab(latest,"signals_quiz_reason")
+                current["color"]="red"; current["color_label"]=lab(latest,"signal_color_red"); current["red_reason"]=reason
+                sticky.append({"kind":"quiz_red","id":hqid,"session":_seat_session(latest,seat),"at":now(),"reason":reason})
+            elif not sticky: current.pop("red_reason",None)
+            current["sticky"]=sticky
+            return current
+        _patch_state(d,("signals",seat),mark,{"ev":"signals-quiz-grade","seat":seat,"quiz":hqid})
     print("\n".join(lines))
 
 
@@ -6935,7 +7171,7 @@ def cmd_prefs(a):
                 sys.exit(lab(st, "rp_bool"))
             if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
                 sys.exit(lab(st, "rp_user"))
-        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes", "urgent_ack_minutes", "quota_every_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", *QUOTA_DEFAULTS) and not re.fullmatch(r"[0-9]+", v):
+        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes", "urgent_ack_minutes", "quota_every_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", "lead_compact_alert", "lead_compact_swap", "drift_window_hours", *QUOTA_DEFAULTS) and not re.fullmatch(r"[0-9]+", v):
             sys.exit(f"{k}: a whole number" + ("" if k in QUOTA_DEFAULTS else " of minutes"))
         if k == "quota_every_minutes" and int(v) < 1:
             sys.exit("quota_every_minutes: a positive whole number of minutes")
@@ -6949,8 +7185,9 @@ def cmd_prefs(a):
             sys.exit(lab(st,"root_mode_error"))
         if k.startswith("root_") and k != "root_mode" and (not v.isdigit() or int(v) < 1):
             sys.exit(f"{k}: a positive whole number")
-        if k in ("signals_red_at", "relay_max_per_day", "succ_watchdog_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s") and (not v.isdigit() or int(v) < 1):
+        if k in ("signals_red_at", "relay_max_per_day", "succ_watchdog_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", "lead_compact_alert", "lead_compact_swap", "drift_window_hours") and (not v.isdigit() or int(v) < 1):
             sys.exit(f"{k}: a positive whole number")
+        if k=="drift_window_hours" and int(v)>168: sys.exit("drift_window_hours: maximum 168 hours")
         if k == "archive_idle_days" and (not v.isdigit() or int(v) < 1):
             sys.exit("archive_idle_days: a positive whole number of days")
         cur = st["prefs"].get(k)
@@ -7651,6 +7888,11 @@ def cmd_selfcheck(a):
     prefs = st.get("prefs", {}); missing = [k for k in ("perm_policy", "gpt_policy") if not prefs.get(k)]
     items.append(item("opening", True, lab(st, "opening_defaults_detail", pairs=", ".join(f"{k}={policy(st, k)}" for k in missing))
                       if missing else "answered", ""))
+    if st.get("compactions",{}).get("lead"):
+        compact=st["compactions"]["lead"]
+        check=(st.get("signals",{}).get("lead") or {}).get("compact_check") or {}
+        items.append(item("compact_check",bool(check.get("answered") and check.get("passed")),
+                          _compact_label(st,"lead"),"read SKILL.md Rules and answer the recorded [quiz HQ<n>]"))
     modeitem, proj = items[0], st.get("project")
     if not d:
         first = f"No teamwork project here: run /teamwork in the project folder (teamwork {label})"
@@ -10418,6 +10660,7 @@ def _blank_state(project, folder):
             "prefs": {"max_parallel": 0, "propose_before_start": True, "update_detail": "brief", "checkin_minutes": 10,
                       "require_review": True, "archive_idle_days": 3, "screen_mode": "shadow", "signals_red_at": 3,
                       "relay_max_per_day": 2, "signals_window_minutes": 30, "observe_minutes": 20, "grader_timeout_s": 300,
+                      "lead_compact_alert": 2, "lead_compact_swap": 4, "drift_window_hours": 24,
                       "root_mode": "on", "root_symptoms_at": 2, "root_rework_at": 2,
                       "root_full_at": 4, "root_debt_at": 2, "root_fresh_at": 3}}
 
@@ -11009,6 +11252,8 @@ def cmd_context(a):
             newer_note = next((r.get("note", "") for r in rels if r["name"] == newer), "")
     except (OSError, ValueError, KeyError):
         pass
+    event=None
+    sid=None
     try:  # the hook's JSON on stdin names the session; wait briefly, a stdin left open must not hang the hook
         import select
         import time
@@ -11033,7 +11278,20 @@ def cmd_context(a):
         pass
     pw = permission_warning(st) if not in_worktree else ""
     reminder = thread_reminder(st, me) if in_worktree else lead_reminder(st)
-    text = "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\nteamwork version: " + label + (f"\nnewer release {newer} available (rollback in effect?)" + (f": {newer_note}" if newer_note else "") if newer else "") + (f"\nThis project tests unreleased teamwork: read {st['prefs']['skill_edge']}/SKILL.md and run {st['prefs']['skill_edge']}/scripts/tw.py instead of the installed copy (staged rollout; the rest of the computer stays on the release)." if st.get("prefs", {}).get("skill_edge") else "") + "\n\n" + (f"Lead: permissions: {pw}\n\n" if pw else "") + reminder + language_rule(st) + "\n\n" + (unreported_note(st) if not in_worktree else
+    seat=me if in_worktree else "lead"
+    mandatory=""
+    try:
+        if isinstance(event,dict) and event.get("source")=="compact":
+            mandatory=_after_compact(d,st,seat,sid)
+        elif isinstance(event,dict) and sid:
+            compact=(st.get("compactions") or {}).get(seat) or {}
+            check=(st.get("signals",{}).get(seat) or {}).get("compact_check") or {}
+            if compact.get("session")==sid and check.get("answered") is not True:
+                qid=check.get("quiz") or ((st.get("signals",{}).get(seat) or {}).get("half_quiz") or {}).get("id") or "HQ1"
+                mandatory=_compact_block(d,st,seat,int(compact.get("count",1)),qid,_compact_quiz_text(d,st,seat,qid),sid)
+    except Exception:
+        mandatory=""
+    text = mandatory + "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\nteamwork version: " + label + (f"\nnewer release {newer} available (rollback in effect?)" + (f": {newer_note}" if newer_note else "") if newer else "") + (f"\nThis project tests unreleased teamwork: read {st['prefs']['skill_edge']}/SKILL.md and run {st['prefs']['skill_edge']}/scripts/tw.py instead of the installed copy (staged rollout; the rest of the computer stays on the release)." if st.get("prefs", {}).get("skill_edge") else "") + "\n\n" + (f"Lead: permissions: {pw}\n\n" if pw else "") + reminder + language_rule(st) + "\n\n" + (unreported_note(st) if not in_worktree else
     "The board below is the lead's view: its requests, questions and commands are the lead's to act on, not yours. "
     "Read it for the roster, your tasks and the known issues.\n\n") + render_board(
         st
@@ -11043,10 +11301,12 @@ def cmd_context(a):
         d, "MEMORY.md"
     )
     if len(text) > CONTEXT_LIMIT:
-        text = (
-            text[:CONTEXT_LIMIT]
-            + "\n...(truncated: read .teamwork/BOARD.md, INSTRUCTIONS.md, MEMORY.md)"
-        )
+        notice="\n...(truncated: read .teamwork/BOARD.md, INSTRUCTIONS.md, MEMORY.md)"
+        if len(mandatory)>=CONTEXT_LIMIT:
+            text=mandatory[:CONTEXT_LIMIT]+notice
+        else:
+            tail_limit=max(0,CONTEXT_LIMIT-len(mandatory))
+            text=mandatory+text[len(mandatory):len(mandatory)+tail_limit]+notice
     print(
         json.dumps(
             {

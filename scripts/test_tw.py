@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 import zipfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # scripts/: quota.py next to tw.py
@@ -64,6 +65,180 @@ def walk_args(run, args, state_file, prepare_primary=False):
             run("plan", "approve", "--user-said", "ok")  # tasks are approved with the plan (T20)
         else:
             run("task", "set", args[2], "--status", step)
+
+
+class T80Compact(unittest.TestCase):
+    def setUp(self):
+        self.tmp=Path(tempfile.mkdtemp(prefix="tw-t80-")); self.oldcwd=Path.cwd()
+        self.project=self.tmp/"project"; self.project.mkdir(); self.keys=self.tmp/"keys"; self.keys.mkdir()
+        self.config=self.tmp/"claude"; self.config.mkdir()
+        self.env={k:v for k,v in os.environ.items() if k != "TEAMWORK_DIR"}
+        self.env.update(TW_KEYS_DIR=str(self.keys),CLAUDE_CONFIG_DIR=str(self.config),TW_NOW=dt.datetime.now().astimezone().isoformat(timespec="seconds"))
+        os.chdir(self.project); self.cli("init","demo","--goal","test project"); self.cli("prefs","--set","language=zh")
+    def tearDown(self): os.chdir(self.oldcwd); shutil.rmtree(self.tmp)
+    def cli(self,*args,ok=True):
+        p=subprocess.run([sys.executable,str(TW),*map(str,args)],cwd=self.project,env=self.env,text=True,capture_output=True)
+        if ok and p.returncode: self.fail(p.stderr or p.stdout)
+        if not ok and p.returncode==0: self.fail("expected failure")
+        return p
+    def state(self): return json.loads((self.project/".teamwork"/"state.json").read_text())
+    def sid(self): return str(uuid.uuid4())
+    def hook(self,session,source="compact"):
+        import contextlib,io
+        old=os.environ.copy(); os.environ.update(self.env)
+        oldstdin=sys.stdin; output=io.StringIO(); readfd,writefd=os.pipe(); os.write(writefd,json.dumps({"session_id":session,"source":source,"hook_event_name":"SessionStart"}).encode()); os.close(writefd); sys.stdin=os.fdopen(readfd,"r")
+        try:
+            with contextlib.redirect_stdout(output): tw.cmd_context(None)
+        finally: sys.stdin.close(); sys.stdin=oldstdin; os.environ.clear(); os.environ.update(old)
+        return json.loads(output.getvalue())["hookSpecificOutput"]["additionalContext"]
+    def record(self,session,rows):
+        folder=self.config/"projects"/"-tmp-project"; folder.mkdir(parents=True,exist_ok=True)
+        path=folder/f"{session}.jsonl"; path.write_text("\n".join(json.dumps(x,ensure_ascii=False) for x in rows)+"\n",encoding="utf-8"); return path
+
+    def test_00_compact_hook_quiz_sweep_and_board(self):
+        session=self.sid(); self.cli("lead","--session",session)
+        context=self.hook(session)
+        self.assertTrue(context.startswith("刚被压缩（第 1 次）")); self.assertIn("[quiz HQ1]",context); self.assertIn("1.",context)
+        question,answer=tw.SCREEN_BANK["zh"]["P7"][0]; base=dt.datetime.fromisoformat(self.env["TW_NOW"])
+        stamps=[(base+dt.timedelta(seconds=i)).isoformat() for i in (-3,1,2)]
+        self.record(session,[
+            {"type":"user","isCompactSummary":True,"timestamp":stamps[0],"message":{"role":"user","content":"summary"}},
+            {"type":"assistant","timestamp":stamps[1],"message":{"role":"assistant","content":[{"type":"tool_use","id":"read-ok","name":"Read","input":{"file_path":str(Path(tw.__file__).resolve().parents[1]/"SKILL.md")}}]}},
+            {"type":"user","timestamp":stamps[1],"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"read-ok","content":"rules"}]}},
+            {"type":"assistant","timestamp":stamps[2],"message":{"role":"assistant","content":[{"type":"text","text":"[quiz HQ1]\n"+answer}]}}
+        ])
+        self.assertTrue(self.hook(session,"resume").startswith("刚被压缩（第 1 次）"))
+        result=json.loads(self.cli("screen","sweep","--json").stdout)
+        self.assertTrue(result["compact_checks"][0]["passed"],result); self.assertTrue(result["compact_checks"][0]["reread"],result)
+        board=self.cli("board").stdout
+        self.assertIn("压缩 1 次",board); self.assertIn("过",board); self.assertIn("重读规则：是",board)
+        self.assertFalse(self.hook(session,"resume").startswith("刚被压缩"))
+
+    def test_compact_sweep_extracts_numbered_answers_after_quiz_marker(self):
+        from unittest.mock import patch
+        session=self.sid(); self.cli("lead","--session",session); self.hook(session)
+        key=self.keys/"demo"/"lead-HQ1.json"
+        key.write_text(json.dumps({"seat":"lead","questions":[
+            {"question":"规则一","keywords":["每次提交前","全量测试"]},
+            {"question":"规则二","keywords":["对外消息","中文"]}
+        ]},ensure_ascii=False),encoding="utf-8")
+        state=self.state(); state["signals"]["lead"]["half_quiz"]={"id":"HQ1","at":self.env["TW_NOW"]}
+        (self.project/".teamwork"/"state.json").write_text(json.dumps(state,ensure_ascii=False),encoding="utf-8")
+        base=dt.datetime.fromisoformat(self.env["TW_NOW"]); stamps=[(base+dt.timedelta(seconds=i)).isoformat() for i in (-2,1,2,3)]
+        answer="**状态汇报**\n- 项目：测试项目\n- 进度：正常\n\n**小测 HQ1**\n\n[quiz HQ1]\n1. 每次提交前必须跑全量测试。\n2. 所有对外消息都用中文。\n\n（这两条答案来自规则文档。）"
+        with patch.dict(os.environ,self.env): grade=tw._signals_quiz_grade_text(self.project/".teamwork",self.state(),"HQ1","lead",answer)
+        self.assertTrue(grade[0],grade)
+        self.record(session,[
+            {"type":"user","isCompactSummary":True,"timestamp":stamps[0],"message":{"content":"summary"}},
+            {"type":"assistant","timestamp":stamps[1],"message":{"content":[{"type":"tool_use","id":"read-1","name":"Read","input":{"file_path":"/tmp/SKILL.md"}}]}},
+            {"type":"user","timestamp":stamps[2],"message":{"content":[{"type":"tool_result","tool_use_id":"read-1","content":"rules"}]}},
+            {"type":"assistant","timestamp":stamps[3],"message":{"content":[{"type":"text","text":answer}]}}
+        ])
+        result=json.loads(self.cli("screen","sweep","--json").stdout)
+        self.assertTrue(result["compact_checks"][0]["passed"],result)
+        self.assertTrue(result["compact_checks"][0]["reread"],result)
+
+    def test_compact_sweep_read_error_does_not_count_as_reread(self):
+        session=self.sid(); self.cli("lead","--session",session); self.hook(session)
+        base=dt.datetime.fromisoformat(self.env["TW_NOW"]); stamps=[(base+dt.timedelta(seconds=i)).isoformat() for i in (-2,1,2,3)]
+        self.record(session,[
+            {"type":"user","isCompactSummary":True,"timestamp":stamps[0],"message":{"content":"summary"}},
+            {"type":"assistant","timestamp":stamps[1],"message":{"content":[{"type":"tool_use","id":"read-bad","name":"Read","input":{"file_path":"/tmp/SKILL.md"}}]}},
+            {"type":"user","timestamp":stamps[2],"message":{"content":[{"type":"tool_result","tool_use_id":"read-bad","is_error":True,"content":"<tool_use_error>missing"}]}},
+            {"type":"assistant","timestamp":stamps[3],"message":{"content":"[quiz HQ1]\n1. answer"}}
+        ])
+        result=json.loads(self.cli("screen","sweep","--json").stdout)
+        self.assertFalse(result["compact_checks"][0]["reread"],result)
+
+    def test_second_compaction_alerts_user(self):
+        session=self.sid(); self.cli("lead","--session",session)
+        self.cli("thread","add","api","--session",self.sid())
+        state=self.state(); state["threads"]["api"]["status"]="working"; (self.project/".teamwork"/"state.json").write_text(json.dumps(state),encoding="utf-8")
+        base=dt.datetime.fromisoformat(self.env["TW_NOW"])
+        self.record(session,[{"type":"assistant","timestamp":(base-dt.timedelta(seconds=1)).isoformat(),"message":{"role":"assistant","content":[{"type":"tool_use","name":"Agent","input":{}} for _ in range(3)]}}])
+        self.hook(session); text=self.hook(session)
+        self.assertIn("已压缩 2 次",text); self.assertIn("自己开 agent 1 次",text)
+        self.assertEqual(self.state()["compactions"]["lead"]["count"],2)
+    def test_fourth_compaction_prints_successor_command(self):
+        session=self.sid(); self.cli("lead","--session",session)
+        for _ in range(4): text=self.hook(session)
+        self.assertIn('TW succ start lead --reason "多次压缩"',text)
+
+    def test_thread_compaction_uses_worker_protocol_path(self):
+        session=self.sid(); self.cli("thread","add","api","--session",session)
+        from unittest.mock import patch
+        with patch.dict(os.environ,self.env): text=tw._after_compact(self.project/".teamwork",self.state(),"api",session)
+        self.assertIn(str(Path(tw.__file__).resolve().parents[1]/"templates"/"worker-protocol.md"),text)
+        self.assertNotIn("references/messages.md",text)
+    def test_new_session_resets_compaction_count(self):
+        first=self.sid(); second=self.sid()
+        self.cli("lead","--session",first); self.hook(first); self.hook(first)
+        self.cli("lead","--session",second,"--force"); text=self.hook(second)
+        self.assertIn("第 1 次",text); self.assertEqual(self.state()["compactions"]["lead"]["count"],1)
+    def test_signals_reuses_hook_quiz_for_compaction_row(self):
+        session=self.sid(); self.cli("lead","--session",session)
+        self.hook(session); qid=self.state()["signals"]["lead"]["half_quiz"]["id"]
+        stamp=self.env["TW_NOW"]; path=self.project/"compact.jsonl"
+        path.write_text(json.dumps({"type":"user","isCompactSummary":True,"timestamp":stamp,"message":{"role":"user","content":"summary"}}),encoding="utf-8")
+        self.cli("signals","lead","--transcript",path)
+        self.assertEqual(self.state()["signals"]["lead"]["half_quiz"]["id"],qid)
+    def test_drift_self_work_agent_threshold_and_send_balance(self):
+        st=self.state(); st["threads"]["api"]={"status":"working","session_id":"thread"}; stamp=self.env["TW_NOW"]
+        def rows(a,s): return [{"type":"assistant","timestamp":stamp,"message":{"role":"assistant","content":[{"type":"tool_use","name":"Agent","input":{}} for _ in range(a)]+[{"type":"tool_use","name":"mcp__send_message","input":{}} for _ in range(s)]}}]
+        self.assertEqual(tw._signals_analyze(self.project/".teamwork",st,"lead",rows(3,1),persist=False)[0]["counts"]["drift_self_work"],1)
+        self.assertEqual(tw._signals_analyze(self.project/".teamwork",st,"lead",rows(3,5),persist=False)[0]["counts"]["drift_self_work"],0)
+    def test_idle_threads_are_not_on_duty_for_drift(self):
+        st=self.state(); st["threads"]["api"]={"status":"idle","session_id":"thread","last_status_at":(dt.datetime.now().astimezone()-dt.timedelta(hours=2)).isoformat()}
+        stamp=self.env["TW_NOW"]
+        result,_=tw._signals_analyze(self.project/".teamwork",st,"lead",[{"type":"assistant","timestamp":stamp,"message":{"content":"still working"}}],persist=False)
+        self.assertEqual(result["counts"]["drift_silent_threads"],0)
+        def rows(): return [{"type":"assistant","timestamp":stamp,"message":{"content":[{"type":"tool_use","name":"Agent","input":{}} for _ in range(3)]}}]
+        self.assertEqual(tw._signals_analyze(self.project/".teamwork",st,"lead",rows(),persist=False)[0]["counts"]["drift_self_work"],0)
+    def test_big_picture_requires_all_three_sections(self):
+        st=self.state(); stamp=self.env["TW_NOW"]
+        def analyze(txt): return tw._signals_analyze(self.project/".teamwork",st,"lead",[{"type":"assistant","timestamp":stamp,"message":{"role":"assistant","content":txt}}],persist=False)[0]["counts"]["drift_dajuguan"]
+        self.assertEqual(analyze("【大局观】直接做 / 先提议 / 不做；原始意图：x；成功标准：y"),0)
+        self.assertEqual(analyze("[Big picture] Do now / Propose first / Drop; intent: x; success criteria: y"),0)
+        self.assertEqual(analyze("【大局观】"),1)
+    def test_silent_thread_count_respects_threshold_and_disabled_pref(self):
+        st=self.state(); old=(dt.datetime.now().astimezone()-dt.timedelta(hours=2)).isoformat()
+        st["threads"]["api"]={"status":"working","session_id":"local","last_status_at":old}
+        stamp=self.env["TW_NOW"]
+        result,_=tw._signals_analyze(self.project/".teamwork",st,"lead",[{"type":"assistant","timestamp":stamp,"message":{"role":"assistant","content":"still working"}}],persist=False)
+        self.assertEqual(result["counts"]["drift_silent_threads"],1); self.assertIn("api",result["drift_silent_threads_names"])
+        st["prefs"]["stuck_minutes"]=0
+        self.assertEqual(tw._signals_analyze(self.project/".teamwork",st,"lead",[],persist=False)[0]["counts"]["drift_silent_threads"],0)
+    def test_compaction_prefs_require_positive_integers_and_cap_hours(self):
+        self.cli("prefs","--set","lead_compact_alert=3","lead_compact_swap=6","drift_window_hours=168")
+        self.assertEqual(self.state()["prefs"]["drift_window_hours"],168)
+        self.cli("prefs","--set","drift_window_hours=169",ok=False)
+        self.cli("prefs","--set","lead_compact_swap=0",ok=False)
+    def test_compact_block_survives_context_truncation(self):
+        session=self.sid(); self.cli("lead","--session",session)
+        from unittest.mock import patch
+        with patch.object(tw,"CONTEXT_LIMIT",150): text=self.hook(session)
+        self.assertTrue(text.startswith("刚被压缩"))
+        notice="\n...(truncated: read .teamwork/BOARD.md, INSTRUCTIONS.md, MEMORY.md)"
+        self.assertLessEqual(len(text),150+len(notice))
+
+    def test_compact_drift_failure_keeps_hook_output(self):
+        session=self.sid(); self.cli("lead","--session",session)
+        state=self.state(); state["prefs"]["lead_compact_alert"]=1; (self.project/".teamwork"/"state.json").write_text(json.dumps(state),encoding="utf-8")
+        import contextlib,io
+        from unittest.mock import patch
+        old=os.environ.copy(); os.environ.update(self.env)
+        oldstdin=sys.stdin; output=io.StringIO(); readfd,writefd=os.pipe(); os.write(writefd,json.dumps({"session_id":session,"source":"compact","hook_event_name":"SessionStart"}).encode()); os.close(writefd); sys.stdin=os.fdopen(readfd,"r")
+        try:
+            with patch.object(tw,"_signals_analyze",side_effect=RuntimeError("drift failed")),contextlib.redirect_stdout(output): tw.cmd_context(None)
+        finally: sys.stdin.close(); sys.stdin=oldstdin; os.environ.clear(); os.environ.update(old)
+        emitted=json.loads(output.getvalue())["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("下一条消息前必须先做完",emitted)
+        self.assertIn("跑偏信号：记录不在本机，跑偏信号未算",emitted)
+    def test_write_lock_still_emits_without_ledger_mutation(self):
+        session=self.sid(); self.cli("lead","--session",session)
+        st=self.state(); st["write_lock"]={"ho":"HO1"}; (self.project/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
+        text=self.hook(session); self.assertTrue(text.startswith("刚被压缩")); self.assertNotIn("lead",self.state().get("compactions",{}))
+        self.assertIn("重读 Rules 一节",text); self.assertNotIn("[quiz HQ",text); self.assertEqual(sum(line.startswith("1.") for line in text.splitlines()),1); self.assertNotIn("原始意图",text)
 
 
 class TwCase(unittest.TestCase):
@@ -9883,13 +10058,14 @@ class T72ScreenAutomationSignalsStats(TwCase):
         events=self.dir/"compact.jsonl"
         events.write_text(json.dumps({"type":"summary","isCompactSummary":True,"timestamp":dt.datetime.now().astimezone().isoformat(),"message":{"content":"summary"}}),encoding="utf-8")
         empty=self.tw("signals","api","--transcript",str(events)).stdout
-        self.assertIn("还没有可出题",empty)
+        self.assertIn("半份测验",empty)
+        initial_quiz=self.state()["signals"]["api"]["half_quiz"]["id"]
         self.tw("memory","--standing","汇报一律用中文写给用户")
         first=self.tw("signals","api","--transcript",str(events)).stdout
         state=self.state(); quiz=state["signals"]["api"]["half_quiz"]
         self.assertIn("半份测验",first)
-        self.assertIn("“汇报”",first)  # the question names the first word of the rule ...
-        self.assertNotIn("中文写给用户",first)  # ... and never gives the answer away
+        self.assertIn("分析",first)  # the hook and signals reuse the P7 fallback from the same compaction
+        self.assertEqual(quiz["id"],initial_quiz)
         key=json.loads(next(self.keys.rglob(f"api-{quiz['id']}.json")).read_text(encoding="utf-8"))
         self.assertTrue(key["questions"][0]["keywords"])
         self.assertNotIn(str(self.keys),json.dumps(self.state(),ensure_ascii=False))  # no key path in the ledger

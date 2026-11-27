@@ -338,6 +338,21 @@ class QuotaTrigger(TwCase):
             r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)  # stale event: the fresh cache wins
             self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["src"]), (40, "cache"))
             self.assertEqual(quota.tier(r, {}, now)[0], "normal")
+            samples.write_text(json.dumps({"samples": [{"t": (now - 60) * 1000, "org": "org-a", "u": {"sd": 92}}]}))
+            r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)  # a newer desktop sample beats older live ones
+            self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["src"]), (92, "desktop"))
+            self.assertEqual(quota.tier(r, {}, now)[0], "lead-only")
+
+    def test_same_window_across_a_three_hour_boundary(self):
+        """Resets less than 3 hours apart are one window, wherever they fall: the higher reading wins."""
+        cfg = self.dir / "acct-b"; cfg.mkdir()
+        now, reset = 2_000_000_000, 2_000_008_000 // 10800 * 10800 + 10800
+        (cfg / "bridge-transcript-cse_x.jsonl").write_text(json.dumps({"timestamp": now - 60,
+            "rate_limit_info": {"unifiedWindows": {"seven_day": {"utilization": 0.95, "resetsAt": reset - 1}}}}) + "\n")
+        (cfg / ".claude.json").write_text(json.dumps({"cachedUsageUtilization": {"fetchedAtMs": (now - 600) * 1000,
+            "utilization": {"seven_day": {"utilization": 50, "resets_at": reset}}}}))
+        with mock.patch.dict(os.environ, {"TW_DESKTOP_USAGE": str(self.dir / "none.json")}):
+            self.assertEqual(quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)["claude"]["total"]["pct"], 95)
 
     def test_older_ledger_missing_default_keys_still_runs_ready(self):
         """T85: a ledger written before some keys existed (here: decisions) must not crash a due default."""

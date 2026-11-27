@@ -218,17 +218,22 @@ def _claude_events(config_dirs, now):
     for row in (out.get("total"), out.get("scoped")):  # a day-old event may be far below today's: not for the tier
         if row and row.get("seen_at") and now - row["seen_at"] > 86400:
             row["stale"] = True
-    usable = [r for r in (out.get("total"), cache.get("total")) if r and not r.get("stale")]
-    desk = {} if usable else _desktop(config_dirs, now)  # T85: accounts with only local sessions log no events
+    desk = _desktop(config_dirs, now)  # T85: accounts with only local sessions log no events
     for key in ("total", "scoped"):
         rows = [r for r in (out.get(key), cache.get(key), desk.get(key)) if isinstance(r, dict) and num(r.get("pct")) is not None]
         if not rows:
             continue
         live = [r for r in rows if not r.get("stale")]
-        # live readings: the latest window, then the highest (usage only grows within a window; event times are only
-        # file times); nothing live: the newest reading, shown but not used for the tier
-        pick = max(live, key=lambda r: (int((num(r.get("resets_at")) or 0) // 10800), r["pct"])) if live else \
-            max(rows, key=lambda r: r.get("seen_at") or 0)
+        timed = [r for r in live if num(r.get("resets_at")) is not None]
+        pick = None
+        if timed:  # the latest window (resets within 3 hours count as one), then the highest: usage only grows
+            last = max(r["resets_at"] for r in timed)
+            pick = max((r for r in timed if last - r["resets_at"] < 10800), key=lambda r: r["pct"])
+        for r in live:  # a reading with no reset time (desktop samples) wins when it was taken later
+            if num(r.get("resets_at")) is None and (pick is None or (r.get("seen_at") or 0) > (pick.get("seen_at") or 0)):
+                pick = r
+        if pick is None:  # nothing live: the newest reading, shown but not used for the tier
+            pick = max(rows, key=lambda r: r.get("seen_at") or 0)
         model = (out.get(key) or {}).get("model")
         out[key] = dict(pick, **({"model": model or pick.get("model") or "Fable"} if key == "scoped" else {}))
         if pick.get("src") != "events" or pick.get("stale"):

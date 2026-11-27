@@ -331,6 +331,7 @@ LABELS = {
         "card_primary_line": "{task}Primary outcome: {result} — {evidence}",
         "primary_url": "URL",
         "merge_no_tasks": "Warning: no tasks are associated. Merge is blocked unless --user-said records a one-time waiver.",
+        "merge_shard_failed": "check shard {group} failed", "merge_shard_timeout": "check shard {group} exceeded {minutes} minutes and was stopped",
         "primary_dispatch_missing": "{task}: dispatch needs a --primary outcome. Use --no-primary with --user-said only when the user waived it.",
         "check_msg_primary_missing": "TASK is missing a Primary outcome line",
         "board_primary_col": "primary",
@@ -808,6 +809,7 @@ LABELS = {
         "card_primary_line": "{task}主产出：{result} — {evidence}",
         "primary_url": "网址",
         "merge_no_tasks": "警告：没有关联到任务。合并默认拦截；--user-said 可记录一次性豁免。",
+        "merge_shard_failed": "检查分组 {group} 失败", "merge_shard_timeout": "检查分组 {group} 超过 {minutes} 分钟，被停止",
         "primary_dispatch_missing": "{task}：派单需要先补 --primary 主产出；只有用户明确豁免时才用 --no-primary 和 --user-said。",
         "check_msg_primary_missing": "TASK 缺少主产出行",
         "board_primary_col": "主产出",
@@ -1091,11 +1093,38 @@ def _primary_evidence_specific(d, evidence):
                 sum(len(w) for w in meaningful) >= 3)
 
 
-def _primary_suspect(how, evidence):
+def _primary_suspect(d, how, evidence):
     words = "|".join(re.escape(w) for w in PRIMARY_SUSPECT_WORDS)
     negation = re.compile(rf"\b(?:no|not|without|never)\s+(?:(?:use|using|used|a|any)\s+)*(?:{words})"
                           rf"|(?:不用|没用|没有用|未用|不是|并非|非|无|没有)\s*(?:{words})", re.I)
-    for sentence in re.split(r"[,，.;；/]|\bbut\b|但|只好", f"{how or ''} {evidence or ''}", flags=re.I):
+    project = Path(d).resolve().parent if d else Path.cwd().resolve()
+    roots = [Path.cwd().resolve(), project]
+
+    def random_tmp_component(component):
+        return bool(re.fullmatch(r"tmp[A-Za-z0-9_-]{8}", component))
+
+    def human_text(value):
+        value = value or ""
+        tokens = re.findall(r'"([^"\n]+)"|\'([^\'\n]+)\'|([^\s,;，；、()（）"\'`]+)', value)
+        for parts in tokens:
+            token = next((part for part in parts if part), "")
+            clean = token.strip(".:：。")
+            if not clean or not re.search(r"[./\\]", clean):
+                continue
+            path = Path(clean).expanduser()
+            candidates = [path] if path.is_absolute() else [root / path for root in roots]
+            existing = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
+            if existing:
+                try:
+                    relative = existing.relative_to(Path(tempfile.gettempdir()).resolve())
+                except ValueError:
+                    relative = existing
+                replacement = " ".join(part for part in relative.parts if not random_tmp_component(part))
+                value = value.replace(token, replacement)
+        return value
+
+    text = f"{human_text(how)} {human_text(evidence)}"
+    for sentence in re.split(r"[,，.;；/]|\bbut\b|但|只好", text, flags=re.I):
         if negation.search(sentence):
             continue
         if any(word in sentence.lower() for word in PRIMARY_SUSPECT_WORDS):
@@ -1161,7 +1190,7 @@ def primary_gate(st, tid, before, k, changes, a, said):
         norm = lambda x: re.sub(r"[\W_]+", "", (x or "").lower(), flags=re.UNICODE)
         if norm(a.recheck_evidence) == norm(check.get("evidence")):
             sys.exit(lab(st, "primary_recheck_independent"))
-        if (k.get("primary_suspect") or _primary_suspect(a.recheck_how, a.recheck_evidence)) and not getattr(a, "suspect_cleared", False):
+        if (k.get("primary_suspect") or _primary_suspect(find_dir(), a.recheck_how, a.recheck_evidence)) and not getattr(a, "suspect_cleared", False):
             sys.exit(lab(st, "primary_suspect_gate"))
 
 
@@ -2286,6 +2315,9 @@ def cmd_init(a):
             "thread_permission_mode": THREAD_MODE_DEFAULT,  # create_session permission_mode for every thread
             "standing_grants": [],  # archive, schedule, merge: the user allowed these once (IL-30), each by --user-said
             "check_cmd": "",  # the project's checks, run by `merge` on the rehearsed merge
+            "check_shards": "",  # optional glob: one parallel check group per matched file
+            "check_jobs": 4,
+            "check_shard_timeout_minutes": 20,
             "spawn_policy": "",
             "perm_policy": "",
             "gpt_policy": "",
@@ -3341,7 +3373,7 @@ def task_verify(d, st, a):
              "by": getattr(a, "by", None) or "lead", "at": now()}
     if a.why: check["why"] = a.why.strip()
     k["primary_check"] = check
-    if _primary_suspect(a.how, a.evidence):
+    if _primary_suspect(d, a.how, a.evidence):
         k["primary_suspect"] = True
         print(lab(st, "primary_suspect_warning"), file=sys.stderr)
     else:
@@ -8272,7 +8304,7 @@ def cmd_prefs(a):
                 sys.exit(lab(st, "rp_bool"))
             if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
                 sys.exit(lab(st, "rp_user"))
-        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes", "urgent_ack_minutes", "quota_every_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", "lead_compact_alert", "lead_compact_swap", "drift_window_hours", "sweep_every_minutes", "thread_default_after_minutes", "slow_factor", *QUOTA_DEFAULTS) and not re.fullmatch(r"[0-9]+", v):
+        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes", "check_jobs", "check_shard_timeout_minutes", "urgent_ack_minutes", "quota_every_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", "lead_compact_alert", "lead_compact_swap", "drift_window_hours", "sweep_every_minutes", "thread_default_after_minutes", "slow_factor", *QUOTA_DEFAULTS) and not re.fullmatch(r"[0-9]+", v):
             sys.exit(f"{k}: a whole number" + ("" if k in QUOTA_DEFAULTS else " of minutes"))
         if k == "quota_every_minutes" and int(v) < 1:
             sys.exit("quota_every_minutes: a positive whole number of minutes")
@@ -13094,6 +13126,165 @@ def _in_the_way(git, checkout, old, new):
     return sorted(hit)
 
 
+def _positive_timeout(value, default):
+    try: timeout = float(value)
+    except (TypeError, ValueError): return float(default)
+    return timeout if timeout >= 0 and timeout < float("inf") else float(default)
+
+
+def _run_check(st, test, cwd, env, log, worktree_root=None):
+    """Run the configured merge check, optionally as visible parallel shard groups."""
+    import glob
+    import shlex
+    import signal
+    import time
+
+    previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt(f"merge check interrupted by signal {signum}")
+
+    def stop_process_group(process):
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            try: process.kill()
+            except OSError: pass
+        try:
+            if process.stdout:
+                process.communicate(timeout=10)
+            else:
+                process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try: process.kill()
+            except OSError: pass
+            process.wait()
+            if process.stdout: process.stdout.close()
+
+    prefs = st.get("prefs", {})
+    total_limit = _positive_timeout(prefs.get("check_timeout_minutes", 60), 60)
+    shards = str(prefs.get("check_shards") or "").strip()
+    if not shards:
+        pr = subprocess.Popen(test, shell=True, cwd=str(cwd), stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                              stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
+        for sig in previous_handlers: signal.signal(sig, interrupted)
+        try:
+            out, _ = pr.communicate(timeout=total_limit * 60 if total_limit > 0 else None)
+        except subprocess.TimeoutExpired:
+            stop_process_group(pr)
+            out = "(output not read: a process the check detached still holds it)"
+            return {"checks": "fail", "check_output": (out or "")[-2000:],
+                    "error": f"checks ran over {total_limit:g} minutes on the rehearsed merge ({test}) and were stopped: nothing changed (prefs check_timeout_minutes sets the limit; 0 = none)"}
+        except KeyboardInterrupt as exc:
+            stop_process_group(pr)
+            return {"checks": "fail", "check_output": "", "error":
+                    f"checks were interrupted ({exc}): nothing changed"}
+        finally:
+            for sig, handler in previous_handlers.items(): signal.signal(sig, handler)
+        return {"checks": "pass" if pr.returncode == 0 else "fail",
+                **({"check_output": (out or "")[-2000:]} if pr.returncode != 0 else {}),
+                **({"error": f"checks failed on the rehearsed merge ({test}): nothing changed"} if pr.returncode != 0 else {})}
+
+    paths = sorted(glob.glob(shards, root_dir=str(cwd)))
+    paths = [str(Path(path)) for path in paths if (Path(cwd) / path).is_file()]
+    try:
+        jobs = max(1, int(prefs.get("check_jobs", 4)))
+        shard_limit = _positive_timeout(prefs.get("check_shard_timeout_minutes", 20), 20) * 60
+    except (TypeError, ValueError):
+        jobs, shard_limit = 4, 1200.0
+    if not paths:
+        return {"checks": "fail", "check_output": "no files matched check_shards: " + shards,
+                "check_shards": {"total": 0, "passed": 0, "failed": [shards], "timed_out": []},
+                "error": f"no files matched check_shards {shards}: nothing changed"}
+
+    log = Path(log)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    outputs = log.parent / (log.stem + "-shards")
+    outputs.mkdir(parents=True, exist_ok=True)
+    start = time.monotonic()
+    prefix = Path(cwd).resolve().relative_to(Path(worktree_root).resolve()) if worktree_root else Path()
+    names = [(prefix / Path(path)).as_posix() for path in paths]
+    completed, passed, failed, timed_out = 0, 0, [], []
+    running, next_index, next_heartbeat = {}, 0, start + 60
+
+    def emit(message):
+        line = message + "\n"
+        print(message, file=sys.stderr, flush=True)
+        with log.open("a", encoding="utf-8") as stream:
+            stream.write(line); stream.flush()
+
+    emit(f"merge check log: {log}")
+
+    def launch(index):
+        name, shard = names[index], paths[index]
+        command = test.replace("{shard}", shlex.quote(shard)) if "{shard}" in test else test + " " + shlex.quote(shard)
+        outpath = outputs / (f"{index + 1:03d}-" + re.sub(r"[^A-Za-z0-9_.-]+", "_", name) + ".out")
+        stream = outpath.open("w", encoding="utf-8")
+        try:
+            process = subprocess.Popen(command, shell=True, cwd=str(cwd), stdout=stream, stdin=subprocess.DEVNULL,
+                                       stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
+        finally:
+            stream.close()
+        running[index] = (process, time.monotonic(), outpath)
+        elapsed = int(time.monotonic() - start)
+        emit(f"[{index + 1}/{len(paths)} start · elapsed {elapsed // 60:02d}:{elapsed % 60:02d} · running {name}]")
+
+    for sig in previous_handlers: signal.signal(sig, interrupted)
+    try:
+      while next_index < len(paths) or running:
+        if total_limit > 0 and time.monotonic() - start >= total_limit * 60:
+            for index in range(next_index, len(paths)):
+                timed_out.append(names[index]); completed += 1
+            next_index = len(paths)
+        while next_index < len(paths) and len(running) < jobs:
+            launch(next_index); next_index += 1
+        now_mono = time.monotonic()
+        for index, (process, launched, outpath) in list(running.items()):
+            name = names[index]
+            over_total = total_limit > 0 and now_mono - start >= total_limit * 60
+            over_shard = shard_limit > 0 and now_mono - launched >= shard_limit
+            if over_total or over_shard:
+                stop_process_group(process)
+                timed_out.append(name); completed += 1; del running[index]
+                emit(f"[{completed}/{len(paths)} timed out · {name}]")
+            elif process.poll() is not None:
+                completed += 1; del running[index]
+                if process.returncode == 0:
+                    passed += 1; emit(f"[{completed}/{len(paths)} passed · {name}]")
+                else:
+                    failed.append(name); emit(f"[{completed}/{len(paths)} failed · {name}]")
+        now_mono = time.monotonic()
+        if running and now_mono >= next_heartbeat:
+            elapsed = int(now_mono - start)
+            active = ", ".join(names[index] for index in sorted(running))
+            emit(f"[{completed}/{len(paths)} 完成 · 已用 {elapsed // 60:02d}:{elapsed % 60:02d} · 在跑 {active}]")
+            next_heartbeat = now_mono + 60
+        if running: time.sleep(0.05)
+    except KeyboardInterrupt as exc:
+        for process, _, _ in running.values():
+            stop_process_group(process)
+        return {"checks": "fail", "check_shards": {"total": len(paths), "passed": passed,
+                "failed": failed, "timed_out": timed_out}, "check_output": "",
+                "error": f"checks were interrupted ({exc}): nothing changed"}
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
+
+    state = {"total": len(paths), "passed": passed, "failed": failed, "timed_out": timed_out}
+    outputs_text = []
+    for index, name in enumerate(names):
+        path = outputs / (f"{index + 1:03d}-" + re.sub(r"[^A-Za-z0-9_.-]+", "_", name) + ".out")
+        try: outputs_text.append(f"--- {name} ---\n" + path.read_text(encoding="utf-8", errors="replace"))
+        except OSError: pass
+    result = {"checks": "pass" if not failed and not timed_out else "fail", "check_shards": state,
+              "check_output": "\n".join(outputs_text)[-20000:]}
+    errors = [lab(st, "merge_shard_timeout", group=name, minutes=prefs.get("check_shard_timeout_minutes", 20))
+              for name in timed_out]
+    errors.extend(lab(st, "merge_shard_failed", group=name) for name in failed)
+    if errors:
+        result["error"] = "; ".join(errors) + ": nothing changed"
+    return result
+
+
 def cmd_merge(a):
     """Rehearse a merge of the reviewed commit into the base in a throwaway worktree, run the checks there, and only
     with --apply fast-forward the base. The live checkout is never left half-merged: a conflict, a red check, or a
@@ -13255,46 +13446,14 @@ def cmd_merge(a):
                          "merge again; nothing changed")
         if test.strip():
             env = {k: v for k, v in os.environ.items() if k != "TEAMWORK_DIR"}  # checks never touch the live ledger
-            try:
-                limit = float(st.get("prefs", {}).get("check_timeout_minutes", 60) or 0)
-            except (TypeError, ValueError):
-                limit = 60.0  # a hand-edited ledger: the default, never no limit by accident
-            if limit != limit or limit in (float("inf"), float("-inf")) or limit < 0:
-                limit = 60.0  # nan, inf, negative
-            pr = subprocess.Popen(test, shell=True, cwd=str(wt / sub), stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                                  stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
-            try:
-                out, _ = pr.communicate(timeout=limit * 60 if limit > 0 else None)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(pr.pid, signal.SIGKILL) if hasattr(os, "killpg") else pr.kill()
-                except OSError:
-                    pass
-                try:
-                    out, _ = pr.communicate(timeout=10)
-                except subprocess.TimeoutExpired:  # a detached grandchild still holds the output pipe
-                    out = "(output not read: a process the check detached still holds it)"
-                    pr.kill()
-                    pr.wait()
-                    if pr.stdout:
-                        pr.stdout.close()
-                res["checks"] = "fail"
-                res["check_output"] = (out or "")[-2000:]
+            branch_log = re.sub(r"[^A-Za-z0-9_.-]+", "_", a.branch)
+            run_id = f"{time.time_ns()}-{os.getpid()}"
+            check_log = d / "private" / "merge-logs" / f"{branch_log}-{sha[:9]}-{run_id}.log"
+            result = _run_check(st, test, wt / sub, env, check_log, worktree_root=wt)
+            res.update({key: value for key, value in result.items() if key != "error"})
+            if result.get("error"):
                 print(json.dumps(res, ensure_ascii=False))
-                sys.exit(f"checks ran over {limit:g} minutes on the rehearsed merge ({test}) and were stopped: nothing "
-                         "changed (prefs check_timeout_minutes sets the limit; 0 = none)")
-            except BaseException:  # stopped: take the whole check down with us, grandchildren included
-                try:
-                    os.killpg(pr.pid, signal.SIGKILL) if hasattr(os, "killpg") else pr.kill()
-                except OSError:
-                    pass
-                pr.wait()
-                raise
-            res["checks"] = "pass" if pr.returncode == 0 else "fail"
-            if pr.returncode != 0:
-                res["check_output"] = (out or "")[-2000:]
-                print(json.dumps(res, ensure_ascii=False))
-                sys.exit(f"checks failed on the rehearsed merge ({test}): nothing changed")
+                sys.exit(result["error"])
         else:
             res["checks"] = f"none ({a.no_test})"
         if not a.apply:

@@ -183,7 +183,6 @@ OPTIONAL_STATE_DEFAULTS = {"areas", "compactions", "last_quota_at", "last_report
     "archive_packs", "beta_feedback", "betas", "desktop_open_queue", "model_deny", "models", "pace_notice_tier",
     "qa_pending", "quota", "quota_pct", "reconcile", "root_since", "screen_pending_hints", "selfcheck", "sprint",
     "standing", "stopped_at", "version_notice", "versions"}
-REQUIRED_STATE = set(DEFAULT_STATE) - OPTIONAL_STATE_DEFAULTS
 REQUIRED_PREFS = {"short_name", "ledger_line_every"}
 REQUIRED_LEDGER_KEYS = {"lead": dict, "threads": dict, "tasks": dict}
 
@@ -620,7 +619,7 @@ LABELS = {
         "stale_recorded": "Already recorded; updated the existing stale result",
         "sensitive_guard": "sensitive tier: you said you want to review this kind of command",
         "decided_warning": "This may already be decided: {items}; check decided first",
-        "decided_none": "no matches", "quota_due": "due", "quota_idle": "not due · idle: nothing is running", "quota_trigger_off": "Turn the quota timer off: the team is idle (set {id} enabled=false, then prefs --set quota_trigger_on=false)", "quota_trigger_on": "Turn the quota timer on: work is running or ready to send out (set {id} enabled=true, then prefs --set quota_trigger_on=true)", "quota_not_due": "not due · {minutes} minutes remaining",
+        "decided_none": "no matches", "quota_due": "due", "quota_idle": "not due · idle: nothing is running", "quota_trigger_off": "Turn the quota timer off: the team is idle (set {id} enabled=false, then prefs --set quota_trigger_on=false)", "quota_trigger_on": "Turn the quota timer on: work is running or ready to send out (set {id} enabled=true, then prefs --set quota_trigger_on=true)", "quota_trigger_create": "Create the hourly quota timer (none recorded, work is running): create_trigger name=\"{name} hourly quota\" cron_expression=\"{minute} * * * *\" (fires into this session) prompt=\"Hourly quota check: run `{due}`. Not due (idle included): do nothing, say nothing. Due: run `{check}`; changed: no stays silent; changed: yes: follow SKILL.md Quota (one line to the user, INFO to threads).\"; then prefs --set quota_trigger_id=<trig_...> quota_trigger_on=true", "quota_not_due": "not due · {minutes} minutes remaining",
         "sweep_no_match": "sweep matched {matched} of {total} sessions: check the file is list_sessions output for this project", "sweep_permission": "{thread} is waiting for your approval", "sweep_failed": "{thread} failed", "sweep_fallback": "{thread} configured {configured} but served {served}", "sweep_interrupt": "{thread} turn interrupted", "sweep_done": "{thread} turn ended (noticed {seconds} seconds after it ended)",
         "sweep_cloud": "{thread} is waiting for your approval (cloud)", "sweep_deliverable": "{thread} reported a deliverable whose message did not reach the lead: added to the board",
         "sprint_started": "Sprint to {until}: hard deadline; deliver the usable version at the deadline", "sprint_board": "Sprint in progress, deadline {until} ({minutes} minutes left)", "sprint_ended": "Sprint ended at {until}; open work aligned to {sha}",
@@ -1077,7 +1076,7 @@ LABELS = {
         "stale_recorded": "已记过，已更新原有过期结果",
         "sensitive_guard": "敏感档：这类命令你说过要看一眼",
         "decided_warning": "这件可能已经定过：{items}，先看 decided", "decided_none": "没有命中",
-        "quota_due": "该查额度了", "quota_idle": "不用查 · 空闲：没有活在跑", "quota_trigger_off": "关掉额度定时：团队空闲（把 {id} 设成 enabled=false，再 prefs --set quota_trigger_on=false）", "quota_trigger_on": "打开额度定时：有活在跑或可以派（把 {id} 设成 enabled=true，再 prefs --set quota_trigger_on=true）", "quota_not_due": "还没到时间 · 还剩 {minutes} 分钟",
+        "quota_due": "该查额度了", "quota_idle": "不用查 · 空闲：没有活在跑", "quota_trigger_off": "关掉额度定时：团队空闲（把 {id} 设成 enabled=false，再 prefs --set quota_trigger_on=false）", "quota_trigger_on": "打开额度定时：有活在跑或可以派（把 {id} 设成 enabled=true，再 prefs --set quota_trigger_on=true）", "quota_trigger_create": "建每小时额度定时（还没登记，且有活在跑）：create_trigger name=\"{name} 每小时查额度\" cron_expression=\"{minute} * * * *\"（发回本会话）prompt=\"每小时额度检查：运行 `{due}`。不用查（含空闲）就什么都不做、不出声。该查时运行 `{check}`；changed: no 不出声；changed: yes 按 SKILL.md 的 Quota 一节办（告诉用户一行，给线程发 INFO）。\"；建好后 prefs --set quota_trigger_id=<trig_...> quota_trigger_on=true", "quota_not_due": "还没到时间 · 还剩 {minutes} 分钟",
         "sweep_no_match": "巡检匹配到 {matched}/{total} 个会话：请检查文件是否为本项目的 list_sessions 输出", "sweep_permission": "{thread} 在等你批准", "sweep_failed": "{thread} 执行失败", "sweep_fallback": "{thread} 配置模型 {configured}，实际使用 {served}", "sweep_interrupt": "{thread} 本轮中断", "sweep_done": "本轮结束后 {seconds} 秒发现：{thread}",
         "sweep_cloud": "{thread} 在等你批准（云端）", "sweep_deliverable": "{thread} 报了交付，但消息没送到 lead：已自动记上看板",
         "sprint_started": "冲刺到 {until}：硬截止，到点交当前可用版本", "sprint_board": "冲刺中，截止 {until}（还剩 {minutes} 分钟）", "sprint_ended": "冲刺结束：开放工作已对齐到 {sha}",
@@ -1758,8 +1757,8 @@ def load(d):
     for key, spec in PREFS.items():
         if key not in st["prefs"]:
             st["prefs"][key] = copy.deepcopy(spec["default"])
-    for key, value in DEFAULT_STATE.items():
-        if key not in st and key not in REQUIRED_STATE:
+    for key, value in DEFAULT_STATE.items():  # any missing key (an older ledger lacks some): in memory only until it changes
+        if key not in st:
             st[key] = copy.deepcopy(value)
     st["_rev_loaded"] = st.get("rev", 0)
     return st
@@ -10355,22 +10354,32 @@ def quota_due(st, dispatching=False):
 
 def quota_trigger_hint(st, sendable):
     """R66: tw.py cannot switch the platform timer; it only says when the lead should (prefs quota_trigger_id / _on).
-    Idle with the timer on -> "off"; work running or to send out with the timer off -> "on"; nothing when no timer is recorded."""
+    Idle with the timer on -> "off"; work running or to send out with the timer off -> "on";
+    work running or to send out with no timer recorded -> "create" (T85: a project never set one up)."""
     p = st.get("prefs", {})
+    busy = sendable or not quota_idle(st)
     if not str(p.get("quota_trigger_id") or "").strip():
-        return None
+        return "create" if busy else None
     flag = p.get("quota_trigger_on")
     on = flag in (None, "") or str(flag).lower() not in ("false", "0")  # a timer is created enabled; prefs may store a bool
-    if on and quota_idle(st) and not sendable:
-        return "off"
-    if not on and (sendable or not quota_idle(st)):  # work out or about to go out: the lead should be woken
-        return "on"
-    return None
+    return "off" if on and not busy else "on" if not on and busy else None
 
 
 def quota_trigger_line(st, hint):
+    """One line for ready, wrapup and SessionStart; "create" carries a copyable timer with this project's paths and the
+    account's config folder (CLAUDE_CONFIG_DIR of the lead's session), so quota reads the right account."""
     if not hint: return None
-    return lab(st, "quota_trigger_" + hint, id=st["prefs"]["quota_trigger_id"])
+    if hint != "create":
+        return lab(st, "quota_trigger_" + hint, id=st["prefs"]["quota_trigger_id"])
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+    link = Path(cfg) / "skills" / "teamwork" / "scripts" / "tw.py"  # the account's skill link follows releases
+    tw = str(link if link.exists() else Path(__file__).absolute())
+    d = find_dir()
+    proj = str(d.parent) if d else "."
+    run = f"CLAUDE_CONFIG_DIR={shlex.quote(cfg)} python3 {shlex.quote(tw)} -C {shlex.quote(proj)} quota"
+    name = tag(st)
+    return lab(st, "quota_trigger_create", name=name, minute=5 + sum(map(ord, name)) % 50,
+               due=run + " --due", check=f"{run} --config-dir {shlex.quote(cfg)}")
 
 
 def sweep_trigger_hint(st, sendable):
@@ -15005,6 +15014,9 @@ def cmd_context(a):
         pass
     pw = permission_warning(st) if not in_worktree else ""
     reminder = thread_reminder(st, me) if in_worktree else lead_reminder(st)
+    if not in_worktree and reminder:  # T85: the same quota-timer line as ready and wrapup, at start and after compaction
+        trigger = quota_trigger_line(st, quota_trigger_hint(st, False))
+        reminder += f"{trigger}\n\n" if trigger else ""
     seat=me if in_worktree else "lead"
     mandatory=""
     try:

@@ -274,6 +274,54 @@ class QuotaTrigger(TwCase):
         self.tw("task", "set", "T1", "--status", "blocked")
         self.assertEqual(json.loads(self.tw("wrapup", "--json").stdout)["quota_trigger"], "off")
 
+    def test_create_hint_until_a_timer_is_recorded(self):
+        """T85: work running and no timer recorded -> one copyable create line in ready, wrapup and SessionStart."""
+        cfg = self.dir / "acct-a"; cfg.mkdir(); self.env["CLAUDE_CONFIG_DIR"] = str(cfg)
+        self.tw("prefs", "--set", "language=en"); self.tw("lead", "--session", "lead-session")
+        self.assertNotIn("quota_trigger", json.loads(self.tw("ready").stdout))  # idle: nothing to create
+        self.tw("thread", "add", "ui", "--session", "s-ui", "--status", "working")
+        self.tw("task", "add", "T1", "--title", "page", "--owner", "ui"); self.tw("task", "set", "T1", "--status", "dispatched")
+        r = self.tw("ready")
+        self.assertEqual(json.loads(r.stdout)["quota_trigger"], "create")
+        line = next(x for x in r.stderr.splitlines() if x.startswith("Create the hourly quota timer"))
+        for part in (f"CLAUDE_CONFIG_DIR={cfg}", f"-C {self.dir} quota --due", f"--config-dir {cfg}",
+                     'name="demo hourly quota"', "prefs --set quota_trigger_id=<trig_...> quota_trigger_on=true"):
+            self.assertIn(part, line)
+        self.assertEqual(json.loads(self.tw("wrapup", "--json").stdout)["quota_trigger"], "create")
+        self.assertIn(line, self.context())
+        self.tw("prefs", "--set", "quota_trigger_id=trig_1", "quota_trigger_on=true")
+        self.assertNotIn("quota_trigger", json.loads(self.tw("ready").stdout))
+        self.assertNotIn("Create the hourly quota timer", self.context())
+
+    def test_desktop_samples_read_an_account_without_events(self):
+        """T85: local sessions log no usage events; the desktop app's per-organization samples give the total."""
+        cfg = self.dir / "acct-a"; cfg.mkdir()
+        (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-a"}}))
+        now = 2_000_000_000
+        samples = self.dir / "plan-usage-history.json"
+        samples.write_text(json.dumps({"version": 2, "samples": [
+            {"t": (now - 7200) * 1000, "org": "org-a", "u": {"sd": 71}}, {"t": (now - 600) * 1000, "org": "org-a", "u": {"sd": 77}},
+            {"t": (now - 60) * 1000, "org": "org-b", "u": {"sd": 99}}, {"t": "bad", "org": "org-a", "u": {"sd": 100}}]}))
+        with mock.patch.dict(os.environ, {"TW_DESKTOP_USAGE": str(samples)}):
+            r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)
+            self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["src"]), (77, "desktop"))
+            self.assertNotIn("scoped", r["claude"])  # no events at all: Fable unknown, not 0%
+            self.assertEqual(quota.tier(r, {}, now)[0], "burn-fable")
+            stale = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now + 7 * 3600)
+            self.assertEqual(quota.tier(stale, {}, now + 7 * 3600)[0], "unknown")
+            samples.write_text("{bad")
+            self.assertNotIn("total", quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)["claude"])
+
+    def test_older_ledger_missing_default_keys_still_runs_ready(self):
+        """T85: a ledger written before some keys existed (here: decisions) must not crash a due default."""
+        state = json.loads((self.dir / ".teamwork" / "state.json").read_text())
+        for key in ("decisions", "notices", "features"):
+            state.pop(key, None)
+        state["questions"] = [{"from": "ui", "text": "Which colour?", "t": "2000-01-01T00:00:00+00:00", "default_action": "blue"}]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state))
+        self.tw("ready")
+        self.assertEqual(json.loads((self.dir / ".teamwork" / "state.json").read_text())["decisions"][0]["what"], "blue")
+
     def test_zh_hint(self):
         self.tw("prefs", "--set", "language=zh"); self.tw("prefs", "--set", "quota_trigger_id=trig_1")
         self.assertIn("关掉额度定时", self.tw("ready").stderr)

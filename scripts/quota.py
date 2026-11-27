@@ -95,20 +95,53 @@ def _window(obj, reset_key, now, fraction=False, source="events", seen=None):
             "src": source}
 
 
+def _account_file(cfg):
+    """The config folder's state file (the default folder keeps it in $HOME), parsed, or None."""
+    candidates = [os.path.join(cfg, ".claude.json")]
+    if os.path.realpath(cfg) == os.path.realpath(os.path.expanduser("~/.claude")):
+        candidates.append(os.path.expanduser("~/.claude.json"))
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as stream:
+                data = _load(stream.read())
+        except OSError:
+            continue
+        if isinstance(data, dict) and (data.get("cachedUsageUtilization") or data.get("oauthAccount")):
+            return data
+    return None
+
+
+DESKTOP_USAGE = os.path.expanduser("~/Library/Application Support/Claude/plan-usage-history.json")
+
+
+def _desktop(config_dirs, now):
+    """T85: the desktop app's weekly-total samples, per organization; covers accounts with no remote-control session
+    (local sessions write no usage events). Total only, no reset time; older than 6 hours: shown, not used for the tier."""
+    try:
+        with open(os.environ.get("TW_DESKTOP_USAGE") or DESKTOP_USAGE, encoding="utf-8", errors="replace") as stream:
+            data = _load(stream.read())
+    except OSError:
+        return {}
+    samples = data.get("samples") if isinstance(data, dict) else None
+    if not isinstance(samples, list):
+        return {}
+    for cfg in config_dirs:
+        account = (_account_file(cfg) or {}).get("oauthAccount")
+        org = account.get("organizationUuid") if isinstance(account, dict) else None
+        rows = [(epoch(x.get("t")), num((x.get("u") or {}).get("sd"))) for x in samples
+                if isinstance(x, dict) and org and x.get("org") == org and isinstance(x.get("u"), dict)]
+        rows = [r for r in rows if r[0] and r[1] is not None and r[0] <= now + 60]
+        if rows:
+            seen, pct = max(rows)
+            age = (now - seen) / 3600
+            return {"total": {"pct": pct, "resets_at": None, "seen_at": seen, "src": "desktop", "age_h": age,
+                              "stale": age > 6}}
+    return {}
+
+
 def _cache(config_dirs, now):
     for cfg in config_dirs:
-        candidates = [os.path.join(cfg, ".claude.json")]
-        if os.path.realpath(cfg) == os.path.realpath(os.path.expanduser("~/.claude")):
-            candidates.append(os.path.expanduser("~/.claude.json"))
-        data = None
-        for path in candidates:
-            try:
-                with open(path, encoding="utf-8", errors="replace") as stream:
-                    data = _load(stream.read())
-                if data is not None:
-                    break
-            except OSError:
-                continue
+        data = _account_file(cfg)
         cached = data.get("cachedUsageUtilization") if isinstance(data, dict) else None
         utilization = cached.get("utilization") if isinstance(cached, dict) else None
         if not isinstance(utilization, dict):
@@ -189,16 +222,18 @@ def _claude_events(config_dirs, now):
                 ca["pct"] > ev["pct"]:
             out[key] = dict(ca, **({"model": ev.get("model", "Fable")} if key == "scoped" else {}))
             out.setdefault("notes", []).append(f"{key} from a newer cache")
+    if "total" not in out and "total" not in cache:
+        cache = dict(cache, **_desktop(config_dirs, now))
     for key in ("total", "scoped", "five_hour", "scoped_share_of_total_pct"):
         if key not in out and key in cache:
             out[key] = cache[key]
             if key in ("total", "scoped"):
                 age = cache[key].get("age_h")
-                out.setdefault("notes", []).append(f"{key} from cache" + (f", {age:.0f}h old" if age is not None else ", age unknown")
+                out.setdefault("notes", []).append(f"{key} from {'the desktop app' if cache[key].get('src') == 'desktop' else 'cache'}" + (f", {age:.0f}h old" if age is not None else ", age unknown")
                                                     + (" (stale: not used for tier)" if cache[key].get("stale") else ""))
     if out.get("scoped") and cache.get("scoped_model"):
         out["scoped"]["model"] = cache["scoped_model"]
-    if "total" in out and "scoped" not in out:
+    if "total" in out and "scoped" not in out and out["total"].get("src") != "desktop":  # local sessions log no events:
         out["scoped"] = {"pct": 0.0, "resets_at": out["total"]["resets_at"], "seen_at": None,
                          "src": "inferred", "model": cache.get("scoped_model") or "Fable"}
         out.setdefault("notes", []).append("scoped not seen this window: inferred 0%")

@@ -848,6 +848,10 @@ class T79NoNestedDesktopThreads(TwCase):
         matchers = [group["matcher"] for group in hooks]
         self.assertIn(install.BASH_GUARD_MATCHER, matchers)
         self.assertNotIn("Bash,mcp__claude-code-remote__archive_session", matchers)
+        read_rules = install.thread_read_allow(project)
+        self.assertTrue(any("/project/**" in rule for rule in read_rules))
+        self.assertTrue(any("/project-worktrees/**" in rule for rule in read_rules))
+        self.assertTrue(any("/project/.teamwork/private/**" in rule for rule in read_rules))
 
 
 if __name__ == "__main__":

@@ -17,6 +17,8 @@ Read in this order: your tasks first, then the rules. After a context summary, r
 
 {{MY_TASKS}}
 
+Before editing, search the project's landed feature ledger and its `where` paths, completed task deliverables and evidence, decided decisions, and matching source with `git grep`. Read the relevant material and reuse or extend it when it fits.
+
 ## Language
 
 {{LANGUAGE}}
@@ -46,7 +48,7 @@ If the platform's safety check stops one of your steps, do not look for another 
 
 | TYPE | When |
 |---|---|
-| `ACK` | You received a TASK, FOLLOWUP or HANDOFF and are starting. One line that doubles as a health check: the task id, your worktree (rc) or branch (cloud), and any tool or file you cannot reach (`-` if none). Work on what you can; if the gap stops the task, send `BLOCKED`. Cloud threads: your ACK is the STATUS block that ends your first turn on it, with the task id in `task:` and the gap in `couldnt_reach:`. |
+| `ACK` | You received a TASK, FOLLOWUP or HANDOFF and are starting. One line that doubles as a health check: the task id, your worktree (rc) or branch (cloud), and any tool or file you cannot reach (`-` if none). Include a line `已有：<路径>…；打算复用 / 改 / 新写，理由：<理由>` naming what you found and your choice. Work on what you can; if the gap stops the task, send `BLOCKED`. Cloud threads: your ACK is the STATUS block that ends your first turn on it, with the task id in `task:` and the gap in `couldnt_reach:`. |
 | `UPDATE` | Real progress or a change of plan, only when the lead asked for updates or something important changed. |
 | `DONE` | The task's "done when" is met **and your independent review passed or was capped** (below). Say what changed, where (branch, commit, files, PR), how you verified it (exact test/check command and result), and the review: verdict, rounds, findings, what you fixed, what is deferred, and the reviewed commit as a full SHA (`reviewed: <sha>`): the lead merges exactly that commit, so push nothing after it, or have the new commits reviewed and report the new SHA. Include `primary: seen|not seen|pending-real — <how> — <evidence>`, `tests: ran|not run (<why>)`, and `base: <sha>`. Repeat the TASK's `Dispatch: v<N>` line, so a DONE sent twice is counted once. |
 | `BLOCKED` | You cannot continue. Say exactly what you need and from whom. |

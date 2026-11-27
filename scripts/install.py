@@ -246,7 +246,7 @@ def folder_rules(pl, sl, a, dirs):
     if not isinstance(sl, dict) or not isinstance(sl.setdefault("permissions", {}), dict):
         raise SystemExit(f"  {pl}: 'permissions' is not an object; fix the file by hand, then re-run")
     perms = sl["permissions"]
-    for key, want in ((("allow", FOLDER_ALLOW), ("additionalDirectories", dirs)) if not a.no_allow else ()) + \
+    for key, want in ((("allow", FOLDER_ALLOW + thread_read_allow(a.project)), ("additionalDirectories", dirs)) if not a.no_allow else ()) + \
             (("ask", FOLDER_ASK), ("deny", FOLDER_DENY)):
         added = merge_rules(perms, key, want, pl)
         print(f"  {pl.name} {key}: " + (f"adding {len(added)}" if added else "nothing to add"))
@@ -305,6 +305,16 @@ def edit_allow(project):
     repo = project_repo_path(pj)
     return [f"{tool}(/{root}/**)" for root in (str(pj), str(repo.parent / f"{repo.name}-worktrees"))
             for tool in ("Edit", "Write")]
+
+
+def thread_read_allow(project):
+    """Allow thread read tools across the project, sibling worktrees and private evidence tree."""
+    if not project:
+        return []
+    pj = Path(project).expanduser().resolve()
+    repo = project_repo_path(pj)
+    roots = [pj, repo, repo.parent / f"{repo.name}-worktrees", pj / ".teamwork" / "private"]
+    return [f"Read(/{root}/**)" for root in dict.fromkeys(str(p) for p in roots)]
 
 
 def tw_allow():

@@ -469,7 +469,7 @@ class RootCauseTest(TwCase):
         logs_before_off=len((self.dir/".teamwork"/"log.jsonl").read_text().splitlines())
         self.assertNotIn("根因",self.tw("board").stdout)
         self.assertNotIn("root",self.tw("task-msg","T1").stdout.lower())
-        msg=self.dir/"m.txt"; msg.write_text(f"[tw:{self.state()['prefs']['short_name']}] TASK lead -> api T1\nGoal: repair\nDone when: pass\n")
+        msg=self.dir/"m.txt"; msg.write_text(clean_task_fixture(f"[tw:{self.state()['prefs']['short_name']}] TASK lead -> api T1\nGoal: repair\nDone when: pass\n"))
         self.assertNotIn("root backend",self.tw("check-msg",str(msg)).stderr)
         self.assertFalse(any('"ev": "root-pending"' in ln for ln in (self.dir/".teamwork"/"log.jsonl").read_text().splitlines()[logs_before_off:]))
 
@@ -718,7 +718,7 @@ class RootCauseTest(TwCase):
         self.tw("req","add","bug one","--category","bug","--area","backend")
         self.tw("req","add","bug two","--category","bug","--area","backend")
         self.tw("task","add","T1","--title","repair","--topics","backend","--owner","api")
-        p=self.dir/"msg.txt"; p.write_text(f"[tw:{self.state()['prefs']['short_name']}] TASK lead -> api T1\nGoal: repair\nDone when: pass\n")
+        p=self.dir/"msg.txt"; p.write_text(clean_task_fixture(f"[tw:{self.state()['prefs']['short_name']}] TASK lead -> api T1\nGoal: repair\nDone when: pass\n"))
         self.assertIn("root backend",self.tw("check-msg",str(p)).stderr)
 
     def test_card_task_rows_have_fix_kind_prefix(self):

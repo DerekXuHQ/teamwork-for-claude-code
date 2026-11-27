@@ -915,6 +915,15 @@ class MergeRehearsal(GitCase):
         self.assertIn('"ev": "merge"', (self.proj / ".teamwork" / "log.jsonl").read_text())
         self.no_temp_worktrees()
 
+    def test_apply_records_commit_and_changed_paths_on_linked_feature(self):
+        self.tw("feature", "add", "Quixbar", "--status", "landed", "--evidence", "merge-primary-proof.txt",
+                "--where", "docs/quixbar.md", "--task", "T1")
+        self.merge("--apply")
+        where = json.loads((self.proj / ".teamwork" / "state.json").read_text(encoding="utf-8"))["features"]["F1"]["where"]
+        self.assertIn("quix.py", where)
+        self.assertTrue(any(item.startswith("commit ") for item in where))
+        self.assertIn("docs/quixbar.md", where)
+
     def test_conflict_leaves_live_untouched(self):
         (self.proj / "quix.py").write_text("q = 2\n")
         self.commit("T2: other quix")

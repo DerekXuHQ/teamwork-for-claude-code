@@ -16,9 +16,13 @@ if __name__ == "__main__" and sys.argv[1:]:
     for selector in sys.argv[1:]:
         parts = selector.split(".")
         for module in modules:
-            if len(parts) > 1 and not hasattr(module, parts[0]):
+            if len(parts) > 1 and not any(module.__name__.endswith(name) for name in parts[:-1]):
                 continue
-            selected = unittest.defaultTestLoader.loadTestsFromName(selector, module)
+            class_name = parts[0] if len(parts) == 1 else parts[-1] if len(parts) == 2 else parts[-2]
+            if not hasattr(module, class_name):
+                continue
+            name = class_name + (f".{parts[-1]}" if len(parts) > 2 else "")
+            selected = unittest.defaultTestLoader.loadTestsFromName(name, module)
             if selected.countTestCases():
                 suite.addTests(selected)
     result = unittest.TextTestRunner(verbosity=2).run(suite)

@@ -26,6 +26,8 @@ The header's keywords (`tw`, the TYPE, `->`) are always English, so they can be 
 Goal: redesign the order list page so status, total and the next action fit above the fold.
 Primary outcome: the list shows each order's status, total, and next action at phone width.
 Context: spec at docs/spec.md §3; design notes in .teamwork/MEMORY.md; the api thread owns /api/orders.
+Existing material:
+None (searched landed features, done-task deliverables and evidence, decided decisions, and git grep)
 Done when: the page renders with seeded data at phone and desktop widths, screenshots saved to docs/shots/, tests pass.
 Constraints: do not change API contracts (api owns them; hand off if you need a field). Work on tw/shop/ui.
 Report: ACK now, DONE or BLOCKED when finished (DONE with `primary: seen|not seen|pending-real — <how> — <evidence>` recorded by `task verify --by <who> --sha <7-40 hex>` when known, `tests: ran|not run (<why>)`, `base: <sha>`, the review verdict, `rounds: N`, `reviewed: <full SHA>`, remaining and deferred findings). End every turn with the tw-status block.

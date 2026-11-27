@@ -224,6 +224,7 @@ LABELS = {
         "unapproved_leads": "These {n} leads need you to pick Auto once: {projects}",
         "grant_recorded": "recorded standing grant use: {grant}",
         "feature_import_counts": "added {added}, updated {updated}, unchanged {unchanged}",
+        "feature_import_rejected": "rejected row {row} ({name}): landed feature has no inferable where",
         "feature_import_error": "feature import: {reason}", "feature_row_name": "feature rows require name",
         "grant_usage": "prefs --grant-use schedule|archive --what <text>",
         "grant_missing": "{grant} is not in standing_grants; record the user's authorization first",
@@ -333,7 +334,9 @@ LABELS = {
         "merge_no_tasks": "Warning: no tasks are associated. Merge is blocked unless --user-said records a one-time waiver.",
         "merge_shard_failed": "check shard {group} failed", "merge_shard_timeout": "check shard {group} exceeded {minutes} minutes and was stopped",
         "primary_dispatch_missing": "{task}: dispatch needs a --primary outcome. Use --no-primary with --user-said only when the user waived it.",
-        "check_msg_primary_missing": "TASK is missing a Primary outcome line",
+        "check_msg_primary_missing": "TASK is missing a Primary outcome line", "ready_ack_missing": "ACK without an existing-material line: {threads}",
+        "existing_material_heading": "Existing material:", "existing_material_none": "None (checked landed features, done-task deliverables and evidence, decided decisions, and git grep)", "existing_material_task": "Read the existing {what} ({path}) first, confirm whether you can reuse it or build on it, then start.", "existing_material_missing": "TASK needs an Existing material section", "existing_material_empty": "Existing material section is empty", "existing_material_sources": "When Existing material says None, name the sources you searched",
+        "feature_where": "where: {paths}",
         "board_primary_col": "primary",
         "reviews_tests_base_col": "tests/base",
         "dispatch_primary_line": "Primary outcome: {value}",
@@ -749,6 +752,7 @@ LABELS = {
         "unapproved_leads": "以下 {n} 个 lead 需要你各自在可信设备上选择一次 Auto：{projects}",
         "grant_recorded": "已记录长期授权使用：{grant}",
         "feature_import_counts": "新增 {added}，更新 {updated}，未变化 {unchanged}",
+        "feature_import_rejected": "拒绝第 {row} 行（{name}）：landed 功能无法推算 where",
         "feature_import_error": "功能导入失败：{reason}", "feature_row_name": "功能数据行必须有 name",
         "grant_usage": "用法：prefs --grant-use schedule|archive --what <text>",
         "grant_missing": "{grant} 未列入 standing_grants；请先记录用户授权",
@@ -811,7 +815,9 @@ LABELS = {
         "merge_no_tasks": "警告：没有关联到任务。合并默认拦截；--user-said 可记录一次性豁免。",
         "merge_shard_failed": "检查分组 {group} 失败", "merge_shard_timeout": "检查分组 {group} 超过 {minutes} 分钟，被停止",
         "primary_dispatch_missing": "{task}：派单需要先补 --primary 主产出；只有用户明确豁免时才用 --no-primary 和 --user-said。",
-        "check_msg_primary_missing": "TASK 缺少主产出行",
+        "check_msg_primary_missing": "TASK 缺少主产出行", "ready_ack_missing": "这些 ACK 缺少“已有”行：{threads}",
+        "existing_material_heading": "已有资料:", "existing_material_none": "无（查过 landed features、done 任务交付物与证据、decided 决定、git grep）", "existing_material_task": "先读懂已有的 {what}（{path}），确认能不能直接用或在它上面改，再动手。", "existing_material_missing": "TASK 必须有“已有资料”一节", "existing_material_empty": "已有资料一节不能为空", "existing_material_sources": "已有资料写“无”时必须说明查过哪些来源",
+        "feature_where": "位置：{paths}",
         "board_primary_col": "主产出",
         "reviews_tests_base_col": "测试/基线",
         "dispatch_primary_line": "主产出：{value}",
@@ -1318,8 +1324,18 @@ def render_features(st):
         out.append("### " + _md(phase or "-"))
         for fid, f in sorted(items, key=lambda x: (re.sub(r'\d+.*', '', x[0]), int(m.group()) if (m := re.search(r'\d+', x[0])) else 0, x[0])):
             moved = lab(st, "feature_moved", phase=f.get("moved_from")) if f.get("moved_from") else ""
-            out.append(f"- **{fid}** {_md(f['name'])} [{lab(st, 'feature_' + f['status'])}] — {', '.join(f.get('reqs') or []) or _md(f.get('source') or '-')}" + (f" {moved}" if moved else ""))
+            paths = _where_paths(f.get("where"))
+            where = lab(st, "feature_where", paths=", ".join(paths)) if paths else ""
+            out.append(f"- **{fid}** {_md(f['name'])} [{lab(st, 'feature_' + f['status'])}] — {', '.join(f.get('reqs') or []) or _md(f.get('source') or '-')}" + (f" {where}" if where else "") + (f" {moved}" if moved else ""))
     return "\n".join(out)
+
+
+def _where_paths(value):
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+    return []
 
 
 def _feature_ids(rows):
@@ -2303,6 +2319,7 @@ def cmd_init(a):
         "requests": {},
         "prefs": {
             "max_parallel": 0,  # 0 = no limit; set only when the user asks for one
+            "task_existing_limit": 5,
             "propose_before_start": True,
             "update_detail": "brief",
             "checkin_minutes": 10,
@@ -4537,6 +4554,16 @@ def cmd_ready(a):
         st = load(d)
     if apply_thread_defaults(st): save(d, st, {"ev": "thread-defaults"})
     urgent = urgent_unacked(st)
+    ack_missing = []
+    for name, thread in st.get("threads", {}).items():
+        if thread.get("status") in ("working", "starting") and thread.get("session_id"):
+            ackline = str(thread.get("ack_line") or "")
+            current_tasks = [tid for tid, task in st.get("tasks", {}).items()
+                             if task.get("owner") == name and task.get("status") in ("dispatched", "working", "blocked", "review")]
+            ack_task = re.search(r"\bACK\s+\S+\s*->\s*\S+\s+(T\d+(?:-f\d+)*)", ackline, re.I) or re.search(r"(?im)^\s*task:\s*(T\d+(?:-f\d+)*)", ackline)
+            if not ackline or not re.search(r"已有\s*[：:]", ackline) or current_tasks and (not ack_task or ack_task.group(1) not in current_tasks):
+                ack_missing.append(name)
+    if ack_missing: print(lab(st, "ready_ack_missing", threads=", ".join(ack_missing)), file=sys.stderr)
     done = {t for t, k in st["tasks"].items() if k["status"] == "done"}
     busy = sum(
         1 for t in st["threads"].values() if t["status"] in ("starting", "working")
@@ -4637,6 +4664,7 @@ def cmd_ready(a):
                 "route_lines": {t: route_hint(st, t).get("why_text") for t in ready},
                 **({"desktop_open": desktop_line} if desktop_line else {}),
                 "urgent_unacked": urgent,
+                "ack_missing_existing": ack_missing,
                 "blocked_by_lease": blocked,
                 "lease_warnings": lease_warnings,
                 "blocked_by_topic": {t: v + [{"why": "same topic as an active task of another thread: merge into one "
@@ -5183,8 +5211,81 @@ def _json_or_text(a, data, lines):
         print("\n".join(lines))
 
 
+def _feature_history(repo):
+    log = subprocess.run(["git", "-C", str(repo), "log", "--all", "--format=@@%H%x09%s", "--name-only"],
+                         capture_output=True, text=True)
+    records = []
+    current = None
+    if log.returncode == 0:
+        for line in log.stdout.splitlines():
+            if line.startswith("@@"):
+                if current: records.append(current)
+                current = {"subject": line[2:].split("\t", 1)[-1], "files": []}
+            elif current and line.strip():
+                current["files"].append(line.strip())
+        if current: records.append(current)
+    return records
+
+
+def _infer_feature_where(repo, st, feature, records, merge_events):
+    terms = [feature.get("id", ""), str(feature.get("name") or ""), *feature.get("tasks", [])]
+    terms += [tid for tid, task in st.get("tasks", {}).items()
+              if tid in (feature.get("tasks") or []) or any(_mentions(str(task.get("title") or ""), t) for t in (feature.get("tasks") or []))]
+    tokens = set(re.findall(r"[A-Za-z0-9_-]{3,}|[\u3400-\u9fff]{2,}", " ".join(map(str, terms))))
+    hits = []
+    task_ids = {str(x).lower() for x in feature.get("tasks", [])}
+    for record in records:
+        subject = record["subject"]
+        tids = {x.lower() for x in re.findall(r"\bT\d+\b", subject, re.I)}
+        if feature.get("id", "").lower() in subject.lower() or task_ids & tids or any(_mentions(subject, t) for t in tokens if len(t) >= 4):
+            hits.extend(record["files"])
+    for event in reversed(merge_events):
+        if event.get("ev") == "merge" and set(event.get("tasks", [])) & set(feature.get("tasks", [])):
+            paths = event.get("files") or []
+            if not paths and event.get("from") and event.get("to"):
+                changed = subprocess.run(["git", "-C", str(repo), "diff", "--name-only",
+                                          str(event["from"]), str(event["to"])],
+                                         capture_output=True, text=True)
+                paths = changed.stdout.splitlines() if changed.returncode == 0 else []
+            hits.extend(path for path in paths if path)
+            commit = event.get("to") or event.get("sha")
+            if commit: hits.append(f"commit {str(commit)[:9]}")
+    return list(dict.fromkeys(hits))
+
+
+def _landed_feature_where(d, st, fid, feature, explicit, evidence):
+    """Resolve a landed feature's required location from explicit data, merge history, then evidence."""
+    existing = _where_paths(feature.get("where"))
+    if explicit:
+        return list(dict.fromkeys(existing + explicit))
+    if existing:
+        return existing
+    repo = Path((st.get("repo") or {}).get("path") or d.parent).resolve()
+    inferred = _infer_feature_where(repo, st, {**feature, "id": fid}, _feature_history(repo), _read_log(d))
+    if inferred:
+        return inferred
+    evidence_path = (evidence or "").strip()
+    return [evidence_path] if evidence_path else []
+
+
 def cmd_feature(a):
     d = need(find_dir()); st = load(d); rows = st.setdefault("features", {})
+    if a.action == "backfill":
+        repo = Path((st.get("repo") or {}).get("path") or d.parent).resolve()
+        missing = [(fid, f) for fid, f in rows.items() if f.get("status") == "landed" and not _where_paths(f.get("where"))]
+        records = _feature_history(repo)
+        merge_events = _read_log(d)
+        changes = []
+        for fid, feature in missing:
+            where = _infer_feature_where(repo, st, {**feature, "id": fid}, records, merge_events)
+            changes.append({"id": fid, "where": where})
+        if a.apply:
+            for item in changes:
+                if item["where"]: rows[item["id"]]["where"] = item["where"]
+            if any(x["where"] for x in changes): save(d, st, {"ev": "feature-backfill", "features": [x["id"] for x in changes if x["where"]]})
+        print(json.dumps({"missing": len(missing), "matched": sum(bool(x["where"]) for x in changes),
+                          "unmatched": [x["id"] for x in changes if not x["where"]], "preview": not a.apply}, ensure_ascii=False))
+        return
     if a.action in ("import", "reconcile"):
         try:
             path = Path(a.file)
@@ -5196,9 +5297,14 @@ def cmd_feature(a):
             if not isinstance(incoming, list): raise ValueError("expected a list of feature rows")
         except (OSError, ValueError, TypeError) as exc: sys.exit(lab(st, "feature_import_error", reason=exc))
         normalized = []
-        for row in incoming:
+        for row_number, row in enumerate(incoming, 1):
             if not isinstance(row, dict) or not str(row.get("name") or "").strip(): sys.exit(lab(st, "feature_row_name"))
-            normalized.append({k: str(row.get(k) or "").strip() for k in ("id", "name", "phase", "status", "from", "note")})
+            normalized.append({**{k: str(row.get(k) or "").strip() for k in ("id", "name", "phase", "status", "from", "note")},
+                               "row": row_number,
+                               "tasks": [str(x).strip() for x in row.get("tasks", []) if str(x).strip()] if isinstance(row.get("tasks"), list) else [],
+                               "where": ([str(x).strip() for x in row.get("where", []) if str(x).strip()]
+                                         if isinstance(row.get("where"), list) else
+                                         [x.strip() for x in re.split(r"[;,\n]", str(row.get("where") or "")) if x.strip()])})
         if a.action == "reconcile":
             by_name = {f.get("name", "").casefold(): (fid, f) for fid, f in rows.items()}
             by_id = rows
@@ -5227,11 +5333,27 @@ def cmd_feature(a):
             if missing or extra or status_differences or phase_differences: sys.exit(1)
             return
         added = updated = unchanged = 0
+        rejected = []
+        repo = Path((st.get("repo") or {}).get("path") or d.parent).resolve()
+        records = merge_events = None
         for r in normalized:
             fid = r["id"] if r["id"] in rows else next((i for i, f in rows.items() if f.get("name", "").casefold() == r["name"].casefold()), None)
             status = r["status"] or "planned"
             if status not in ("planned", "building", "landed", "dropped"): sys.exit(lab(st, "feature_invalid_status", status=status))
+            if status == "landed" and not r["where"]:
+                if records is None:
+                    records, merge_events = _feature_history(repo), _read_log(d)
+                prior = rows.get(fid, {}) if fid else {}
+                candidate = {**prior, "id": fid or r["id"], "name": r["name"],
+                             "tasks": list(dict.fromkeys([*(prior.get("tasks") or []), *r["tasks"]]))}
+                inferred = _infer_feature_where(repo, st, candidate, records, merge_events)
+                if not inferred:
+                    rejected.append(r)
+                    continue
+                r["where"] = inferred
             record = {"name": r["name"], "phase": r["phase"], "status": status, "reqs": [], "tasks": [], "evidence": "", "reason": "", "created": now()}
+            if r["tasks"]: record["tasks"] = list(dict.fromkeys(r["tasks"]))
+            if r["where"]: record["where"] = r["where"]
             if r["from"]:  # where the feature came from (requests, notes), not a phase it was moved from
                 record["source"] = r["from"]
                 record["reqs"] = [x for x in re.findall(r"R\d+", r["from"]) if x in st.get("requests", {})]
@@ -5241,7 +5363,7 @@ def cmd_feature(a):
                 rows[fid] = record; added += 1
             else:
                 old = rows[fid]
-                keys = [k for k in ("name", "phase", "status", "note", "source") if k in record]
+                keys = [k for k in ("name", "phase", "status", "note", "source", "where") if k in record]
                 reqs = list(dict.fromkeys((old.get("reqs") or []) + record.get("reqs", [])))
                 if all(old.get(k) == record[k] for k in keys) and reqs == (old.get("reqs") or []): unchanged += 1
                 else:  # overlay only what the file carries: links, tasks, evidence and created time stay
@@ -5251,6 +5373,8 @@ def cmd_feature(a):
                     rows[fid] = {**old, **patch, "reqs": reqs}; updated += 1
         save(d, st, {"ev": "feature-import"})
         print(lab(st, "feature_import_counts", added=added, updated=updated, unchanged=unchanged))
+        for r in rejected:
+            print(lab(st, "feature_import_rejected", row=r["row"], name=r["name"]))
         return
     if a.action == "move":
         f = rows.get(a.name)
@@ -5267,7 +5391,11 @@ def cmd_feature(a):
         tasks = [x for group in (a.task or []) for item in group for x in csv(item)]
         if (a.status or "planned") not in ("planned", "building", "landed", "dropped"): sys.exit("invalid feature status")
         a.evidence, a.reason = (a.evidence or "").strip() or None, (a.reason or "").strip() or None
+        a.where = _where_paths(getattr(a, "where", None))
+        if a.status == "landed":
+            a.where = _landed_feature_where(d, st, "", {"name": a.name.strip(), "tasks": tasks}, a.where, a.evidence)
         if a.status == "landed" and not a.evidence: sys.exit("landed requires --evidence")
+        if a.status == "landed" and not a.where: sys.exit("landed requires --where")
         if a.status == "dropped" and not a.reason: sys.exit("dropped requires --reason")
         for rid in reqs:
             if rid not in st.get("requests", {}): sys.exit(f"unknown request {rid}")
@@ -5277,6 +5405,7 @@ def cmd_feature(a):
         fid = f"F{max([int(x[1:]) for x in rows if re.fullmatch(r'F\d+', x)] or [0])+1}"
         rows[fid] = {"name": a.name.strip(), "phase": a.phase or "", "reqs": reqs, "tasks": tasks,
                      "status": a.status or "planned", "evidence": a.evidence or "", "reason": a.reason or "", "created": now()}
+        if a.where: rows[fid]["where"] = a.where
         if a.status == "landed": rows[fid]["landed_at"] = now()
         for rid in reqs: st["requests"][rid].setdefault("features", []).append(fid)
         save(d, st, {"ev": "feature-add", "feature": fid}); print(fid); return
@@ -5286,7 +5415,11 @@ def cmd_feature(a):
         status = a.status or f["status"]
         if status not in ("planned", "building", "landed", "dropped"): sys.exit(lab(st, "feature_invalid_status", status=status))
         a.evidence, a.reason = (a.evidence or "").strip() or None, (a.reason or "").strip() or None
+        a.where = _where_paths(getattr(a, "where", None))
+        if status == "landed":
+            a.where = _landed_feature_where(d, st, a.name, f, a.where, a.evidence or f.get("evidence"))
         if status == "landed" and not (a.evidence or f.get("evidence")): sys.exit("landed requires --evidence")
+        if status == "landed" and not (_where_paths(f.get("where")) or a.where): sys.exit("landed requires --where")
         if status == "dropped" and not (a.reason or f.get("reason")): sys.exit("dropped requires --reason")
         if a.phase is not None and a.phase != f.get("phase", ""):
             if f.get("phase"): f["moved_from"], f["moved_at"] = f["phase"], now()
@@ -5304,6 +5437,8 @@ def cmd_feature(a):
                         q["features"] = [x for x in q.get("features", []) if x != a.name]
                     for rid in vals: st["requests"][rid].setdefault("features", []).append(a.name)
         if a.evidence: f["evidence"] = a.evidence
+        if a.where:
+            f["where"] = a.where
         if a.reason: f["reason"] = a.reason
         if status == "landed" and f.get("status") != "landed": f["landed_at"] = now()
         f["status"] = status; save(d, st, {"ev": "feature-set", "feature": a.name}); print(a.name); return
@@ -5315,6 +5450,7 @@ def cmd_feature(a):
             selected = [(i, f) for i, f in selected if f.get("status") == "landed" and _later(f.get("landed_at"), cutoff)]
         data = [{"id": i, **f} for i, f in selected]
         _json_or_text(a, data, [f"{i} [{lab(st, 'feature_' + f['status'])}] {f['name']} — {', '.join(f.get('reqs') or []) or '-'}" +
+                                (f" {lab(st, 'feature_where', paths=', '.join(_where_paths(f.get('where'))))}" if _where_paths(f.get("where")) else "") +
                                 (f" {lab(st, 'feature_moved', phase=f['moved_from'])}" if f.get("moved_from") else "") for i, f in selected])
         return
 
@@ -5982,6 +6118,15 @@ def cmd_check_msg(a):
                     " (it only points to a file: write the task in the message)" if re.search(PATH_RE, prose) else ""))
             if "primary outcome" not in fields and "主产出" not in fields:
                 add("primary", lab(st, "check_msg_primary_missing"), "warning")
+            section = re.search(r"(?ims)^\s*(?:已有资料|Existing material)\s*[:：]\s*\n(.*?)(?=^\s*(?:Brief|Done when|完成标准|验收标准|Constraints|约束)\s*:|\Z)", body)
+            if not section:
+                add("existing-material", lab(st, "existing_material_missing"))
+            else:
+                content = section.group(1).strip()
+                if not content:
+                    add("existing-material", lab(st, "existing_material_empty"))
+                elif re.search(r"(?i)^\s*(?:无|none)\b", content) and not re.search(r"(?i)(查过|searched|checked).*(features|任务|决定|git grep)|(?:features|任务|决定|git grep).*(查过|searched|checked)", content):
+                    add("existing-material", lab(st, "existing_material_sources"))
             if st and st.get("standing") and not re.search(r"(?im)^\s*Standing:|长期要求", raw):
                 add("standing", f"the ledger has {len(st['standing'])} standing requirement(s) and this TASK carries "
                                 "none: add a `Standing: ...` line for each (`task-msg` writes them)", "warning")
@@ -6158,6 +6303,92 @@ def cmd_package_check(a):
     print(lab(st, "package_ok"))
 
 
+def _task_existing_material(d, st, task):
+    """Rank reusable ledger and repository material against a task title and brief."""
+    query = str(task.get("title") or "") + " " + str(task.get("brief") or "")
+    words = {w for w in _tokens(query) if w not in _STOP and w not in _DECISION_ZH_STOP and
+             ((w.isascii() and len(w) >= 3) or
+              (not w.isascii() and len(w) == 2 and not any(c in "的一了和与在为把上中后前做有没个这那其及并" for c in w)))}
+    repo = Path((st.get("repo") or {}).get("path") or d.parent)
+    rows = []
+    def display_path(path):
+        value = str(path).strip()
+        try:
+            p = Path(value).expanduser()
+            if p.is_absolute():
+                resolved = p.resolve()
+                root = repo.resolve()
+                try: return resolved.relative_to(root).as_posix()
+                except ValueError: pass
+                value = str(resolved)
+        except (OSError, RuntimeError):
+            pass
+        value = value.replace("\\", "/")
+        value = re.sub(r"^/(?:Users|home)/[^/]+(?=/|$)", "~", value)
+        return value
+    def add(path, description, text="", source=2):
+        path = display_path(path)
+        hay = (str(path) + " " + str(description) + " " + str(text)).casefold()
+        score = sum(1 for word in words if _mentions(hay, word))
+        if score:
+            lower = path.casefold()
+            generic = bool(re.search(r"(?:^|/)(?:readme(?:\.[^/]*)?|framework(?:-[^/]*)?|issues?(?:\.[^/]*)?)(?:$|/)", lower))
+            code_rank = 0 if re.search(r"(?:^|/)(?:tests?|__tests__|test_)[^/]*|\.(?:py|js|ts|tsx|jsx|go|rs|swift|sh)$", lower) else 1
+            rows.append((source, -score, code_rank, len(rows), generic, lab(st, "existing_material_task", what=description, path=path)))
+    for fid, feature in st.get("features", {}).items():
+        if feature.get("status") == "landed":
+            paths = _where_paths(feature.get("where"))
+            if feature.get("evidence"): paths = [*paths, feature["evidence"]]
+            for path in paths:
+                if path: add(path, f"{fid} {feature.get('name','已落地功能')}", feature.get("evidence", ""), source=0)
+    for tid, done in st.get("tasks", {}).items():
+        if done.get("status") == "done":
+            primary = done.get("primary_check") or {}
+            paths = [done.get("deliverable"), done.get("evidence"), done.get("primary_evidence"), primary.get("evidence")]
+            merged = str(done.get("merged_sha") or "")
+            if re.fullmatch(r"[0-9a-fA-F]{7,40}", merged):
+                changed = subprocess.run(["git", "-C", str(repo), "show", "--format=", "--name-only", merged],
+                                         capture_output=True, text=True)
+                paths.extend(path.strip() for path in changed.stdout.splitlines() if path.strip())
+            for deliverable in st.get("deliverables", []):
+                if deliverable.get("task") == tid:
+                    paths.append(deliverable.get("link") or deliverable.get("missing"))
+            paths = list(dict.fromkeys(display_path(path) for path in paths if path))
+            if paths: add(", ".join(paths), f"{tid} 交付物、证据与已合并改动", done.get("title", ""), source=1)
+    for i, dec in enumerate(st.get("decisions", []), 1):
+        add(f".teamwork/state.json decisions[{i}]", str(dec.get("what") or dec.get("text") or dec.get("answer") or "已决定事项"),
+            " ".join(str(dec.get(k) or "") for k in ("what", "text", "answer")), source=2)
+    if words:
+        grep_args = ["git", "-C", str(repo), "grep", "-n", "-I", "-i"]
+        for word in sorted(words): grep_args.extend(["-e", word])
+        grep_args.extend(["HEAD", "--"])
+        grep = subprocess.run(grep_args, capture_output=True, text=True)
+        grep_files = {}
+        for line in grep.stdout.splitlines():
+            parts = line.split(":", 2)
+            path = parts[1] if len(parts) > 1 and parts[0] == "HEAD" else parts[0]
+            if path:
+                entry = grep_files.setdefault(path, [set(), []])
+                entry[0].update(word for word in words if _mentions(line, word))
+                entry[1].append(line)
+        for path, (matched, lines) in grep_files.items():
+            if len(matched) >= 2:
+                add(path, "git grep 命中", " ".join(lines), source=3)
+    limit = st.get("prefs", {}).get("task_existing_limit", 5)
+    try: limit = max(1, min(20, int(limit)))
+    except (ValueError, TypeError): limit = 5
+    rows.sort(key=lambda row: (row[0], 2 if row[4] else row[2], row[1], row[3]))
+    selected = []
+    generic_count = 0
+    for row in rows:
+        if row[4]:
+            if generic_count: continue
+            generic_count += 1
+        selected.append(row[5])
+        if len(selected) >= limit: break
+    return selected or [lab(st, "existing_material_none")]
+
+
 def cmd_task_msg(a):
     d = need(find_dir()); st = load(d)
     if a.id not in st["tasks"]: sys.exit(f"unknown task {a.id}")
@@ -6193,7 +6424,9 @@ def cmd_task_msg(a):
     session = (thread.get("session_id") or "").strip()
     primary_lines = [lab(st, "dispatch_primary_line", value=k.get("primary") or lab(st, "primary_exempt")),
                      lab(st, "dispatch_test_order")]
+    existing = _task_existing_material(d, st, k)
     lines = [f"[tw:{tag(st)}] TASK lead -> {owner} {a.id}", f"Goal: {k.get('title') or a.id}", *primary_lines,
+             lab(st, "existing_material_heading"), *existing,
              *([f"Brief: {k['brief']}"] if k.get("brief") and k.get("brief") != k.get("title") else []), f"Done when: {k.get('accept') or '-'}"]
     if root_line: lines.append(root_line)
     route = (dispatch_model or {}).get("model") or k.get("route") or k.get("model")
@@ -6851,6 +7084,12 @@ def _sweep_locked(a, d, st):
                     value = " ".join(str(block.get("text", "")) if isinstance(block, dict) else str(block) for block in value)
                 return str(value or "")
             turn_text = " ".join(event_text(ev) for ev in turn)
+            ack = re.search(r"(?is)\[tw:[^\]]+\]\s*(?:ACK|STATUS)\b.*?已有\s*[：:]\s*([^\n]+)", turn_text)
+            if ack:
+                line = ack.group(0).strip()[:1000]
+                if line != t.get("ack_line"):
+                    t["ack_line"] = line
+                    changed = True
             task_match = re.search(r"\bDONE\s+(T\d+)\b", turn_text, re.I)
             link_match = re.search(r"https?://\S+|(?<!\w)/[^\s]+", turn_text)
             if task_match or link_match:
@@ -8304,7 +8543,7 @@ def cmd_prefs(a):
                 sys.exit(lab(st, "rp_bool"))
             if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
                 sys.exit(lab(st, "rp_user"))
-        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes", "check_jobs", "check_shard_timeout_minutes", "urgent_ack_minutes", "quota_every_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", "lead_compact_alert", "lead_compact_swap", "drift_window_hours", "sweep_every_minutes", "thread_default_after_minutes", "slow_factor", *QUOTA_DEFAULTS) and not re.fullmatch(r"[0-9]+", v):
+        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes", "check_jobs", "check_shard_timeout_minutes", "urgent_ack_minutes", "task_existing_limit", "quota_every_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", "lead_compact_alert", "lead_compact_swap", "drift_window_hours", "sweep_every_minutes", "thread_default_after_minutes", "slow_factor", *QUOTA_DEFAULTS) and not re.fullmatch(r"[0-9]+", v):
             sys.exit(f"{k}: a whole number" + ("" if k in QUOTA_DEFAULTS else " of minutes"))
         if k == "quota_every_minutes" and int(v) < 1:
             sys.exit("quota_every_minutes: a positive whole number of minutes")
@@ -13513,12 +13752,16 @@ def cmd_merge(a):
                      f"(`git -C \"{holder_now}\" log -1`), then run merge again")
         res["applied"] = True
         ev = {"ev": "merge", "branch": a.branch, "sha": sha, "base": base, "from": old, "to": new,
-              "checks": res["checks"]}
+              "checks": res["checks"], "tasks": associated,
+              "files": [x for x in git("diff", "--name-only", f"{old}..{sha}").stdout.splitlines() if x.strip()]}
         if merge_waiver:
             ev["primary_waiver"] = merge_waiver
         fresh = None
         try:  # IL-22: the board lists the merge until a regression round clears it (`qa done`)
             fresh = st = load(d)  # fresh: the checks may have run for minutes
+            for fid, feature in st.get("features", {}).items():
+                if set(feature.get("tasks") or []) & set(associated):
+                    feature["where"] = list(dict.fromkeys(_where_paths(feature.get("where")) + ev["files"] + [f"commit {sha[:9]}"]))
             st.setdefault("qa_pending", []).append({"branch": a.branch, "sha": sha, "base": base, "to": new,
                                                     "at": now()})
             if a.apply and "merge" in st.get("prefs", {}).get("standing_grants", []):
@@ -14327,11 +14570,11 @@ def main():
     x.add_argument("--append", action="store_true")
 
     x = s.add_parser("feature", help="feature ledger")
-    x.add_argument("action", choices=["add", "set", "list", "move", "import", "reconcile"]); x.add_argument("name", nargs="?", default="")
+    x.add_argument("action", choices=["add", "set", "list", "move", "import", "reconcile", "backfill"]); x.add_argument("name", nargs="?", default="")
     x.add_argument("--file"); x.add_argument("--to"); x.add_argument("--why")
     x.add_argument("--phase"); x.add_argument("--req", action="append", nargs="+"); x.add_argument("--task", action="append", nargs="+")
     x.add_argument("--status", choices=["planned", "building", "landed", "dropped"]); x.add_argument("--evidence"); x.add_argument("--reason")
-    x.add_argument("--json", action="store_true"); x.add_argument("--done-since"); x.set_defaults(f=cmd_feature)
+    x.add_argument("--json", action="store_true"); x.add_argument("--done-since"); x.add_argument("--where", action="append"); x.add_argument("--apply", action="store_true"); x.set_defaults(f=cmd_feature)
     x = s.add_parser("reconcile", help="compare requests, features and tasks")
     x.add_argument("--strict", action="store_true"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_reconcile)
     x = s.add_parser("wrapup", help="end-of-round ledger self-check")

@@ -21,6 +21,17 @@ def quiz_transcript(path, item, answer):
     rows=[{"type":"user","timestamp":stamp,"origin":{"kind":"human"},"message":{"role":"user","content":item["question"]}},
           {"type":"user","timestamp":stamp,"origin":{"kind":"human"},"message":{"role":"user","content":answer}}]
     Path(path).write_text("\n".join(json.dumps(x,ensure_ascii=False) for x in rows)+"\n",encoding="utf-8")
+
+
+def clean_task_fixture(text):
+    """Complete a TASK fixture whose test is focused on checks other than existing material."""
+    if not re.search(r"(?im)^\s*(?:\[tw:[^\]]+\]\s*)?TASK\b", text):
+        return text
+    if re.search(r"(?im)^\s*(?:已有资料|Existing material)\s*[:：]", text):
+        return text
+    return text.rstrip() + "\n已有资料：\n查过 features、tasks，无\n"
+
+
 def walk_args(run, args, state_file, prepare_primary=False):
     """Tests that only care about the end status: step a task through the legal path first (T20 enforces it).
     run(*args) must run tw.py; the final call is left to the caller."""

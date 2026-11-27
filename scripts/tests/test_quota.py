@@ -293,6 +293,17 @@ class QuotaTrigger(TwCase):
         self.assertNotIn("quota_trigger", json.loads(self.tw("ready").stdout))
         self.assertNotIn("Create the hourly quota timer", self.context())
 
+    def test_sendable_only_gives_the_same_line_everywhere(self):
+        """Approved work about to go out, nothing running, no lead session: ready, wrapup and SessionStart agree."""
+        self.tw("prefs", "--set", "language=en")
+        self.tw("thread", "add", "ui", "--session", "s-ui"); self.tw("task", "add", "T1", "--title", "page", "--owner", "ui")
+        self.tw("plan", "approve", "--user-said", "approved")
+        line = next(x for x in self.tw("ready").stderr.splitlines() if x.startswith("Create the hourly quota timer"))
+        self.assertIn(line, self.tw("wrapup").stdout)
+        self.assertIn(line, self.context())
+        self.tw("prefs", "--set", "quota_trigger_id=trig_1")
+        self.assertNotIn("Turn the quota timer off", self.context())
+
     def test_desktop_samples_read_an_account_without_events(self):
         """T85: local sessions log no usage events; the desktop app's per-organization samples give the total."""
         cfg = self.dir / "acct-a"; cfg.mkdir()
@@ -318,6 +329,15 @@ class QuotaTrigger(TwCase):
             self.assertEqual(quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)["claude"]["total"]["src"], "cache")
             samples.write_text("{bad")
             self.assertEqual(quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)["claude"]["total"]["src"], "cache")
+            (cfg / "bridge-transcript-cse_old.jsonl").write_text(json.dumps({"timestamp": now - 30 * 3600,
+                "rate_limit_info": {"unifiedWindows": {"seven_day": {"utilization": 0.404, "resetsAt": now + 3 * 86400}}}}) + "\n")
+            (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-a"},
+                "cachedUsageUtilization": {"fetchedAtMs": (now - 3600) * 1000,
+                                           "utilization": {"seven_day": {"utilization": 40, "resets_at": now + 3 * 86400}}}}))
+            samples.write_text(json.dumps({"samples": [{"t": (now - 5 * 3600) * 1000, "org": "org-a", "u": {"sd": 38}}]}))
+            r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)  # stale event: the fresh cache wins
+            self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["src"]), (40, "cache"))
+            self.assertEqual(quota.tier(r, {}, now)[0], "normal")
 
     def test_older_ledger_missing_default_keys_still_runs_ready(self):
         """T85: a ledger written before some keys existed (here: decisions) must not crash a due default."""

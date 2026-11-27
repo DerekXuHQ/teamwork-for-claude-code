@@ -215,38 +215,36 @@ def _claude_events(config_dirs, now):
         if key in best:
             out[dest] = dict(best[key], **({"model": "Fable"} if dest == "scoped" else {}))
     cache = _cache(config_dirs, now)
-    for key in ("total", "scoped"):  # same window in both: usage only grows, so the higher reading is the newer
-        ev, ca = out.get(key), cache.get(key)
-        if ev and isinstance(ca, dict) and not ca.get("stale") and num(ca.get("pct")) is not None and \
-                num(ca.get("resets_at")) is not None and abs(ca["resets_at"] - ev["resets_at"]) < 3 * 3600 and \
-                ca["pct"] > ev["pct"]:
-            out[key] = dict(ca, **({"model": ev.get("model", "Fable")} if key == "scoped" else {}))
-            out.setdefault("notes", []).append(f"{key} from a newer cache")
-    have = out.get("total") or cache.get("total")
-    if not have or have.get("stale") or now - (have.get("seen_at") or now) > 86400:  # T85: no usable total: desktop
-        desk = _desktop(config_dirs, now).get("total")
-        if desk and (not have or (desk.get("seen_at") or 0) > (have.get("seen_at") or 0)):
-            out.pop("total", None)
-            cache = dict(cache, total=desk)
-    for key in ("total", "scoped", "five_hour", "scoped_share_of_total_pct"):
+    for row in (out.get("total"), out.get("scoped")):  # a day-old event may be far below today's: not for the tier
+        if row and row.get("seen_at") and now - row["seen_at"] > 86400:
+            row["stale"] = True
+    usable = [r for r in (out.get("total"), cache.get("total")) if r and not r.get("stale")]
+    desk = {} if usable else _desktop(config_dirs, now)  # T85: accounts with only local sessions log no events
+    for key in ("total", "scoped"):
+        rows = [r for r in (out.get(key), cache.get(key), desk.get(key)) if isinstance(r, dict) and num(r.get("pct")) is not None]
+        if not rows:
+            continue
+        live = [r for r in rows if not r.get("stale")]
+        # live readings: the latest window, then the highest (usage only grows within a window; event times are only
+        # file times); nothing live: the newest reading, shown but not used for the tier
+        pick = max(live, key=lambda r: (int((num(r.get("resets_at")) or 0) // 10800), r["pct"])) if live else \
+            max(rows, key=lambda r: r.get("seen_at") or 0)
+        model = (out.get(key) or {}).get("model")
+        out[key] = dict(pick, **({"model": model or pick.get("model") or "Fable"} if key == "scoped" else {}))
+        if pick.get("src") != "events" or pick.get("stale"):
+            age = pick.get("age_h") if pick.get("src") != "events" else (now - pick["seen_at"]) / 3600
+            where = {"desktop": "the desktop app", "cache": "cache"}.get(pick.get("src"), "events")
+            out.setdefault("notes", []).append(f"{key} from {where}" + (f", {age:.0f}h old" if age is not None else ", age unknown")
+                                               + (" (stale: not used for tier)" if pick.get("stale") else ""))
+    for key in ("five_hour", "scoped_share_of_total_pct"):
         if key not in out and key in cache:
             out[key] = cache[key]
-            if key in ("total", "scoped"):
-                age = cache[key].get("age_h")
-                out.setdefault("notes", []).append(f"{key} from {'the desktop app' if cache[key].get('src') == 'desktop' else 'cache'}" + (f", {age:.0f}h old" if age is not None else ", age unknown")
-                                                    + (" (stale: not used for tier)" if cache[key].get("stale") else ""))
     if out.get("scoped") and cache.get("scoped_model"):
         out["scoped"]["model"] = cache["scoped_model"]
-    if "total" in out and "scoped" not in out and out["total"].get("src") != "desktop":  # local sessions log no events:
+    if "total" in out and "scoped" not in out and out["total"].get("src") != "desktop":  # local sessions log no events
         out["scoped"] = {"pct": 0.0, "resets_at": out["total"]["resets_at"], "seen_at": None,
                          "src": "inferred", "model": cache.get("scoped_model") or "Fable"}
         out.setdefault("notes", []).append("scoped not seen this window: inferred 0%")
-    for key in ("total", "scoped"):
-        row = out.get(key)
-        if row and row.get("src") == "events" and row.get("seen_at") and now - row["seen_at"] > 86400:
-            row["stale"] = True  # a day-old reading may be far below today's: not used for the tier
-            out.setdefault("notes", []).append(f"{key} last seen {(now-row['seen_at'])/3600:.0f}h ago "
-                                               "(stale: not used for tier)")
     return out
 
 

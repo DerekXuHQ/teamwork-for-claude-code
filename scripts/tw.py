@@ -4853,7 +4853,7 @@ def cmd_ready(a):
             logfile.close()
             raise
         else: logfile.close()
-    trigger = quota_trigger_hint(st, bool(ready))
+    trigger = quota_trigger_hint(st)
     if trigger:
         print(quota_trigger_line(st, trigger), file=sys.stderr)
     nested_sessions, nested_gaps = _nested_session_report(d, st)
@@ -5933,9 +5933,7 @@ def cmd_wrapup(a):
         sections[lab(st, "features")] = [lab(st, "feature_fix")]
     stale_docs = [lab(st, "wrap_refresh_doc", link=x.get('link')) for x in st.get("docs", {}).values() if _doc_stale(st, x)]
     if stale_docs: sections[lab(st, "docs")] = stale_docs
-    done_ids = {t for t, k in st.get("tasks", {}).items() if k.get("status") == "done"}
-    sendable = any(k.get("status") == "approved" and set(k.get("deps", [])) <= done_ids for k in st.get("tasks", {}).values())
-    trigger = quota_trigger_hint(st, sendable)
+    trigger = quota_trigger_hint(st)
     data = {"sections": sections, "reconcile": st["reconcile"], **({"quota_trigger": trigger} if trigger else {})}
     phase = _current_feature_phase(st)
     features = [f"{i} {x.get('name')}" for i, x in st.get("features", {}).items() if x.get("phase") == phase]
@@ -10352,12 +10350,18 @@ def quota_due(st, dispatching=False):
     return last is None or (_when(now()) - last).total_seconds() >= interval * 60
 
 
-def quota_trigger_hint(st, sendable):
+def quota_sendable(st):
+    """An approved task whose deps are done: work about to go out (one rule for ready, wrapup and SessionStart)."""
+    done = {t for t, k in st.get("tasks", {}).items() if k.get("status") == "done"}
+    return any(k.get("status") == "approved" and set(k.get("deps", [])) <= done for k in st.get("tasks", {}).values())
+
+
+def quota_trigger_hint(st):
     """R66: tw.py cannot switch the platform timer; it only says when the lead should (prefs quota_trigger_id / _on).
     Idle with the timer on -> "off"; work running or to send out with the timer off -> "on";
     work running or to send out with no timer recorded -> "create" (T85: a project never set one up)."""
     p = st.get("prefs", {})
-    busy = sendable or not quota_idle(st)
+    busy = quota_sendable(st) or not quota_idle(st)
     if not str(p.get("quota_trigger_id") or "").strip():
         return "create" if busy else None
     flag = p.get("quota_trigger_on")
@@ -15014,8 +15018,8 @@ def cmd_context(a):
         pass
     pw = permission_warning(st) if not in_worktree else ""
     reminder = thread_reminder(st, me) if in_worktree else lead_reminder(st)
-    if not in_worktree and reminder:  # T85: the same quota-timer line as ready and wrapup, at start and after compaction
-        trigger = quota_trigger_line(st, quota_trigger_hint(st, False))
+    if not in_worktree:  # T85: the same quota-timer line as ready and wrapup, at start and after compaction
+        trigger = quota_trigger_line(st, quota_trigger_hint(st))
         reminder += f"{trigger}\n\n" if trigger else ""
     seat=me if in_worktree else "lead"
     mandatory=""

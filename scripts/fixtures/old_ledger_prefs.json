@@ -1,0 +1,16 @@
+{
+  "checkin_minutes": 10,
+  "gpt_model": "legacy-model",
+  "gpt_policy": "",
+  "language": "",
+  "max_parallel": 0,
+  "perm_policy": "",
+  "policy_said": {"perm_policy": {"text": "managed", "at": "2026-01-01T00:00:00+00:00"}},
+  "propose_before_start": true,
+  "quota_trigger_id": "",
+  "quota_trigger_on": "",
+  "require_review": true,
+  "short_name": "OLD",
+  "thread_permission_mode": "auto",
+  "update_detail": "brief"
+}

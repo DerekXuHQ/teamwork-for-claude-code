@@ -979,6 +979,43 @@ class T71GuardAndSuccession(TwCase):
         spec=importlib.util.spec_from_file_location("tw_t71_shape", TW); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
         return mod
 
+    def test_clear_tmp_empties_only_the_threads_own_tmp_without_following_links(self):
+        # R84: threads clear scratch with `worktree <thread> --clear-tmp`, a Python delete, not rm -r through the guard.
+        for name in ("api", "ui"):
+            if name not in self.state()["threads"]: self.tw("thread", "add", name)
+        own = self.dir / ".teamwork" / "private" / "api" / "tmp"; other = self.dir / ".teamwork" / "private" / "ui" / "tmp"
+        (own / "smoke-A" / "deep").mkdir(parents=True); (own / "smoke-A" / "deep" / "f").write_text("12345", encoding="utf-8")
+        (own / "keep").mkdir(); other.mkdir(parents=True); (other / "x").write_text("x", encoding="utf-8")
+        outside = self.dir.parent / f"{self.dir.name}-outside"; outside.mkdir(); (outside / "victim").write_text("v", encoding="utf-8")
+        (own / "smoke-A" / "link").symlink_to(outside, target_is_directory=True); (own / "toplink").symlink_to(outside)
+        out = json.loads(self.tw("worktree", "api", "--clear-tmp", "smoke-A", "toplink").stdout)
+        self.assertEqual((out["removed"], out["freed_bytes"] >= 5), (["smoke-A", "toplink"], True))
+        self.assertTrue((outside / "victim").is_file())  # links were removed as links
+        self.assertEqual(sorted(p.name for p in own.iterdir()), ["keep"])
+        self.assertEqual(json.loads(self.tw("worktree", "api", "--clear-tmp").stdout)["removed"], ["keep"])
+        self.assertTrue(own.is_dir() and (other / "x").is_file())
+        for bad in ("..", "../ui", "a/b"):
+            self.assertNotEqual(self.tw("worktree", "api", "--clear-tmp", bad, ok=False).returncode, 0)
+        self.assertTrue((other / "x").is_file())
+        moved = self.dir / ".teamwork" / "private" / "ui"; real = self.dir.parent / f"{self.dir.name}-realui"
+        moved.rename(real); moved.symlink_to(real, target_is_directory=True)
+        self.assertNotEqual(self.tw("worktree", "ui", "--clear-tmp", ok=False).returncode, 0)  # tmp reached via a link
+        self.assertTrue((real / "tmp" / "x").is_file())
+        linkedproj = self.dir.parent / f"{self.dir.name}-linkedproj"; linkedproj.mkdir()
+        elsewhere = self.dir.parent / f"{self.dir.name}-elsewhere"; (elsewhere / "private" / "api" / "tmp" / "victim").mkdir(parents=True)
+        (linkedproj / ".teamwork").symlink_to(elsewhere, target_is_directory=True)
+        with self.assertRaises(SystemExit): tw.clear_thread_tmp(linkedproj, "api")  # .teamwork itself is a link
+        self.assertTrue((elsewhere / "private" / "api" / "tmp" / "victim").is_dir())
+
+    def test_bash_guard_still_asks_for_rm_r_in_own_tmp(self):
+        # the guard no longer parses shell to allow deletes: rm -r / find -delete always ask (use --clear-tmp instead)
+        own = self.dir / ".teamwork" / "private" / "api" / "tmp"; own.mkdir(parents=True)
+        for command in (f"rm -r {own}/smoke-A", f"S=$(mktemp -d {own}/rb-XXXX) && find $S -mindepth 1 -delete"):
+            event = {"tool_name": "Bash", "cwd": str(self.dir), "session_id": "local-api", "tool_input": {"command": command}}
+            result = subprocess.run([sys.executable, str(TW), "bash-guard"], cwd=self.dir, env=self.env,
+                                    input=json.dumps(event), capture_output=True, text=True)
+            self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], "ask")
+
     def test_generated_fixture_signatures_and_byte_tamper(self):
         import importlib.util
         fixture_dir=FIXTURES
@@ -1907,6 +1944,18 @@ class T71GuardAndSuccession(TwCase):
                 self.assertEqual(decision["permissionDecision"],"deny")
                 self.assertEqual(decision["permissionDecisionReason"],"teamwork 看板读不出来/处理出错，先修好 / board unreadable or guard error")
                 self.assertTrue(log.is_file())
+
+    def test_archive_guard_rejects_unknown_session_when_tasks_missing(self):
+        state = self.state()
+        state.pop("tasks")
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        event = {"cwd": str(self.dir), "tool_name": "mcp__claude-code-remote__archive_session",
+                 "tool_input": {"session_id": "unknown-session"}}
+        result = subprocess.run([sys.executable, str(TW), "bash-guard"], cwd=self.dir, env=self.env,
+                                input=json.dumps(event), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
 
     def test_archive_guard_strips_ids_when_building_deny_table(self):
         st=self.state()

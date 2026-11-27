@@ -34,6 +34,7 @@ import re
 import shutil
 import shlex
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -47,12 +48,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # quota.py sits next to tw.py (also under python -P)
 try:  # only `quota` needs it: a copy without quota.py must not break the hooks (context, bash-guard)
     import quota as quota_reader  # noqa: E402
-    QUOTA_DEFAULTS = dict(quota_reader.DEFAULTS)
 except ImportError:
     quota_reader = None
-    QUOTA_DEFAULTS = {"quota_burn_at": 70, "quota_lead_only_at": 90, "quota_pre_reset_hours": 36,
-                      "quota_pre_reset_fable_max": 80, "quota_fable_done_at": 95, "quota_5h_tight": 80,
-                      "quota_gpt_tight": 90}
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 TEMPLATES = SKILL_DIR / "templates"
@@ -93,6 +90,141 @@ def now():
     fake = os.environ.get("TW_NOW")
     t = dt.datetime.fromisoformat(fake) if fake else dt.datetime.now()
     return t.astimezone().isoformat(timespec="seconds")
+
+
+def _now_dt():
+    return dt.datetime.fromisoformat(now())
+
+
+PREFS = {
+    "max_parallel": {"default": 0, "min": 0, "unit": "threads"}, "task_existing_limit": {"default": 5},
+    "propose_before_start": {"default": True},
+    "update_detail": {"default": "brief", "values": ("brief", "full")}, "checkin_minutes": {"default": 10, "min": 0, "unit": "minutes"},
+    "short_name": {"default": ""}, "require_review": {"default": True, "user_said_off": True},
+    "review_max_rounds": {"default": 3, "min": 0, "max": 99, "unit": "rounds", "invalid": "a whole number of review rounds, 0-99 (default 3; 0 = no limit)"}, "stuck_minutes": {"default": 30, "min": 0, "unit": "minutes"},
+    "notice_merge": {"default": "thread", "values": ("thread", "none")}, "urgent_ack_minutes": {"default": 5, "min": 0, "unit": "minutes"},
+    "language": {"default": ""}, "thread_permission_mode": {"default": "auto", "values": ("", "default", "acceptEdits", "auto", "dontAsk", "bypassPermissions"), "user_said": True},
+    "standing_grants": {"default": [], "values": ("archive", "schedule", "merge"), "user_said_add": True}, "fixtures_dir": {"default": ""},
+    "check_cmd": {"default": ""}, "check_shards": {"default": ""},
+    "check_jobs": {"default": 4, "min": 1, "unit": "jobs"}, "check_shard_timeout_minutes": {"default": 20, "min": 0, "unit": "minutes"},
+    "spawn_policy": {"default": "", "values": ("", "free", "ask"), "user_said": True}, "perm_policy": {"default": "", "values": ("", "managed", "managed-sensitive", "ask"), "user_said": True},
+    "gpt_policy": {"default": "", "values": ("", "yes", "no"), "user_said": True}, "skill_edge": {"default": ""},
+    "check_timeout_minutes": {"default": 60, "min": 0, "unit": "minutes"}, "default_after_minutes": {"default": 30, "min": 0, "unit": "minutes"},
+    "ledger_line_every": {"default": "report", "values": ("wrapup", "report")}, "stale_minutes": {"default": 120, "min": 0, "unit": "minutes"},
+    "screen_mode": {"default": "shadow", "values": ("shadow", "off")}, "screen_autograde": {"default": True},
+    "signals_red_at": {"default": 3, "min": 1, "unit": "signals", "min_error": "a positive whole number"}, "relay_max_per_day": {"default": 2, "min": 1, "unit": "relays", "min_error": "a positive whole number"},
+    "succ_watchdog_minutes": {"default": 45, "min": 1, "unit": "minutes", "min_error": "a positive whole number"}, "signals_window_minutes": {"default": 30, "min": 1, "unit": "minutes", "min_error": "a positive whole number"},
+    "observe_minutes": {"default": 20, "min": 1, "unit": "minutes", "min_error": "a positive whole number"}, "grader_timeout_s": {"default": 300, "min": 1, "unit": "seconds", "min_error": "a positive whole number"},
+    "lead_compact_alert": {"default": 2, "min": 1, "unit": "compactions", "min_error": "a positive whole number"}, "lead_compact_swap": {"default": 4, "min": 1, "unit": "compactions", "min_error": "a positive whole number"},
+    "drift_window_hours": {"default": 24, "min": 1, "max": 168, "unit": "hours", "max_error": "maximum 168 hours"}, "root_mode": {"default": "on", "values": ("on", "off")},
+    "root_symptoms_at": {"default": 2, "min": 1, "unit": "symptoms", "min_error": "a positive whole number"}, "root_rework_at": {"default": 2, "min": 1, "unit": "reworks", "min_error": "a positive whole number"},
+    "root_full_at": {"default": 4, "min": 1, "unit": "symptoms", "min_error": "a positive whole number"}, "root_debt_at": {"default": 2, "min": 1, "unit": "debt items", "min_error": "a positive whole number"},
+    "root_fresh_at": {"default": 3, "min": 1, "unit": "corrections", "min_error": "a positive whole number"}, "archive_idle_days": {"default": 3, "min": 1, "unit": "days", "min_error": "a positive whole number of days"},
+    "reconcile_every": {"default": "wrapup", "values": ("wrapup", "round")}, "selfcheck_every": {"default": "wrapup", "values": ("wrapup", "round")},
+    "quota_every_minutes": {"default": 60, "min": 1, "unit": "minutes", "min_error": "a positive whole number of minutes"}, "slow_factor": {"default": 2, "min": 1, "min_error": "a positive whole number"},
+    "sweep_every_minutes": {"default": 10, "min": 1, "unit": "minutes", "min_error": "a positive whole number"}, "thread_default_after_minutes": {"default": 5, "min": 1, "unit": "minutes", "min_error": "a positive whole number"},
+    "quota_trigger_id": {"default": ""}, "quota_trigger_on": {"default": "", "type": "bool", "allow_empty": True},
+    "sweep_trigger_id": {"default": ""}, "sweep_trigger_on": {"default": "", "type": "bool", "allow_empty": True},
+    "require_primary": {"default": True, "user_said_off": True}, "gpt_model": {"default": None},
+    "gpt_private": {"default": []}, "archive_disconnected_direct": {"default": False},
+    "current_phase": {"default": ""}, "deadline": {"default": ""},
+    "lead_relay_hours": {"default": 12, "min": 1, "unit": "hours"}, "policy_said": {"default": {}, "settable": False},
+    "quota_burn_at": {"default": 70, "min": 0, "max": 100, "unit": "percent", "quota_threshold": True}, "quota_lead_only_at": {"default": 90, "min": 0, "max": 100, "unit": "percent", "quota_threshold": True},
+    "quota_pre_reset_hours": {"default": 36, "min": 0, "max": 168, "unit": "hours", "quota_threshold": True}, "quota_pre_reset_fable_max": {"default": 80, "min": 0, "max": 100, "unit": "percent", "quota_threshold": True},
+    "quota_fable_done_at": {"default": 95, "min": 0, "max": 100, "unit": "percent", "quota_threshold": True}, "quota_5h_tight": {"default": 80, "min": 0, "max": 100, "unit": "percent", "quota_threshold": True},
+    "quota_gpt_tight": {"default": 90, "min": 0, "max": 100, "unit": "percent", "quota_threshold": True},
+}
+def _pref_kind(spec):
+    if "type" in spec: return spec["type"]
+    default = spec["default"]
+    return ("bool" if isinstance(default, bool) else
+            "int" if isinstance(default, int) else
+            "list" if isinstance(default, list) else
+            "dict" if isinstance(default, dict) else
+            "enum" if "values" in spec else "text")
+
+
+QUOTA_PREF_KEYS = tuple(key for key, spec in PREFS.items() if spec.get("quota_threshold"))
+
+DEFAULT_STATE = {
+    "project": "", "goal": "", "created": None, "rev": 0, "lead": {"session_id": None},
+    "envs": {"rc": None, "cloud": None}, "repo": {"url": None, "path": None, "base": "main"},
+    "threads": {}, "tasks": {}, "screens": {}, "signals": {}, "observations": {}, "handovers": {},
+    "plan_approved": False, "questions": [], "decisions": [], "promises": [], "notices": [],
+    "archive": {}, "spawn_refusals": [], "features": {}, "requests": {}, "prefs": {},
+    "archive_handoffs": [], "archive_packs": {}, "areas": {}, "compactions": {},
+    "betas": [], "beta_feedback": [], "desktop_open_queue": [], "screen_pending_hints": [],
+    "last_quota_at": None, "last_report_at": None, "last_sweep_at": None, "root_since": None,
+    "model_deny": [], "models": {}, "pace_notice_tier": None, "qa_pending": [], "quota": {},
+    "quota_pct": None, "reconcile": {}, "selfcheck": {}, "sprint": {}, "standing": [],
+    "stopped_at": None, "updated": None, "version_notice": None, "versions": {},
+}
+
+# These older ledger additions can be reconstructed from registered defaults.
+# Prefs added after the first ledgers: a new ledger does not write them either (board parity with old ledgers).
+OPTIONAL_PREFS = {"archive_disconnected_direct", "current_phase", "deadline", "gpt_model", "gpt_private",
+    "lead_relay_hours", "policy_said", "quota_5h_tight", "quota_burn_at", "quota_fable_done_at", "quota_gpt_tight",
+    "quota_lead_only_at", "quota_pre_reset_fable_max", "quota_pre_reset_hours", "require_primary"}
+# Keys a new ledger does not write: filled in memory when missing, saved once they change.
+OPTIONAL_STATE_DEFAULTS = {"areas", "compactions", "last_quota_at", "last_report_at", "last_sweep_at", "archive_handoffs",
+    "archive_packs", "beta_feedback", "betas", "desktop_open_queue", "model_deny", "models", "pace_notice_tier",
+    "qa_pending", "quota", "quota_pct", "reconcile", "root_since", "screen_pending_hints", "selfcheck", "sprint",
+    "standing", "stopped_at", "version_notice", "versions"}
+REQUIRED_STATE = set(DEFAULT_STATE) - OPTIONAL_STATE_DEFAULTS
+REQUIRED_PREFS = {"short_name", "ledger_line_every"}
+REQUIRED_LEDGER_KEYS = {"lead": dict, "threads": dict, "tasks": dict}
+
+
+def _has_required_ledger_keys(data):
+    return all(isinstance(data.get(key), kind) for key, kind in REQUIRED_LEDGER_KEYS.items())
+
+
+class State(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.origin = {"state": set(self), "prefs": set(self.get("prefs", {}))}
+
+
+def stored(st):
+    result = copy.deepcopy(dict(st))
+    origin = getattr(st, "origin", {"state": set(result), "prefs": set(result.get("prefs", {}))})
+    for key, value in list(result.items()):
+        if key not in origin["state"] and key in DEFAULT_STATE and value == DEFAULT_STATE[key]:
+            result.pop(key)
+    prefs = result.get("prefs", {})
+    for key, value in list(prefs.items()):
+        if key not in origin["prefs"] and key in PREFS and value == PREFS[key]["default"]:
+            prefs.pop(key)
+    return result
+
+
+def pref(st, key):
+    """Return a stored preference or its single registered default."""
+    spec = PREFS[key]
+    return st.get("prefs", {}).get(key, spec["default"])
+
+
+def _default_prefs():
+    return {key: copy.deepcopy(spec["default"]) for key, spec in PREFS.items()}
+
+
+def _new_state(project, goal="", created=None, repo_url=None, repo_path=None, repo_base="main", short_name=""):
+    state = State(copy.deepcopy(DEFAULT_STATE))
+    state.update(project=project, goal=goal, created=created,
+                 repo={"url": repo_url, "path": repo_path, "base": repo_base}, prefs=_default_prefs())
+    state["prefs"]["short_name"] = short_name  # a new ledger stores every pref; only old ledgers fill in memory
+    state.origin = {"state": set(state) - OPTIONAL_STATE_DEFAULTS, "prefs": set(state["prefs"]) - OPTIONAL_PREFS}
+    return state
+
+def _rebuild_base(project, d, make_state, short_name):
+    """Rebuild starts from the old ledger's key set, so it neither drops nor invents keys."""
+    state = make_state(project, repo_path=str(d.parent), short_name=short_name(project))
+    try: old = json.loads((d / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError): old = None
+    if isinstance(old, dict):
+        state.origin = {"state": set(old), "prefs": set(old["prefs"]) if isinstance(old.get("prefs"), dict) else set()}
+    return state
+
 
 def _later_than(stamp, previous):
     if stamp > (previous or ""): return stamp
@@ -293,6 +425,9 @@ LABELS = {
         "primary_legacy": "legacy",
         "primary_verify_no_primary": "{task}: verify needs a primary outcome; add --primary before recording verification.",
         "primary_verify_done": "{task}: a done task cannot be re-verified; open new work for a regression.",
+        "fixtures_gate": "{task}: done needs a primary test that reads a fixture under {fixtures_dir} or uses sample()/place().",
+        "fixtures_gate_no_test": "{task}: done needs task verify --test <file[::class.method]> naming a test that reads a fixture.",
+        "fixtures_gate_empty_selector": "task verify --test selector after :: must not be empty.",
         "primary_seen": "seen", "primary_not_seen": "not seen", "primary_pending_real": "pending-real",
         "review_tests_line": "Tests: {tests}{why} · based on {base}",
         "pv_one": "task verify needs exactly one of --seen, --not-seen or --pending-real",
@@ -774,6 +909,9 @@ LABELS = {
         "primary_legacy": "旧版",
         "primary_verify_no_primary": "{task}：verify 需要主产出；先用 --primary 补上再记录验证。",
         "primary_verify_done": "{task}：done 任务不能重新 verify；回归请开新任务。",
+        "fixtures_gate": "{task}：done 需要主产出测试读取 {fixtures_dir} 下的样本或调用 sample()/place()。",
+        "fixtures_gate_no_test": "{task}：done 需要 task verify --test <文件[::类.方法]> 指定读取样本的测试。",
+        "fixtures_gate_empty_selector": "task verify --test 的 :: 后面必须填写选择器。",
         "primary_seen": "看到了", "primary_not_seen": "没看到", "primary_pending_real": "待真机",
         "review_tests_line": "测试：{tests}{why} · 基于 {base}",
         "pv_one": "task verify 要且只要 --seen、--not-seen、--pending-real 其中一个",
@@ -968,7 +1106,7 @@ LABELS = {
 
 def _lang_code(st):
     """zh, zh-CN, zh_TW -> zh: one reading of the language pref for every label table."""
-    return (st.get("prefs", {}).get("language") or "en").strip().lower().replace("_", "-").split("-")[0]
+    return (pref(st, 'language') or "en").strip().lower().replace("_", "-").split("-")[0]
 
 
 def lab(st, key, **kw):
@@ -1105,6 +1243,15 @@ def _primary_suspect(d, how, evidence):
                           rf"|(?:不用|没用|没有用|未用|不是|并非|非|无|没有)\s*(?:{words})", re.I)
     project = Path(d).resolve().parent if d else Path.cwd().resolve()
     roots = [Path.cwd().resolve(), project]
+    fixtures_name = ""
+    if d:
+        state_path = Path(d) / "state.json"
+        if state_path.is_file():
+            try:
+                fixtures_name = pref(json.loads(state_path.read_text(encoding="utf-8")), "fixtures_dir")
+            except (OSError, ValueError, AttributeError):
+                pass
+    fixtures = (project / fixtures_name).resolve() if fixtures_name else None
 
     def random_tmp_component(component):
         return bool(re.fullmatch(r"tmp[A-Za-z0-9_-]{8}", component))
@@ -1121,6 +1268,13 @@ def _primary_suspect(d, how, evidence):
             candidates = [path] if path.is_absolute() else [root / path for root in roots]
             existing = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
             if existing:
+                if fixtures:
+                    try:
+                        existing.relative_to(fixtures)
+                        value = value.replace(token, "")
+                        continue
+                    except ValueError:
+                        pass
                 try:
                     relative = existing.relative_to(Path(tempfile.gettempdir()).resolve())
                 except ValueError:
@@ -1173,7 +1327,7 @@ def primary_gate(st, tid, before, k, changes, a, said):
         k.pop("primary_legacy", None)
     if k.get("primary_exempt") and changes.get("status_to") in ("review", "done", "merge"):
         return
-    if not st.get("prefs", {}).get("require_primary", True):
+    if not pref(st, 'require_primary'):
         return
     check = k.get("primary_check") or {}
     result = check.get("result")
@@ -1212,6 +1366,70 @@ def g8_gate(st, tid, before, k, changes, a, said):
 TASK_GATES = [primary_gate, g8_gate]  # Root's root-cause gate can register here later; keep cmd_root unchanged.
 
 
+def fixtures_gate(st, tid, before, k, changes, a, said):
+    """Require declared primary tests to refer to generated fixtures before done."""
+    fixtures_dir = (pref(st, 'fixtures_dir') or "").strip()
+    if (changes.get("status_to") != "done" or not fixtures_dir or not k.get("primary")
+            or k.get("primary_exempt") or k.get("primary_legacy")):
+        return
+    test_id = (k.get("primary_check") or {}).get("test")
+    if not test_id:
+        return lab(st, "fixtures_gate_no_test", task=tid)
+    filename, sep, selector = test_id.partition("::")
+    if sep and not selector.strip():
+        return lab(st, "fixtures_gate_empty_selector")
+    root = Path(find_dir()).resolve().parent
+    test_path = (root / filename).resolve()
+    try:
+        test_path.relative_to(root)
+        source = test_path.read_text(encoding="utf-8")
+    except (ValueError, OSError, UnicodeError):
+        return lab(st, "fixtures_gate_no_test", task=tid)
+    try:
+        import ast
+        tree = ast.parse(source)
+    except SyntaxError:
+        return lab(st, "fixtures_gate_no_test", task=tid)
+    if sep:
+        try:
+            parts = selector.split(".")
+            node = tree
+            for part in parts:
+                node = next(child for child in node.body if getattr(child, "name", None) == part)
+        except (SyntaxError, StopIteration, AttributeError):
+            return lab(st, "fixtures_gate_no_test", task=tid)
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return lab(st, "fixtures_gate_no_test", task=tid)
+    else:
+        node = tree
+
+    class FixtureUse(ast.NodeVisitor):
+        found = False
+        def visit_If(self, branch):
+            test = branch.test
+            if isinstance(test, ast.Constant) and test.value in (False, 0, None):
+                for statement in branch.orelse:
+                    self.visit(statement)
+                return
+            self.generic_visit(branch)
+        def visit_Call(self, call):
+            if ((isinstance(call.func, ast.Name) and call.func.id in ("sample", "place")) or
+                    (isinstance(call.func, ast.Attribute) and call.func.attr in ("sample", "place"))):
+                self.found = True
+            self.generic_visit(call)
+        def visit_Name(self, name):
+            if name.id == "fixtures_dir":
+                self.found = True
+
+    use = FixtureUse()
+    use.visit(node)
+    if not use.found:
+        return lab(st, "fixtures_gate", task=tid, fixtures_dir=fixtures_dir)
+
+
+TASK_GATES.append(fixtures_gate)
+
+
 def _done_gate_reason(st, tid, before=None, k=None, changes=None, a=None, said=""):
     """Single done gate; callers may pass no changes to receive the legacy reason string."""
     k = k or st["tasks"][tid]
@@ -1228,7 +1446,7 @@ def _done_gate_reason(st, tid, before=None, k=None, changes=None, a=None, said="
         return
     if not str(k.get("accept") or "").strip():
         return f"{tid} has no 'done when': set --accept first (a review needs something to check against)"
-    if st.get("prefs", {}).get("require_review", True) and rv.get("result") not in PASSING:
+    if pref(st, 'require_review') and rv.get("result") not in PASSING:
         return lab(st, "task_review_done", task=tid)
     if rv.get("result") in PASSING:
         owners = [k["owner"]] + list(k.get("past_owners") or [])
@@ -1384,16 +1602,13 @@ def _run_reconcile(st):
     return rows
 
 
-STUCK_DEFAULT = 30  # minutes without a report before a working thread counts as possibly stuck
-
-
 def _thread_on_duty(t):
     return isinstance(t, dict) and t.get("status") in ("working", "starting")
 
 
 def stuck_threads(st):
     """{thread: minutes since its last report} for working/starting threads silent longer than prefs.stuck_minutes."""
-    limit = st.get("prefs", {}).get("stuck_minutes", STUCK_DEFAULT)
+    limit = pref(st, 'stuck_minutes')
     cur = dt.datetime.fromisoformat(now())
     out = {}
     for n, t in st["threads"].items():
@@ -1417,7 +1632,7 @@ LANG_NAMES = {"zh": "Chinese (中文)", "en": "English", "ja": "Japanese (日本
 
 def language_rule(st):
     """The conversation-language rule, with the project's current language (prefs.language)."""
-    code = (st.get("prefs", {}).get("language") or "").strip()
+    code = (pref(st, 'language') or "").strip()
     cur = (f"{LANG_NAMES.get(code.lower(), code)} (prefs.language={code})" if code
            else "not set: use the language of the user's latest message")
     return (
@@ -1460,13 +1675,24 @@ def need(d):
 
 
 def load(d):
-    st = json.loads((d / "state.json").read_text(encoding="utf-8"))
-    if not isinstance(st, dict):
+    data = json.loads((d / "state.json").read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
         raise ValueError("state.json must contain an object")
+    if not _has_required_ledger_keys(data):
+        raise ValueError("state.json missing lead/threads/tasks structure")
+    st = State(data)
     for task in st.get("tasks", {}).values():
         if task.get("status") in ("review", "done") and "primary_check" not in task and \
                 not task.get("primary_legacy") and not task.get("primary_exempt"):
             task["primary_legacy"] = True
+    if not isinstance(st.get("prefs"), dict):
+        st["prefs"] = {}
+    for key, spec in PREFS.items():
+        if key not in st["prefs"]:
+            st["prefs"][key] = copy.deepcopy(spec["default"])
+    for key, value in DEFAULT_STATE.items():
+        if key not in st and key not in REQUIRED_STATE:
+            st[key] = copy.deepcopy(value)
     st["_rev_loaded"] = st.get("rev", 0)
     return st
 
@@ -1570,7 +1796,7 @@ def _save_locked(d, st, event=None):
     if not metadata_only:
         st["updated"] = now()
     tmp = d / f"state.json.tmp-{os.getpid()}"
-    tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(stored(st), ensure_ascii=False, indent=2), encoding="utf-8")
     log_event = None
     if event:
         more = {n: st["threads"][n] for n in touched if n in st["threads"] and n != event.get("thread")}
@@ -1601,90 +1827,91 @@ def _save_locked(d, st, event=None):
 def snapshots(st, ev):
     """Copies of what this event changed, so `rebuild` can restore state.json from log.jsonl alone."""
     snap = {}
+    persisted = stored(st)
     if ev.get("ev", "").startswith(("root-", "area-")):
-        snap["snap_areas"] = st.get("areas", {})
+        snap["snap_areas"] = persisted.get("areas", {})
     if ev.get("ev", "").startswith("root-"):
-        snap["snap_questions"] = st.get("questions", [])
-    if ev.get("task") in st.get("tasks", {}):
-        snap["snap_task"] = st["tasks"][ev["task"]]
-        linked = {r: q for r, q in st.get("requests", {}).items() if ev["task"] in (q.get("tasks") or [])}
+        snap["snap_questions"] = persisted.get("questions", [])
+    if ev.get("task") in persisted.get("tasks", {}):
+        snap["snap_task"] = persisted["tasks"][ev["task"]]
+        linked = {r: q for r, q in persisted.get("requests", {}).items() if ev["task"] in (q.get("tasks") or [])}
         if linked:  # task done can move requests to delivered
             snap["snap_reqs"] = linked
-    if ev.get("thread") in st.get("threads", {}):
-        snap["snap_thread"] = st["threads"][ev["thread"]]
-    if ev.get("req") in st.get("requests", {}):
-        snap["snap_req"] = st["requests"][ev["req"]]
+    if ev.get("thread") in persisted.get("threads", {}):
+        snap["snap_thread"] = persisted["threads"][ev["thread"]]
+    if ev.get("req") in persisted.get("requests", {}):
+        snap["snap_req"] = persisted["requests"][ev["req"]]
     if ev.get("ev") in ("req-import", "req-migrate"):
-        snap["snap_reqs"] = {r: st["requests"][r] for r in ev.get("ids", []) if r in st.get("requests", {})}
+        snap["snap_reqs"] = {r: persisted["requests"][r] for r in ev.get("ids", []) if r in persisted.get("requests", {})}
     if ev.get("ev") in ("init", "lead", "prefs"):
-        snap["snap_meta"] = {k: st.get(k) for k in ("project", "goal", "created", "repo", "envs", "lead", "prefs")}
+        snap["snap_meta"] = {k: persisted.get(k) for k in ("project", "goal", "created", "repo", "envs", "lead", "prefs")}
     if ev.get("ev") in ("question", "answered", "default"):
-        snap["snap_questions"] = st.get("questions", [])
+        snap["snap_questions"] = persisted.get("questions", [])
     if ev.get("ev", "").startswith("plan-"):
-        snap["snap_plan_approved"] = st.get("plan_approved")
-        snap["snap_tasks"] = st.get("tasks", {})  # approve/reopen changes every task's status
+        snap["snap_plan_approved"] = persisted.get("plan_approved")
+        snap["snap_tasks"] = persisted.get("tasks", {})  # approve/reopen changes every task's status
     if ev.get("ev", "").startswith("issue-"):
-        snap["snap_issues"] = st.get("issues", [])
+        snap["snap_issues"] = persisted.get("issues", [])
     if ev.get("ev", "").startswith("deliverable-"):
-        snap["snap_deliverables"] = st.get("deliverables", [])
+        snap["snap_deliverables"] = persisted.get("deliverables", [])
     if ev.get("ev") in ("default", "answered"):
-        snap["snap_decisions"] = st.get("decisions", [])
+        snap["snap_decisions"] = persisted.get("decisions", [])
     if ev.get("ev", "").startswith("feature-"):
-        snap["snap_features"] = st.get("features", {})
-        snap["snap_reqs"] = {**snap.get("snap_reqs", {}), **st.get("requests", {})}
+        snap["snap_features"] = persisted.get("features", {})
+        snap["snap_reqs"] = {**snap.get("snap_reqs", {}), **persisted.get("requests", {})}
     if ev.get("ev") == "reconcile":
-        snap["snap_reconcile"] = st.get("reconcile")
+        snap["snap_reconcile"] = persisted.get("reconcile")
     if ev.get("ev") == "docs-set":
-        snap["snap_docs"] = st.get("docs", {})
+        snap["snap_docs"] = persisted.get("docs", {})
     if ev.get("ev") == "standing":
-        snap["snap_standing"] = st.get("standing", [])
+        snap["snap_standing"] = persisted.get("standing", [])
     if ev.get("ev") == "report-card":
-        snap["snap_last_report_at"] = st.get("last_report_at")
+        snap["snap_last_report_at"] = persisted.get("last_report_at")
     if ev.get("ev") == "quota-run":
-        snap["snap_quota"] = st.get("quota")
-        snap["snap_last_quota_at"] = st.get("last_quota_at")
-    if ev.get("ev") == "merge" and "grant_uses" in st:
-        snap["snap_grant_uses"] = st["grant_uses"]
+        snap["snap_quota"] = persisted.get("quota")
+        snap["snap_last_quota_at"] = persisted.get("last_quota_at")
+    if ev.get("ev") == "merge" and "grant_uses" in persisted:
+        snap["snap_grant_uses"] = persisted["grant_uses"]
     if ev.get("ev", "").startswith("promise-"):
-        snap["snap_promises"] = st.get("promises", [])
+        snap["snap_promises"] = persisted.get("promises", [])
     if ev.get("ev", "").startswith("archive-"):
-        snap["snap_archive"] = st.get("archive", {})
+        snap["snap_archive"] = persisted.get("archive", {})
         if ev.get("ev") == "archive-verify":
-            snap.update(snap_tasks=st.get("tasks", {}), snap_questions=st.get("questions", []),
-                        snap_issues=st.get("issues", []), snap_notices=st.get("notices", []),
-                        snap_archive_packs=st.get("archive_packs", {}),
-                        snap_archive_handoffs=st.get("archive_handoffs", []))
+            snap.update(snap_tasks=persisted.get("tasks", {}), snap_questions=persisted.get("questions", []),
+                        snap_issues=persisted.get("issues", []), snap_notices=persisted.get("notices", []),
+                        snap_archive_packs=persisted.get("archive_packs", {}),
+                        snap_archive_handoffs=persisted.get("archive_handoffs", []))
     if ev.get("ev", "").startswith("screen-"):
-        snap["snap_screens"] = st.get("screens", {})
+        snap["snap_screens"] = persisted.get("screens", {})
     if ev.get("ev", "").startswith("succ-"):
-        snap["snap_handovers"] = st.get("handovers", {})
-        snap["snap_write_lock"] = st.get("write_lock")
-        hid=ev.get("handover"); h=st.get("handovers",{}).get(hid,{})
+        snap["snap_handovers"] = persisted.get("handovers", {})
+        snap["snap_write_lock"] = persisted.get("write_lock")
+        hid=ev.get("handover"); h=persisted.get("handovers",{}).get(hid,{})
         if h.get("kind")=="lead":
-            snap["snap_meta"]={k:st.get(k) for k in ("project","goal","created","repo","envs","lead","prefs")}
+            snap["snap_meta"]={k:persisted.get(k) for k in ("project","goal","created","repo","envs","lead","prefs")}
     if ev.get("ev", "").startswith("succ-relead"):
-        snap["snap_meta"] = {k: st.get(k) for k in ("project", "goal", "created", "repo", "envs", "lead", "prefs")}
+        snap["snap_meta"] = {k: persisted.get(k) for k in ("project", "goal", "created", "repo", "envs", "lead", "prefs")}
     if ev.get("ev", "").startswith("succ-relead") or ev.get("ev") == "screen-record":
-        snap["snap_lead_trials"] = st.get("lead_trials", [])
-        snap["snap_lead_first_message"] = st.get("lead_first_message")
-    if ev.get("ev") == "lead" and st.get("handovers"):
-        snap["snap_handovers"] = st.get("handovers", {})
-        snap["snap_write_lock"] = st.get("write_lock")
+        snap["snap_lead_trials"] = persisted.get("lead_trials", [])
+        snap["snap_lead_first_message"] = persisted.get("lead_first_message")
+    if ev.get("ev") == "lead" and persisted.get("handovers"):
+        snap["snap_handovers"] = persisted.get("handovers", {})
+        snap["snap_write_lock"] = persisted.get("write_lock")
     if ev.get("ev", "").startswith("signals"):
-        snap["snap_signals"] = st.get("signals", {})
-        snap["snap_observations"] = st.get("observations", {})
+        snap["snap_signals"] = persisted.get("signals", {})
+        snap["snap_observations"] = persisted.get("observations", {})
     if ev.get("ev", "").startswith("spawn-refused"):
-        snap["snap_spawn_refusals"] = st.get("spawn_refusals", [])
+        snap["snap_spawn_refusals"] = persisted.get("spawn_refusals", [])
     if ev.get("ev", "").startswith("notice-"):
-        snap["snap_notices"] = st.get("notices", [])
+        snap["snap_notices"] = persisted.get("notices", [])
     if ev.get("ev") in ("merge", "qa-done"):
-        snap["snap_qa_pending"] = st.get("qa_pending", [])
+        snap["snap_qa_pending"] = persisted.get("qa_pending", [])
     if ev.get("ev", "").startswith("model-deny-"):
-        snap["snap_model_deny"] = st.get("model_deny", [])
+        snap["snap_model_deny"] = persisted.get("model_deny", [])
     if ev.get("ev", "").startswith("model-status-"):
-        snap["snap_models"] = st.get("models", {})
-    if "roster_version" in st:
-        snap["snap_roster_version"] = st["roster_version"]
+        snap["snap_models"] = persisted.get("models", {})
+    if "roster_version" in persisted:
+        snap["snap_roster_version"] = persisted["roster_version"]
     return snap
 
 
@@ -1725,7 +1952,7 @@ def default_short(project):
 
 def tag(st):
     """Project label used in titles, message headers and tags. Old projects without short_name keep the full name."""
-    return (st.get("prefs", {}).get("short_name") or "").strip() or st["project"]
+    return (pref(st, 'short_name') or "").strip() or st["project"]
 
 
 def title_for(st, name):
@@ -1746,7 +1973,7 @@ STANDING_GRANTS = ("archive", "schedule", "merge")  # what the user may allow on
 
 
 def thread_mode(st):
-    return (st.get("prefs", {}).get("thread_permission_mode") or "").strip() or THREAD_MODE_DEFAULT
+    return (pref(st, 'thread_permission_mode') or "").strip() or THREAD_MODE_DEFAULT
 
 
 def permission_warning(st):
@@ -1824,7 +2051,7 @@ def render_roster(st, for_thread=None, board=False, all_threads=False):
         me = "   <- YOU" if name == for_thread else ""
         owns = ", ".join(t.get("owns", [])) or "-"
         line=f"- {name} | {t['kind']} | session_id={t.get('session_id') or '(pending)'} | owns: {owns}{me}"
-        if thread_corrections(st,name) >= st.get("prefs",{}).get("root_fresh_at",3):
+        if thread_corrections(st,name) >= pref(st, 'root_fresh_at'):
             line += " | " + lab(st,"root_fresh_hint",thread=name)
         lines.append(line)
     return "\n".join(lines)
@@ -1946,7 +2173,7 @@ def render_groups(st, board=False, all_threads=False):
     for g in order:
         if g == "stuck":
             if stuck:
-                out.append(f"**{lab(st, 'stuck', n=st['prefs'].get('stuck_minutes', STUCK_DEFAULT))}**")
+                out.append(f"**{lab(st, 'stuck', n=pref(st, 'stuck_minutes'))}**")
                 for n, m in stuck.items():
                     t = st["threads"][n]
                     cause = lab(st, "stuck_" + t["stuck_on"]) if t.get("stuck_on") else lab(st, 'no_report', m=m)
@@ -2067,7 +2294,7 @@ def render_board(st, all_threads=False):
         f"Goal: {st.get('goal') or '-'}",
         f"Plan: {approved}    Updated: {st.get('updated', '-')}",
         f"Folder: {r.get('path') or '-'}    Repo: {r.get('url') or '-'}    Base branch: {r.get('base') or 'main'}",
-        f"Prefs: {json.dumps(st.get('prefs', {}), ensure_ascii=False)}",
+        f"Prefs: {json.dumps(stored(st).get('prefs', {}), ensure_ascii=False)}",
         "",
         f"## {lab(st, 'overview')}",
         "",
@@ -2179,12 +2406,12 @@ def _md(x):
 def _ledger_stale(st):
     updated = _when(st.get("updated"))
     current = _when(now())
-    return bool(updated and current and (current - updated).total_seconds() > int(st.get("prefs", {}).get("stale_minutes", 120)) * 60)
+    return bool(updated and current and (current - updated).total_seconds() > int(pref(st, 'stale_minutes')) * 60)
 
 
 def _doc_stale(st, doc):
     refreshed, updated = _when(doc.get("refreshed_at")), _when(st.get("updated"))
-    return bool(updated and (not refreshed or (updated - refreshed).total_seconds() > int(st.get("prefs", {}).get("stale_minutes", 120)) * 60))
+    return bool(updated and (not refreshed or (updated - refreshed).total_seconds() > int(pref(st, 'stale_minutes')) * 60))
 
 
 def _age_label(st, stamp):
@@ -2197,8 +2424,8 @@ def _age_label(st, stamp):
 
 
 def _current_feature_phase(st):
-    pref = st.get("prefs", {}).get("current_phase")
-    if pref: return pref
+    phase = pref(st, 'current_phase')
+    if phase: return phase
     phases = sorted({f.get("phase") for f in st.get("features", {}).values()
                      if f.get("status") in ("planned", "building") and f.get("phase")})
     return phases[0] if phases else ""
@@ -2295,64 +2522,8 @@ def cmd_init(a):
     short = a.short or default_short(a.project)
     if not re.fullmatch(SHORT_RE, short):
         sys.exit("short name: letters/digits/hyphen, max 6 chars (e.g. TFCC, shop)")
-    st = {
-        "project": a.project,
-        "goal": a.goal or "",
-        "created": now(),
-        "lead": {"session_id": None},
-        "envs": {"rc": None, "cloud": None},
-        "repo": {
-            "url": a.repo_url,
-            "path": str(Path(a.path).resolve()),
-            "base": a.base or detect_base(Path(a.path)),
-        },
-        "threads": {},
-        "screens": {}, "signals": {}, "observations": {}, "handovers": {},
-        "tasks": {},
-        "plan_approved": False,
-        "questions": [],
-        "decisions": [],
-        "promises": [],
-        "notices": [],
-        "archive": {}, "spawn_refusals": [],
-        "features": {},
-        "requests": {},
-        "prefs": {
-            "max_parallel": 0,  # 0 = no limit; set only when the user asks for one
-            "task_existing_limit": 5,
-            "propose_before_start": True,
-            "update_detail": "brief",
-            "checkin_minutes": 10,
-            "short_name": short,  # in titles [X], headers [tw:X], tags teamwork:X
-            "require_review": True,  # task done needs an independent review pass (task set --review)
-            "review_max_rounds": REVIEW_MAX_DEFAULT,  # at this many review rounds: no blocking + checks pass -> capped
-            "stuck_minutes": STUCK_DEFAULT,  # working thread silent this long -> "possibly stuck"; 0 = off
-            "notice_merge": "thread", "urgent_ack_minutes": 5,
-            "language": "",  # conversation language code (zh, en, ...); empty = follow the user's latest message
-            "thread_permission_mode": THREAD_MODE_DEFAULT,  # create_session permission_mode for every thread
-            "standing_grants": [],  # archive, schedule, merge: the user allowed these once (IL-30), each by --user-said
-            "check_cmd": "",  # the project's checks, run by `merge` on the rehearsed merge
-            "check_shards": "",  # optional glob: one parallel check group per matched file
-            "check_jobs": 4,
-            "check_shard_timeout_minutes": 20,
-            "spawn_policy": "",
-            "perm_policy": "",
-            "gpt_policy": "",
-            "skill_edge": "",  # H8: a clone this project tests before release; empty = the installed release
-            "check_timeout_minutes": 60,  # merge stops checks that run longer (the whole process group); 0 = no limit
-            "default_after_minutes": 30,  # IL-1: an unanswered non-gated question takes its stated default after this
-            "ledger_line_every": "report",
-            "stale_minutes": 120,
-            "screen_mode": "shadow", "screen_autograde": True, "signals_red_at": 3, "relay_max_per_day": 2, "succ_watchdog_minutes": 45,
-            "signals_window_minutes": 30, "observe_minutes": 20, "grader_timeout_s": 300,
-            "lead_compact_alert": 2, "lead_compact_swap": 4, "drift_window_hours": 24,
-            "root_mode": "on", "root_symptoms_at": 2, "root_rework_at": 2, "root_full_at": 4, "root_debt_at": 2, "root_fresh_at": 3,
-            "archive_idle_days": 3,
-            "reconcile_every": "wrapup", "selfcheck_every": "wrapup", "quota_every_minutes": 60,
-            "slow_factor": 2, "sweep_every_minutes": 10, "thread_default_after_minutes": 5,
-            "quota_trigger_id": "", "quota_trigger_on": "", "sweep_trigger_id": "", "sweep_trigger_on": "",
-        },
-    }
+    st = _new_state(a.project, a.goal or "", now(), a.repo_url, str(Path(a.path).resolve()),
+                    a.base or detect_base(Path(a.path)), short)
     if not (d / "INSTRUCTIONS.md").exists():
         (d / "INSTRUCTIONS.md").write_text(
             f"# {a.project}: project instructions\n\n"
@@ -2729,18 +2900,11 @@ def cmd_thread(a):
         if name in ("lead", "all") or name in st["threads"]:
             sys.exit(f"thread name {name} is taken")
         a.kind = a.kind or "rc"
-        st["threads"][name] = {
-            "kind": a.kind,
-            "focus": a.focus or "",
-            "owns": csv(a.owns),
-            "session_id": a.session,
-            "status": "planned" if not a.session else (a.status or "idle"),
-            "branch": a.branch or f"tw/{st['project']}/{name}",
-            "created": now(),
-            "last_seen": None,
-            "summary": a.summary or "",
-            "sessions": [{"session_id": a.session, "from": now()}] if a.session else [],
-        }
+        st["threads"][name] = new_thread(
+            st, name, a.kind, focus=a.focus or "", owns=csv(a.owns), session_id=a.session,
+            status="planned" if not a.session else (a.status or "idle"),
+            branch=a.branch or f"tw/{st['project']}/{name}", created=now(), summary=a.summary or "",
+            sessions=[{"session_id": a.session, "from": now()}] if a.session else [])
         if a.critical: st["threads"][name]["critical"] = True
         if a.waiting_for is not None: st["threads"][name]["waiting_for"] = a.waiting_for
         if a.stuck_on and a.stuck_on != "none": st["threads"][name]["stuck_on"] = a.stuck_on
@@ -2918,6 +3082,14 @@ def area_of_task(st, task):
             return name
     return (task.get("topics") or [None])[0]
 
+
+def new_area(state="ok", baseline=None, rc=0, implicit=None):
+    row = {"paths": [], "aka": [], "state": state, "baseline": now() if baseline is None else baseline,
+           "rc": rc, "debt": [], "asked": None, "question": None, "dismissed": [], "history": []}
+    if implicit is not None:
+        row["implicit"] = implicit
+    return row
+
 def _area_records(st, task_areas=None):
     areas = st.get("areas", {})
     out = dict(areas)
@@ -2940,8 +3112,7 @@ def _area_reqs(st, area, rec):
                 any(x and x.lower() == (q.get("where") or "").lower() for x in aliases))]
 
 def radar(st):
-    prefs = st.get("prefs", {})
-    if prefs.get("root_mode", "on") == "off": return {}
+    if pref(st, "root_mode") == "off": return {}
     result = {}
     task_areas={tid:area_of_task(st,task) for tid,task in st.get("tasks",{}).items()}
     tasks_by_area={}
@@ -2949,7 +3120,7 @@ def radar(st):
         if task_areas[tid]: tasks_by_area.setdefault(task_areas[tid],[]).append(task)
     records = _area_records(st,task_areas)
     if records:
-        areas = st.setdefault("areas", {})
+        areas = st["areas"]
         if not st.get("root_since"):
             st["root_since"] = now()
         for area, rec in records.items():
@@ -2967,25 +3138,24 @@ def radar(st):
         tasks = tasks_by_area.get(area, [])
         rework = sum(sum((x or "") >= baseline for x in t.get("rework_at", [])) for t in tasks)
         patchy = any(st.get("requests", {}).get(r, {}).get("patchy") for r in symptoms)
-        pending = rec.get("state", "ok") in ("ok", "pending") and (len(symptoms) >= prefs.get("root_symptoms_at", 2)
-                   or rework >= prefs.get("root_rework_at", 2) or patchy)
+        pending = rec.get("state", "ok") in ("ok", "pending") and (len(symptoms) >= pref(st, "root_symptoms_at")
+                   or rework >= pref(st, "root_rework_at") or patchy)
         debt_since = rec.get("answered_at") or rec.get("asked") or ""
         patched_debt = sum(x.get("kind") in ("hotfix", "patch") and x.get("at", "") > debt_since for x in rec.get("debt", []))
-        reraised = rec.get("reraised") or (rec.get("state") == "patched" and rec.get("asked") and patched_debt >= prefs.get("root_debt_at", 2))
+        reraised = rec.get("reraised") or (rec.get("state") == "patched" and rec.get("asked") and patched_debt >= pref(st, "root_debt_at"))
         pending = pending or reraised
         result[area] = {"symptoms": symptoms, "rework": rework, "patchy": patchy,
                         "state": "pending" if pending else ("ok" if rec.get("state") == "pending" else rec.get("state", "ok")),
-                        "level": "full" if rec.get("level") == "full" or len(symptoms) >= prefs.get("root_full_at", 4) else "light"}
+                        "level": "full" if rec.get("level") == "full" or len(symptoms) >= pref(st, "root_full_at") else "light"}
     return result
 
 def _radar_update(st):
-    if st.get("prefs", {}).get("root_mode", "on") == "off": return
+    if pref(st, 'root_mode') == "off": return
     entered=[]
     for area, data in radar(st).items():
         old = st.get("areas", {}).get(area, {}).get("state", "ok")
         if data["state"] == "pending" and old in ("ok", "patched"):
-            st.setdefault("areas", {}).setdefault(area, {"paths": [], "aka": [], "state": "ok", "baseline": now(),
-                "rc": 0, "debt": [], "asked": None, "question": None, "dismissed": [], "history": [], "implicit": area not in st.get("areas", {})})["state"] = "pending"
+            st["areas"].setdefault(area, new_area(implicit=area not in st.get("areas", {})))["state"] = "pending"
             entered.append(area)
             if old == "patched":
                 st["areas"][area]["reraised"] = True
@@ -2995,7 +3165,7 @@ def _radar_update(st):
     if entered: st.setdefault("_root_pending", []).extend(entered)
 
 def cmd_area(a):
-    d = need(find_dir()); st = load(d); areas = st.setdefault("areas", {})
+    d = need(find_dir()); st = load(d); areas = st["areas"]
     if a.action == "list":
         print(json.dumps(areas, ensure_ascii=False, indent=2)); return
     name = norm_topics(a.name)
@@ -3012,8 +3182,7 @@ def cmd_area(a):
         areas[dst].setdefault("history", []).append({"kind":"merge", "from":src, "at":now(), "debt":areas[src].get("debt",[])})
         areas[dst].setdefault("debt", []).extend(areas[src].get("debt", []))
         areas.pop(src); save(d, st, {"ev":"area-merge", "from":src, "to":dst}); return
-    rec = areas.setdefault(name, {"paths": [], "aka": [], "state":"ok", "baseline": now(), "rc":0,
-                                  "debt":[], "asked":None, "question":None, "dismissed":[], "history":[]})
+    rec = areas.setdefault(name, new_area())
     rec.pop("implicit",None)
     st.setdefault("root_since", now())
     if a.paths is not None: rec["paths"] = csv(a.paths)
@@ -3110,7 +3279,7 @@ def _md_table_cols(line):
     return [x.replace(r"\|", "|").strip() for x in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
 
 def cmd_root(a):
-    d = need(find_dir()); st = load(d); areas = st.setdefault("areas", {})
+    d = need(find_dir()); st = load(d); areas = st["areas"]
     view = radar(st)
     if a.action == "scan":
         print("\n".join(lab(st,"root_scan_line",area=x,n=len(v['symptoms'])) for x,v in view.items() if v["state"] == "pending") or "-" ); return
@@ -3136,7 +3305,7 @@ def cmd_root(a):
         for n,r in areas.items():
             path=_root_path(d,n,r.get("rc",0)); body=path.read_text(encoding="utf-8") if path.exists() else ""
             debt=sum(x.get("kind") in ("hotfix","patch") and x.get("at","") > (r.get("answered_at") or r.get("asked") or "") for x in r.get("debt",[]))
-            if r.get("state") not in ("reviewing","patched","pending") or not r.get("checked_at") or "<填>" in body or "<fill>" in body or (r.get("asked") and debt < st.get("prefs",{}).get("root_debt_at",2)):
+            if r.get("state") not in ("reviewing","patched","pending") or not r.get("checked_at") or "<填>" in body or "<fill>" in body or (r.get("asked") and debt < pref(st, 'root_debt_at')):
                 print(lab(st,"root_ask_skip",area=n),file=sys.stderr); continue
             eligible.append(n)
         if not eligible: sys.exit(lab(st,"root_ask_none"))
@@ -3146,13 +3315,12 @@ def cmd_root(a):
                              cost=a.cost or "<fill>",rec=a.recommend or "A",why=a.why or "<fill>"))
             areas[n].update(asked=now(),question=len(st.get("questions",[]))+1,state="asked")
         body="\n".join(texts)
-        st.setdefault("questions",[]).append({"from":"lead","text":body,"t":now(),"answered":False,"kind":"root","areas":eligible})
+        st["questions"].append({"from":"lead","text":body,"t":now(),"answered":False,"kind":"root","areas":eligible})
         save(d,st,{"ev":"root-ask-all","areas":eligible}); print(body); return
     area = _area_key(st, a.area) if a.action not in ("move",) else a.area
     if a.action not in ("move","fresh") and area not in areas:
         if area not in view: sys.exit(lab(st,"root_unknown_area"))
-        areas[area] = {"paths": [], "aka": [], "state": "ok", "baseline": st.get("created") or "", "rc": 0,
-                       "debt": [], "asked": None, "question": None, "dismissed": [], "history": [], "implicit": True}
+        areas[area] = new_area(baseline=st.get("created") or "", implicit=True)
     rec = areas.get(area,{})
     if a.action == "start":
         if rec.get("state") == "reviewing" and rec.get("rc",0) and _root_path(d,area,rec["rc"]).exists():
@@ -3197,13 +3365,13 @@ def cmd_root(a):
         if not all((a.recommend,a.why,a.cost,a.root)): sys.exit(lab(st,"root_ask_args"))
         if rec.get("state") not in ("reviewing", "patched", "pending"): sys.exit(lab(st,"root_ask_state"))
         if not rec.get("checked_at") or _root_found_placeholder(body): sys.exit(lab(st,"root_check_before_ask"))
-        if rec.get("asked") and sum(x.get("kind") in ("hotfix", "patch") and x.get("at","") > (rec.get("answered_at") or rec["asked"]) for x in rec.get("debt",[])) < st.get("prefs",{}).get("root_debt_at",2): sys.exit(lab(st,"root_already_asked"))
+        if rec.get("asked") and sum(x.get("kind") in ("hotfix", "patch") and x.get("at","") > (rec.get("answered_at") or rec["asked"]) for x in rec.get("debt",[])) < pref(st, 'root_debt_at'): sys.exit(lab(st,"root_already_asked"))
         n=len(view.get(area,{}).get("symptoms",[])); text=lab(st,"root_question",area=area,n=n,root=a.root,cost=a.cost,rec=a.recommend,why=a.why)
         if rec.get("question") and isinstance(rec["question"],int) and 1 <= rec["question"] <= len(st.get("questions",[])):
             previous=st["questions"][rec["question"]-1]
             if not previous.get("answered"):
                 previous.update(answered=True,answer="superseded",superseded_by=len(st["questions"])+1,by_default=True)
-        st.setdefault("questions",[]).append({"from":"lead","text":text,"t":now(),"answered":False,"kind":"root","area":area})
+        st["questions"].append({"from":"lead","text":text,"t":now(),"answered":False,"kind":"root","area":area})
         rec.update(state="asked",asked=now(),question=len(st["questions"]),reraised=False); save(d,st,{"ev":"root-ask","area":area}); print(text); return
     if a.action == "answer":
         if a.choice not in ("A", "B", "C"): sys.exit(lab(st,"root_answer_choice"))
@@ -3388,6 +3556,7 @@ def task_verify(d, st, a):
     invalidate(k, ["verify"], st)
     check = {"result": result, "how": a.how.strip(), "evidence": a.evidence.strip(), "sha": a.sha,
              "by": getattr(a, "by", None) or "lead", "at": now()}
+    if getattr(a, "test", None): check["test"] = a.test.strip()
     if a.why: check["why"] = a.why.strip()
     k["primary_check"] = check
     if _primary_suspect(d, a.how, a.evidence):
@@ -3455,7 +3624,7 @@ def cmd_task(a):
             "status": "approved" if st["plan_approved"] else "planned",
             "notes": "",
             "created": now(),
-            **({"urgent": True, "urgent_minutes": a.urgent_minutes if a.urgent_minutes is not None else st.get("prefs", {}).get("urgent_ack_minutes", 5)}
+            **({"urgent": True, "urgent_minutes": a.urgent_minutes if a.urgent_minutes is not None else pref(st, 'urgent_ack_minutes')}
                if getattr(a, "urgent", False) or getattr(a, "urgent_minutes", None) is not None else {}),
         }
         area = area_of_task(st, st["tasks"][a.id])
@@ -3496,7 +3665,7 @@ def cmd_task(a):
         if getattr(a, "urgent", False) or getattr(a, "urgent_minutes", None) is not None:
             if a.urgent_minutes is not None and a.urgent_minutes < 1: sys.exit("--urgent-minutes: positive whole minutes")
             k["urgent"] = True
-            k["urgent_minutes"] = a.urgent_minutes if a.urgent_minutes is not None else st.get("prefs", {}).get("urgent_ack_minutes", 5)
+            k["urgent_minutes"] = a.urgent_minutes if a.urgent_minutes is not None else pref(st, 'urgent_ack_minutes')
         cur = k["status"]
         said = (a.user_said or "").strip()
         stale = {}  # follow-up tasks opened from a verdict that is now void (T23-c)
@@ -3521,7 +3690,7 @@ def cmd_task(a):
             if a.status not in allowed:
                 sys.exit(f"{a.id} is {cur}: it can move to {', '.join(sorted(allowed)) or 'nothing (it has ended)'}"
                          + (" (done only from review)" if a.status == "done" else ""))
-            if a.status == "dispatched" and st.get("prefs", {}).get("root_mode", "on") == "on":
+            if a.status == "dispatched" and pref(st, 'root_mode') == "on":
                 proposed = dict(k)
                 if a.topics is not None: proposed["topics"] = norm_topics(a.topics)
                 if a.touches is not None: proposed["touches"] = check_touches(a.touches)
@@ -3532,11 +3701,11 @@ def cmd_task(a):
                     if not getattr(a,"hotfix",None) and not urgent: sys.exit(lab(st,"root_gate",task=a.id,area=area,state=lab(st,"root_"+state),next=root_next(state,area)))
                     why=said if urgent else a.hotfix
                     if not urgent: print("hotfix dispatched; debt recorded",file=sys.stderr)
-                    st.setdefault("areas",{}).setdefault(area,{"paths":[],"aka":[],"state":state,"baseline":now(),"rc":0,"debt":[],"dismissed":[],"history":[]}).setdefault("debt",[]).append({"task":a.id,"why":why,"at":now(),"user_said":said or None,"kind":"hotfix"})
+                    st["areas"].setdefault(area,new_area(state=state)).setdefault("debt",[]).append({"task":a.id,"why":why,"at":now(),"user_said":said or None,"kind":"hotfix"})
                     k["fix_kind"]="patch"
                 elif state == "patched":
                     k["fix_kind"]="patch"
-                    rec=st.setdefault("areas", {}).setdefault(area, {"paths":[],"aka":[],"state":"patched","baseline":"","rc":0,"debt":[]})
+                    rec=st["areas"].setdefault(area, new_area(state="patched", baseline=""))
                     rec.setdefault("debt", []).append({"task":a.id,"at":_later_than(now(),rec.get("answered_at") or rec.get("asked")),"kind":"patch"})
                 elif state == "rooting" and k.get("fix_kind") != "root": k["fix_kind"]="patch"
         if cur in ("done", "dropped") and any(x is not None for x in (a.owner, a.accept, a.deps)):
@@ -4379,7 +4548,6 @@ def norm_topics(s):
     return list(dict.fromkeys(re.sub(r"[\s_]+", "-", x.strip().lower()) for x in csv(s) if x.strip()))
 
 
-REVIEW_MAX_DEFAULT = 3
 PASSING = ("pass", "capped")  # capped: the round limit was reached with no blocking finding and checks passing
 
 # Central invalidation matrix: the event that changed task validity and the records it voids.
@@ -4434,8 +4602,8 @@ def check_task_invariants(st, tid, before, k, a, said, changes):
 
 
 def review_max(st):
-    v = st.get("prefs", {}).get("review_max_rounds", REVIEW_MAX_DEFAULT)
-    return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 99 else REVIEW_MAX_DEFAULT
+    v = pref(st, 'review_max_rounds')
+    return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 99 else PREFS["review_max_rounds"]["default"]
 
 
 def accept_gate(st, tid, before=None, k=None, changes=None, a=None, said=""):
@@ -4499,10 +4667,9 @@ def bump_roster(st, name=None):
 
 
 def _minutes_since(ts):
-    from datetime import datetime
     try:
-        t = datetime.fromisoformat(ts)
-        cur = datetime.fromisoformat(now())
+        t = dt.datetime.fromisoformat(ts)
+        cur = _now_dt()
         if t.tzinfo is None:  # an old or hand-edited stamp: read it in the clock's zone
             t = t.replace(tzinfo=cur.tzinfo)
         return max(0, int((cur - t).total_seconds() // 60))
@@ -4522,7 +4689,7 @@ def merge_waiting(st):
 
 
 def merge_overdue(st):
-    limit = st.get("prefs", {}).get("stuck_minutes", STUCK_DEFAULT)
+    limit = pref(st, 'stuck_minutes')
     w = merge_waiting(st)
     return bool(limit and w and (w[0]["minutes"] or 0) > limit)
 
@@ -4535,7 +4702,7 @@ def task_model(st, t):
 
 def urgent_unacked(st):
     """E8: urgent tasks still not acked (status dispatched) past their minutes: recall and reassign."""
-    limit = st.get("prefs", {}).get("urgent_ack_minutes", 5)
+    limit = pref(st, 'urgent_ack_minutes')
     return [{"task": tid, "minutes": _minutes_since(k.get("dispatched_at")), "advice": lab(st, "urgent_advice")}
             for tid, k in st.get("tasks", {}).items()
             if k.get("urgent") and k.get("status") == "dispatched" and k.get("dispatched_at")
@@ -4600,10 +4767,10 @@ def cmd_ready(a):
     pending_compacts=[(seat,rec) for seat,rec in (st.get("compactions") or {}).items() if not (st.get("signals",{}).get(seat) or {}).get("compact_check",{}).get("answered")]
     local_compacts=[(seat,rec) for seat,rec in pending_compacts if rec.get("session") and _session_rows(rec.get("session"))[1]]
     waiting_screens = len(local_screens)+len(local_compacts)
-    if st.get("prefs", {}).get("screen_autograde", True):
+    if pref(st, 'screen_autograde'):
         for sid,rec in cloud_screens:
             print(lab(st,"signals_cloud_grade",screen=sid,seat=rec.get("seat")),file=sys.stderr)
-    if waiting_screens and st.get("prefs", {}).get("screen_autograde", True):
+    if waiting_screens and pref(st, 'screen_autograde'):
         private_tmp=d/"private"/"lead"/"tmp"; private_tmp.mkdir(parents=True,exist_ok=True)
         logfile=(private_tmp/"screen-sweep.log").open("ab")
         try:
@@ -4672,8 +4839,8 @@ def cmd_ready(a):
                 "roster_not_sent": roster_stale(st),
                 "no_touches": [t for t in ready if not st["tasks"][t].get("touches")],
                 "busy_threads": busy,
-                "max_parallel": st["prefs"].get("max_parallel", 0) or "unlimited",
-                "slots": (max(0, st["prefs"]["max_parallel"] - busy) if st["prefs"].get("max_parallel") else "unlimited"),
+                "max_parallel": pref(st, 'max_parallel') or "unlimited",
+                "slots": (max(0, st["prefs"]["max_parallel"] - busy) if pref(st, 'max_parallel') else "unlimited"),
                 "stuck": stuck_threads(st),
                 "merge_waiting": merge_waiting(st),
                 "waiting_to_merge": [{"task": tid, "branch": k.get("branch") or (st.get("threads", {}).get(k.get("owner") or "") or {}).get("branch"), "review": (k.get("review") or {}).get("result", "none"),
@@ -4737,20 +4904,18 @@ def route_hint(st, task):
 
 def quota_pace_tier(st):
     quota = st.get("quota") or {}
-    prefs = st.get("prefs") if isinstance(st.get("prefs"), dict) else {}
     tier = str(quota.get("tier") or "normal")
     if tier in QUOTA_RANK and QUOTA_RANK.index(tier) >= QUOTA_RANK.index("burn-fable"):
-        return tier, int(quota.get("pct") or st.get("quota_pct") or prefs.get("quota_burn_at", 70))
+        return tier, int(quota.get("pct") or st.get("quota_pct") or pref(st, "quota_burn_at"))
     pct = quota.get("pct", st.get("quota_pct"))
-    burn = int(prefs.get("quota_burn_at", 70) or 70)
+    burn = int(pref(st, "quota_burn_at") or 70)
     if isinstance(pct, (int, float)) and pct >= burn:
-        return ("lead-only" if pct >= int(prefs.get("quota_lead_only_at", 90) or 90) else "burn-fable"), int(pct)
+        return ("lead-only" if pct >= int(pref(st, "quota_lead_only_at") or 90) else "burn-fable"), int(pct)
     return "normal", int(pct or 0)
 
 
 def question_default_minutes(st, q):
-    prefs = st.get("prefs", {})
-    default = prefs.get("default_after_minutes", 30) if q.get("from") in ("lead", "user") else prefs.get("thread_default_after_minutes", 5)
+    default = pref(st, "default_after_minutes") if q.get("from") in ("lead", "user") else pref(st, "thread_default_after_minutes")
     return int(q.get("default_after_minutes", default) or default)
 
 
@@ -4760,13 +4925,12 @@ def question_default_due(st, q):
 
 
 def effective_interval(st, key):
-    base = int(st.get("prefs", {}).get(key, 10 if key == "checkin_minutes" else 60) or 1)
+    base = int(pref(st, key) or 1)
     tier, pct = quota_pace_tier(st)
     if tier == "normal":
         return base
-    prefs = st.get("prefs") if isinstance(st.get("prefs"), dict) else {}
-    factor = int(prefs.get("slow_factor", 2) or 2)
-    if tier == "lead-only" or pct >= int(prefs.get("quota_lead_only_at", 90) or 90):
+    factor = int(pref(st, "slow_factor") or 2)
+    if tier == "lead-only" or pct >= int(pref(st, "quota_lead_only_at") or 90):
         factor = 3
     return base * factor
 
@@ -4802,7 +4966,7 @@ def apply_thread_defaults(st):
         if not question_default_due(st, q):
             continue
         q["defaulted"] = {"what": q["default_action"], "at": now(), "by": "thread"}
-        st.setdefault("decisions", []).append({"kind": "default", "question": st["questions"].index(q) + 1,
+        st["decisions"].append({"kind": "default", "question": st["questions"].index(q) + 1,
                                                 "what": q["default_action"], "at": now(), "by": "thread"})
         changed = True
     return changed
@@ -5062,11 +5226,11 @@ def cmd_ask(a):
             sys.exit(lab(st, "default_undoable"))
         if not what: sys.exit("default needs a description")
         q["defaulted"] = {"what": what, "at": now()}
-        st.setdefault("decisions", []).append({"kind": "default", "question": n, "what": what, "at": now()})
+        st["decisions"].append({"kind": "default", "question": n, "what": what, "at": now()})
         if q.get("kind") == "root":
             for area in q.get("areas", [q.get("area")]):
                 if not area: continue
-                ar=st.setdefault("areas",{}).setdefault(area,{"paths":[],"aka":[],"state":"asked","baseline":"","rc":0,"debt":[],"dismissed":[],"history":[]})
+                ar=st["areas"].setdefault(area,new_area(state="asked",baseline=""))
                 if area in q.get("area_answers", {}) or q.get("withdrawn") or ar.get("state") == "ok": continue
                 ar.update(state="patched",root_pending=True,defaulted_at=now())
                 ar.setdefault("debt",[]).append({"kind":"default-C","by_default":True,"at":now()})
@@ -5157,7 +5321,7 @@ def cmd_memory(a):
         sys.exit('usage: memory "<text>" [--never-raise | --user-owned | --standing] (or --standing-list)')
     if which == "standing":  # F4: a long-term requirement of the user's; every TASK carries it (task-msg)
         st = load(d)
-        if a.text not in st.setdefault("standing", []):
+        if a.text not in st["standing"]:
             st["standing"].append(a.text)
             save(d, st, {"ev": "standing"})
         print(lab(st, "standing", text=a.text))
@@ -5535,7 +5699,7 @@ def cmd_reconcile(a):
 
 def cmd_wrapup(a):
     d = need(find_dir()); st = load(d); rows = _run_reconcile(st); save(d, st, {"ev": "reconcile"})
-    p = st.get("prefs", {}); limit = p.get("stuck_minutes", STUCK_DEFAULT); cur = dt.datetime.fromisoformat(now())
+    limit = pref(st, "stuck_minutes"); cur = _now_dt()
     original_cover = []
     root_since=st.get("root_since") or st.get("created") or ""
     unassigned=[f"{rid}: {req.get('text','')}" for rid,req in st.get("requests",{}).items()
@@ -5585,11 +5749,11 @@ def cmd_sprint(a):
     d=need(find_dir()); st=load(d)
     action = getattr(a, "action", None)
     if action in ("beta", "feedback"):
-        betas=st.setdefault("betas", [])
+        betas=st["betas"]
         if action == "feedback":
             if not (a.text or "").strip(): sys.exit(lab(st,"beta_feedback_required"))
             row={"text":a.text.strip(),"at":now(),"version":betas[-1].get("version") if betas else None}
-            st.setdefault("beta_feedback", []).append(row); save(d,st,{"ev":"beta-feedback","version":row["version"]}); print(lab(st,"beta_feedback_saved",version=row["version"] or "?")); return
+            st["beta_feedback"].append(row); save(d,st,{"ev":"beta-feedback","version":row["version"]}); print(lab(st,"beta_feedback_saved",version=row["version"] or "?")); return
         if not a.version: sys.exit(lab(st,"beta_version_required"))
         previous = betas[-1].get("at") if betas else None
         since = _when(previous) if previous else EPOCH
@@ -5605,7 +5769,7 @@ def cmd_sprint(a):
         if not link: link=lab(st,"beta_no_link")
         print(lab(st,"beta_card",version=a.version,link=link,tries="\n".join(f"{i}. {x}" for i,x in enumerate(tries,1)) or lab(st,"beta_no_new"))); return
     if action == "stop-all":
-        p=st.get("prefs",{}); none=lab(st,"stop_none"); checklist={"quota":p.get("quota_trigger_id") or none,"sweep":p.get("sweep_trigger_id") or none,"codex":lab(st,"stop_codex")}
+        none=lab(st,"stop_none"); checklist={"quota":pref(st,"quota_trigger_id") or none,"sweep":pref(st,"sweep_trigger_id") or none,"codex":lab(st,"stop_codex")}
         st["stopped_at"]=now(); save(d,st,{"ev":"stop-all","checklist":checklist}); print(lab(st,"stop_all",**checklist)); return
     if action == "start":
         raw = a.until
@@ -5663,7 +5827,7 @@ def cmd_sprint(a):
     else:
         since=_when(a.since) if a.since else EPOCH
     if since is None: sys.exit("--since: an ISO time (2026-11-20 or 2026-11-20T09:00)")
-    ph=st.get("prefs",{}).get("current_phase")
+    ph=pref(st, 'current_phase')
     if not ph:
         phases=sorted(f.get("phase") for f in st.get("features",{}).values() if f.get("status")!="landed" and f.get("phase"))
         ph=phases[0] if phases else ""
@@ -5942,7 +6106,7 @@ def cmd_qa(a):
     """IL-22: merges wait on the board until a regression round covered them."""
     d = need(find_dir())
     st = load(d)
-    pending = st.setdefault("qa_pending", [])
+    pending = st["qa_pending"]
     if a.action == "list":
         print("\n".join(_qa_label(x) for x in pending) or "(none)")
         return
@@ -6147,7 +6311,7 @@ def cmd_check_msg(a):
                 if unchecked:
                     add("unchecked", f"{kind}: {unchecked} entr{'y' if unchecked == 1 else 'ies'} too long to check: "
                                      "write them as `topic — note`", "warning")
-            lang = str(st.get("prefs", {}).get("language") or "").lower()  # unset: follows the user, nothing to check
+            lang = str(pref(st, 'language') or "").lower()  # unset: follows the user, nothing to check
             cjk, latin = len(re.findall(r"[\u3400-\u9fff]", prose)), len(re.findall(r"[A-Za-z]", prose))
             if lang.startswith("zh") and latin >= 20 and not cjk:
                 add("language", "the conversation language is Chinese: write the body in Chinese", "warning")
@@ -6374,7 +6538,7 @@ def _task_existing_material(d, st, task):
         for path, (matched, lines) in grep_files.items():
             if len(matched) >= 2:
                 add(path, "git grep 命中", " ".join(lines), source=3)
-    limit = st.get("prefs", {}).get("task_existing_limit", 5)
+    limit = pref(st, "task_existing_limit")
     try: limit = max(1, min(20, int(limit)))
     except (ValueError, TypeError): limit = 5
     rows.sort(key=lambda row: (row[0], 2 if row[4] else row[2], row[1], row[3]))
@@ -6430,7 +6594,7 @@ def cmd_task_msg(a):
              *([f"Brief: {k['brief']}"] if k.get("brief") and k.get("brief") != k.get("title") else []), f"Done when: {k.get('accept') or '-'}"]
     if root_line: lines.append(root_line)
     route = (dispatch_model or {}).get("model") or k.get("route") or k.get("model")
-    gpt_model = st.get("prefs", {}).get("gpt_model")
+    gpt_model = pref(st, 'gpt_model')
     if route == "gpt" and gpt_model:
         lines.append(lab(st, "gpt_model_line", model=gpt_model))
     if route: lines.append(f"Route/Model: {route}" + (f" — {dispatch_model['reason']}" if dispatch_model and dispatch_model.get("reason") else ""))
@@ -6447,7 +6611,7 @@ def cmd_task_msg(a):
     message = "\n".join(lines)
     if route == "gpt":
         terms, paths, _ = load_private(d, [str(d / "GPT_PRIVATE.md")])
-        for raw in st.get("prefs", {}).get("gpt_private", []) if isinstance(st.get("prefs", {}).get("gpt_private", []), list) else []:
+        for raw in pref(st, 'gpt_private') if isinstance(pref(st, 'gpt_private'), list) else []:
             item = str(raw)
             if item.lower().startswith("path:"):
                 paths.append(item.split(":", 1)[1].strip())
@@ -6457,7 +6621,7 @@ def cmd_task_msg(a):
         if hit:
             sys.exit(model_lab(st, "model_private_hit", hit=hit[0][1]))
     screen_info = None
-    if a.dispatch and session and st.get("prefs", {}).get("screen_mode", "shadow") != "off" and not any((x.get("session_id") or "").strip() == session and not x.get("retake") for x in st.get("screens", {}).values()):
+    if a.dispatch and session and pref(st, 'screen_mode') != "off" and not any((x.get("session_id") or "").strip() == session and not x.get("retake") for x in st.get("screens", {}).values()):
         screen_id, screen_message = _screen_ask(d, st, owner, session, None, a.id)
         screen_info = {"screen": screen_id, "message": screen_message}
         st = load(d)
@@ -6489,7 +6653,7 @@ def check_never_raise(d, text, override=None):
 
 
 def cmd_promise(a):
-    d = need(find_dir()); st = load(d); rows = st.setdefault("promises", [])
+    d = need(find_dir()); st = load(d); rows = st["promises"]
     if a.action == "list": print(json.dumps(rows, ensure_ascii=False, indent=2)); return
     if a.action == "add":
         if a.req and a.req not in st.get("requests", {}): sys.exit(f"unknown request {a.req}")
@@ -6535,7 +6699,7 @@ def cmd_threads(a):
             if x.get("stuck_on"): line += " — " + lab(st, "stuck_" + x["stuck_on"])
             elif x["thread"] in stuck: line += " — " + lab(st, "no_report", m=stuck[x["thread"]])
             if x.get("screening"): line += " — " + x["screening"]
-            if thread_corrections(st,x["thread"]) >= st.get("prefs",{}).get("root_fresh_at",3):
+            if thread_corrections(st,x["thread"]) >= pref(st, 'root_fresh_at'):
                 line += " — " + lab(st,"root_fresh_hint",thread=x["thread"])
             out.append(line)
     done = [x for x in rows["other"] if x["status"] in ("idle", "resolved")]
@@ -6808,7 +6972,7 @@ def cmd_nav_all(a):
 
 
 def cmd_notice(a):
-    d = need(find_dir()); st = load(d); rows = st.setdefault("notices", [])
+    d = need(find_dir()); st = load(d); rows = st["notices"]
     if a.action == "sweep":
         a.sessions_for_events = [a.session] if a.session else []
         return cmd_sweep(a)
@@ -6837,7 +7001,7 @@ def cmd_notice(a):
             if a.all or x.get("thread") == a.thread: x["done"] = True
         save(d, st, {"ev": "notice-done"}); return
     if a.json: print(json.dumps(pending, ensure_ascii=False)); return
-    if st.get("prefs", {}).get("notice_merge", "thread") == "none":
+    if pref(st, 'notice_merge') == "none":
         print("\n".join(f"{x['thread']}: {x.get('text') or x['kind']}" for x in pending) or lab(st, "no_items")); return
     grouped = {}
     for x in pending: grouped.setdefault(x["thread"], []).append(x)
@@ -6850,7 +7014,7 @@ def cmd_nudge(a):
     if t.get("status") == "planned": sys.exit(lab(st, "nudge_closed"))
     if t.get("status") in ("archived", "idle", "resolved"):
         sys.exit(lab(st, "nudge_closed"))
-    limit = max(30, int(st.get("prefs", {}).get("stuck_minutes", STUCK_DEFAULT) or 0))
+    limit = max(30, int(pref(st, 'stuck_minutes') or 0))
     for last in reversed(t.get("nudges", [])):
         stamp = last.get("at") if isinstance(last, dict) else last
         mins = _minutes_since(stamp)
@@ -6906,7 +7070,7 @@ def cmd_sweep(a):
 
 
 def _sweep_locked(a, d, st):
-    notices = st.setdefault("notices", [])
+    notices = st["notices"]
     def payload_rows(raw, keys):
         if isinstance(raw, list): return raw
         if isinstance(raw, dict):
@@ -7284,7 +7448,7 @@ def _verdict_word(st, verdict):
 
 
 def _screen_label(st, seat):
-    if st.get("prefs", {}).get("screen_mode", "shadow") == "off": return ""
+    if pref(st, 'screen_mode') == "off": return ""
     thread = st.get("threads", {}).get(seat) or {}
     current = _seat_session(st,seat)
     rows = [x for x in st.get("screens", {}).values() if x.get("seat") == seat and not x.get("retake") and (not current or x.get("session_id") == current)]
@@ -7311,7 +7475,7 @@ def _compact_label(st,seat):
     reread=lab(st,"compact_v_yes" if check.get("reread") else "compact_v_no") if check.get("answered") else lab(st,"compact_v_unanswered")
     line=lab(st,"compact_board",n=c.get("count",0),quiz=q,result=result,reread=reread)
     counts=(st.get("signals",{}).get(seat) or {}).get("counts",{})
-    if int(c.get("count",0))>=int(st.get("prefs",{}).get("lead_compact_alert",2)):
+    if int(c.get("count",0))>=int(pref(st, 'lead_compact_alert')):
         line+=" · "+lab(st,"compact_drift_summary",agents=(counts.get("drift_self_work",0)),threads=counts.get("drift_silent_threads",0),big=counts.get("drift_dajuguan",0))
     return line
 
@@ -7392,7 +7556,7 @@ def _screen_ask(d, st, seat, session, level, task, retake=False):
     sid = _screen_id(st); keys = _keys_dir(st); keys.mkdir(parents=True, exist_ok=True)
     ids = [f"P{i}" for i in range(1, 8 if level == "strict" else 7)]
     shift = sum(1 for x in st.get("screens", {}).values() if x.get("seat") == seat)
-    lang = "zh" if (st.get("prefs", {}).get("language") or "en").startswith("zh") else "en"
+    lang = "zh" if (pref(st, 'language') or "en").startswith("zh") else "en"
     bank = SCREEN_BANK[lang]
     questions, factual_answers = {}, {}
     for p in ids:
@@ -7433,7 +7597,7 @@ def _screen_ask(d, st, seat, session, level, task, retake=False):
                "rubric": {p: SCREEN_RUBRIC[p] for p in ids},
                "pass": "strict: pass >= 12/14, marginal 9-11, fail <= 8; light: pass >= 7/12, fail <= 6; P5 = 0 fails the screen"}
     (keys / f"{sid}.json").write_text(json.dumps(answers, ensure_ascii=False, indent=2), encoding="utf-8")
-    st.setdefault("screens", {})[sid] = record; save(d, st, {"ev": "screen-ask", "screen": sid})
+    st["screens"][sid] = record; save(d, st, {"ev": "screen-ask", "screen": sid})
     message = f"[screen {sid}]\n" + lab(st, "screen_prompt") + "\n" + "\n".join(f"{p}: {questions[p]}" for p in ids)
     return sid, message
 
@@ -7752,7 +7916,7 @@ def _extract_screen_answer(rows, sid, text_only=False):
 
 def _language_penalty(st, text):
     clean = re.sub(r"```[\s\S]*?```|`[^`]*`|https?://\S+|(?:^|\s)(?:/|\./|\.\./)[^\s]+", " ", text)
-    language = (st.get("prefs", {}).get("language") or "").lower()
+    language = (pref(st, 'language') or "").lower()
     if not language: return 0, ["language_unset"]
     zh = len(re.findall(r"[\u3400-\u9fff]", clean)); letters = len(re.findall(r"[A-Za-z\u3400-\u9fff]", clean))
     ratio = zh / max(1, letters)
@@ -7793,7 +7957,7 @@ def _screen_grade(d, st, sid, answers, source, grader_choice="auto", grade_text=
         for name in choices:
             if name == "codex": graders.append(("codex", "codex exec -m gpt-6-luna -c model_reasoning_effort=medium -s read-only --skip-git-repo-check -", "gpt-6-luna"))
             else: graders.append(("claude", "claude -p --model haiku", "haiku"))
-    timeout = int(st.get("prefs", {}).get("grader_timeout_s", 300) or 300)
+    timeout = int(pref(st, 'grader_timeout_s') or 300)
     original_attempts = int(rec.get("attempts",0))
     def run_once(command):
         """One grader run: (scores, seconds, tokens or None); raises RuntimeError when it gives no usable line."""
@@ -7965,7 +8129,7 @@ def cmd_screen(a):
     if a.action == "ask":
         if st.get("write_lock"):
             sys.exit(lab(st, "lead_write_locked", ho=st["write_lock"].get("ho")))
-        if st.get("prefs", {}).get("screen_mode", "shadow") == "off":
+        if pref(st, 'screen_mode') == "off":
             print(lab(st, "screen_off")); return
         if not (a.session or "").strip(): sys.exit(lab(st, "screen_session_required"))
         if a.seat != "lead" and a.seat not in st["threads"]: sys.exit(lab(st, "screen_unknown_seat", seat=a.seat))
@@ -8085,13 +8249,13 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
     end_at=_when(now())
     stamps=[_when(r.get("timestamp") or r.get("created_at") or r.get("time")) for r in rows]
     if not persist: end_at=max((x for x in stamps if x),default=end_at)
-    cutoff=end_at-dt.timedelta(minutes=int(st.get("prefs",{}).get("signals_window_minutes",30)))
+    cutoff=end_at-dt.timedelta(minutes=int(pref(st, 'signals_window_minutes')))
     recent=[]; missing_time=0
     for row,stamp in zip(rows,stamps):
         if stamp and stamp<cutoff: continue
         if not stamp: missing_time+=1
         recent.append(row)
-    hours=int(st.get("prefs",{}).get("drift_window_hours",24) or 24)
+    hours=int(pref(st, 'drift_window_hours') or 24)
     drift_cutoff=end_at-dt.timedelta(hours=hours)
     drift_rows=[r for r,s in zip(rows,stamps) if s is None or s>=drift_cutoff]
     agents=sends=big_missing=0
@@ -8140,7 +8304,7 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
             compact_identity=row.get("timestamp") or row.get("created_at") or row.get("time") or row.get("uuid")
         if tool_use or role=="tool_result": turn_tools=True
     signals=sum(v for k,v in counts.items() if k!="compact")
-    red_at=int(st.get("prefs",{}).get("signals_red_at",3) or 3)
+    red_at=int(pref(st, 'signals_red_at') or 3)
     color="red" if insult or counts["dissatisfaction"]>=2 or signals>=red_at else ("yellow" if signals or counts["compact"] else "green")
     # Observe from the first human row after the screen answer; if there is no screen marker, from the first timestamp.
     full=sorted(((stamp,row) for stamp,row in zip(stamps,rows) if stamp),key=lambda item:item[0])
@@ -8152,7 +8316,7 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
     if not marker_seen and full: first=full[0][0]
     bypass=0; done_evidence=None; observation=None
     if first:
-        end=first+dt.timedelta(minutes=int(st.get("prefs",{}).get("observe_minutes",20)))
+        end=first+dt.timedelta(minutes=int(pref(st, 'observe_minutes')))
         window=[row for stamp,row in full if first<=stamp<=end]
         for i,row in enumerate(window):
             if _tool_error(_row_content(row)) and _error_was_bypassed(window,i): bypass+=1
@@ -8162,7 +8326,7 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
         observation={"session":_seat_session(st,seat),"window_end":end.isoformat(),"bypass":bypass,"first_done_evidence":done_evidence,"at":now()}
         prev=st.get("observations",{}).get(seat)
         if not prev or prev.get("session")!=observation["session"] or _when(now())<_when(prev.get("window_end")):
-            st.setdefault("observations",{})[seat]=observation
+            st["observations"][seat]=observation
     relay=_succ_relay_count(st,seat); session=_seat_session(st,seat); previous=st.get("signals",{}).get(seat,{})
     sticky=[x for x in previous.get("sticky",[]) if x.get("session")==session]
     if sticky: color="red"
@@ -8172,7 +8336,7 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
     lines=[]
     if bypass: lines.append(lab(st,"signals_bypass_observation"))
     if color=="red":
-        lines.append(lab(st,"signal_red",n=relay,limit=int(st.get("prefs",{}).get("relay_max_per_day",2))))
+        lines.append(lab(st,"signal_red",n=relay,limit=int(pref(st, 'relay_max_per_day'))))
         lines.append(lab(st,"signals_relay_command",seat=seat,signals=", ".join(f"{k}={v}" for k,v in counts.items() if v) or result.get("red_reason") or "opening observation bypass"))
     else: lines.append(lab(st,"signal_yellow" if color=="yellow" else "signal_none"))
     if counts["compact"]:
@@ -8186,10 +8350,10 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
         history=(st.get("lead") or {}).get("sessions",[])
         try: age=(dt.datetime.fromisoformat(now())-_when(history[-1].get("from"))).total_seconds()/3600 if history and history[-1].get("from") else 0
         except (ValueError,TypeError,AttributeError): age=0
-        if age>=float(st.get("prefs",{}).get("lead_relay_hours",12)) or counts["compact"]>=2:
+        if age>=float(pref(st, 'lead_relay_hours')) or counts["compact"]>=2:
             result["lead_relay"]=model_lab(st,"lead_relay")
             lines.append(result["lead_relay"])
-        if color=="red" and (st.get("prefs",{}).get("deadline") or any(t.get("deadline") for t in st.get("tasks",{}).values())): lines.append(lab(st,"signal_deadline"))
+        if color=="red" and (pref(st, 'deadline') or any(t.get("deadline") for t in st.get("tasks",{}).values())): lines.append(lab(st,"signal_deadline"))
     if color!="red": lines.append(lab(st,"signal_relay_count",n=relay))
     if missing_time: lines.append(lab(st,"signals_time_missing"))
     if bad_lines: lines.append(lab(st,"signals_bad_lines",n=bad_lines))
@@ -8248,14 +8412,14 @@ def _signals_half_quiz(d,st,seat,compact_identity=None):
     qid=f"HQ{int(previous_id[2:])+1 if re.fullmatch(r'HQ[0-9]+',previous_id) else 1}"
     key=_keys_dir(st); key.mkdir(parents=True,exist_ok=True); file=key/f"{seat}-{qid}.json"
     file.write_text(json.dumps({"seat":seat,"questions":material},ensure_ascii=False,indent=1),encoding="utf-8")
-    st.setdefault("signals",{}).setdefault(seat,{})["half_quiz"]={"id":qid,"at":now(),"n":len(material),"compact_id":str(compact_identity) if compact_identity is not None else None}
+    st["signals"].setdefault(seat,{})["half_quiz"]={"id":qid,"at":now(),"n":len(material),"compact_id":str(compact_identity) if compact_identity is not None else None}
     return lab(st,"signals_half_quiz_head",id=qid)+"\n"+"\n".join(f"{i+1}. {x['question']}" for i,x in enumerate(material))
 
 
 def _signals_p7(st,seat):
     lang="zh" if _zh(st) else "en"; bank=SCREEN_BANK[lang]["P7"]; prev=(st.get("signals",{}).get(seat) or {}).get("last_p7")
     choices=[x[0] for x in bank if x[0]!=prev]; question=choices[0] if choices else bank[0][0]
-    st.setdefault("signals",{}).setdefault(seat,{})["last_p7"]=question
+    st["signals"].setdefault(seat,{})["last_p7"]=question
     return question
 
 
@@ -8337,7 +8501,7 @@ def _compact_block(d,st,seat,count,qid,quiz_text,local_session):
         rows,found=_session_rows(local_session) if local_session else ([],False)
         if found:
             end_at=_when(now())
-            cutoff=end_at-dt.timedelta(hours=int(st.get("prefs",{}).get("drift_window_hours",24) or 24))
+            cutoff=end_at-dt.timedelta(hours=int(pref(st, 'drift_window_hours') or 24))
             rows=[r for r in rows if not (_when(r.get("timestamp") or r.get("created_at") or r.get("time"))) or _when(r.get("timestamp") or r.get("created_at") or r.get("time"))>=cutoff]
             analysis,_=_signals_analyze(d,st,seat,rows,persist=False)
             counts=analysis["counts"]
@@ -8345,9 +8509,9 @@ def _compact_block(d,st,seat,count,qid,quiz_text,local_session):
         else: drift=lab(st,"compact_drift_unavailable")
     except Exception:
         drift=lab(st,"compact_drift_unavailable")
-    if count>=int(st.get("prefs",{}).get("lead_compact_alert",2)):
+    if count>=int(pref(st, 'lead_compact_alert')):
         required+="\n"+lab(st,"compact_alert_thread" if seat!="lead" else "compact_alert",n=count,drift=drift)
-    if count>=int(st.get("prefs",{}).get("lead_compact_swap",4)):
+    if count>=int(pref(st, 'lead_compact_swap')):
         command=f"TW succ start {seat} --reason \"{lab(st,'compact_swap_reason')}\""
         required+="\n"+lab(st,"compact_swap",command=command)
     return _brief_card(st,seat)+"\n"+required+"\n\n"
@@ -8444,7 +8608,7 @@ def _signals_quiz_grade(d,st,hqid,seat,answers_path):
     if not re.fullmatch(r"HQ[0-9]+",hqid or "") or seat not in st.get("threads",{}) and seat!="lead": sys.exit(lab(st,"screen_unknown_seat",seat=seat))
     passed,wrong=_signals_quiz_grade_text(d,st,hqid,seat,Path(answers_path).read_text(encoding="utf-8"))
     if not wrong and not passed: sys.exit(lab(st,"screen_unknown"))
-    sig=load(d).setdefault("signals",{}).get(seat,{})
+    sig=load(d)["signals"].get(seat,{})
     prior=(sig.get("quizzes") or {}).get(hqid,{"attempts":1})
     lines=[]
     if wrong:
@@ -8516,119 +8680,102 @@ def cmd_signals(a):
     else: print(output[0][1])
 
 
+def _set_pref_value(st, key, raw, a, old_cap):
+    from difflib import get_close_matches
+    spec = PREFS.get(key)
+    if spec is None:
+        near = get_close_matches(key, PREFS, n=1, cutoff=0.55)
+        sys.exit(f"unknown preference {key!r}" + (f"; closest is {near[0]!r}" if near else ""))
+    if spec.get("settable") is False:
+        sys.exit(f"{key} is an internal preference and cannot be set directly")
+    value, kind, current = raw, _pref_kind(spec), pref(st, key)
+    if kind == "bool":
+        if raw == "" and spec.get("allow_empty"):
+            value = ""
+        elif raw.lower() not in ("1", "0", "true", "false", "yes", "no", "on", "off"):
+            sys.exit("require_review must be true or false" if key == "require_review" else
+                     lab(st, "rp_bool") if key == "require_primary" else f"{key}: true or false")
+        else:
+            value = raw.lower() in ("1", "true", "yes", "on")
+    elif kind == "int":
+        if not re.fullmatch(r"[0-9]+", raw):
+            sys.exit(f"{key}: {spec.get('invalid', 'a whole number' + (' of minutes' if key not in QUOTA_PREF_KEYS else ''))}")
+        value = int(raw)
+        if spec.get("invalid") and value > spec.get("max", value):
+            sys.exit(f"{key}: {spec['invalid']}")
+        if value < spec.get("min", 0):
+            sys.exit(f"{key}: {spec['min_error']}" if "min_error" in spec else
+                     f"{key}: must be at least {spec['min']}")
+        if value > spec.get("max", value):
+            unit = spec.get("unit")
+            message = spec.get("max_error") or f"a whole number, {'hours' if unit == 'hours' else 'percent'} from 0 to {spec['max']}"
+            sys.exit(f"{key}: {message}")
+    elif kind == "enum":
+        if raw not in spec["values"]:
+            if key == "root_mode": sys.exit(lab(st, "root_mode_error"))
+            choices = ", ".join(x for x in spec["values"] if x)
+            sys.exit(f"{key}: one of {choices}" + (", or empty" if "" in spec["values"] else ""))
+    elif kind == "list":
+        if key == "gpt_private":
+            try: value = json.loads(raw)
+            except (ValueError, TypeError): value = csv(raw)
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                sys.exit(f"{key}: use a comma list or JSON string list")
+            value = [item.strip() for item in value if item.strip()]
+        else:
+            value = [item for item in csv(raw) if item]
+            bad = [item for item in value if item not in spec.get("values", ())]
+            if bad:
+                sys.exit(f"standing_grants: any of {', '.join(STANDING_GRANTS)} (comma list); not {', '.join(bad)}")
+    if spec.get("user_said_off") and not value and not (a.user_said or "").strip():
+        if key == "require_review": sys.exit("turning the review gate off is the user's decision: add --user-said \"<their words>\"")
+        sys.exit(lab(st, "rp_user"))
+    needs_words = bool(value and spec.get("user_said"))
+    if key == "thread_permission_mode":
+        needs_words = (value or THREAD_MODE_DEFAULT) != THREAD_MODE_DEFAULT
+    if needs_words and not (a.user_said or "").strip():
+        if key in ("spawn_policy", "perm_policy", "gpt_policy"):
+            sys.exit(f"{key} is the user's decision: add --user-said \"<their words>\"")
+        sys.exit(f"threads run in {THREAD_MODE_DEFAULT} (R45): a tighter mode asks the user for ordinary calls, a "
+                 f"looser one skips the checks; either is the user's decision, add --user-said \"<their words>\"")
+    if key in ("spawn_policy", "perm_policy", "gpt_policy") and value:
+        st["prefs"].setdefault("policy_said", {})[key] = {"text": a.user_said.strip(), "at": now()}
+    if key == "thread_permission_mode" and value in ("auto", "bypassPermissions"):
+        print(f"note: threads get {value} only if the lead runs at least as loose a mode (`tw.py lead --mode`); "
+              "create_session refuses a thread more permissive than its creator, and bypassPermissions lets a "
+              "thread run everything without asking except the ask rules", file=sys.stderr)
+    if key == "standing_grants" and set(value) - set(current or []) and not (a.user_said or "").strip():
+        sys.exit("a standing grant lets the lead act without asking each time: only the user gives it, add "
+                 "--user-said \"<their words>\"")
+    if key == "review_max_rounds" and (0 < value < old_cap or (old_cap == 0 and value > 0)) and not (a.user_said or "").strip():
+        sys.exit("a lower review round limit lets work merge with fewer reviews: that is the user's decision, add "
+                 "--user-said \"<their words>\"")
+    if key == "short_name" and value and not re.fullmatch(SHORT_RE, value):
+        sys.exit("short_name: letters/digits/hyphen, max 6 chars (e.g. TFCC)")
+    if key in ("quota_burn_at", "quota_lead_only_at"):
+        thresholds = {name: pref(st, name) for name in QUOTA_PREF_KEYS}
+        for pair in a.set or []:
+            name, sep, setting = pair.partition("=")
+            if sep and name in thresholds and setting.isdigit(): thresholds[name] = int(setting)
+        if thresholds["quota_burn_at"] >= thresholds["quota_lead_only_at"]:
+            sys.exit("quota_burn_at must be below quota_lead_only_at (or burn-fable and save never happen)")
+    st["prefs"][key] = value
+
+
 def cmd_prefs(a):
     d = need(find_dir())
     st = load(d)
     if a.grant_use:
         if not (a.what or "").strip(): sys.exit(lab(st, "grant_usage"))
-        if a.grant_use not in st.get("prefs", {}).get("standing_grants", []):
+        if a.grant_use not in pref(st, 'standing_grants'):
             sys.exit(lab(st, "grant_missing", grant=a.grant_use))
         st.setdefault("grant_uses", []).append({"grant": a.grant_use, "what": a.what.strip(), "at": now()})
         save(d, st, {"ev": "standing-grant-use", "grant": a.grant_use})
         print(lab(st, "grant_recorded", grant=a.grant_use)); return
     old_cap = review_max(st)
     for kv in a.set or []:
-        k, _, v = kv.partition("=")
-        if k == "ledger_line_every" and v not in ("wrapup", "report"):
-            sys.exit("ledger_line_every: one of wrapup, report")
-        if k in ("reconcile_every", "selfcheck_every") and v not in ("wrapup", "round"):
-            sys.exit(f"{k}: one of wrapup, round")
-        if k == "require_review":
-            if v.lower() not in ("1", "0", "true", "false", "yes", "no", "on", "off"):
-                sys.exit("require_review must be true or false")
-            if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
-                sys.exit("turning the review gate off is the user's decision: add --user-said \"<their words>\"")
-        if k == "require_primary":
-            if v.lower() not in ("1", "0", "true", "false", "yes", "no", "on", "off"):
-                sys.exit(lab(st, "rp_bool"))
-            if v.lower() in ("0", "false", "no", "off") and not (a.user_said or "").strip():
-                sys.exit(lab(st, "rp_user"))
-        if k in ("default_after_minutes", "stuck_minutes", "checkin_minutes", "check_timeout_minutes", "check_jobs", "check_shard_timeout_minutes", "urgent_ack_minutes", "task_existing_limit", "quota_every_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", "lead_compact_alert", "lead_compact_swap", "drift_window_hours", "sweep_every_minutes", "thread_default_after_minutes", "slow_factor", *QUOTA_DEFAULTS) and not re.fullmatch(r"[0-9]+", v):
-            sys.exit(f"{k}: a whole number" + ("" if k in QUOTA_DEFAULTS else " of minutes"))
-        if k == "quota_every_minutes" and int(v) < 1:
-            sys.exit("quota_every_minutes: a positive whole number of minutes")
-        if k in ("sweep_every_minutes", "thread_default_after_minutes", "slow_factor") and int(v) < 1:
-            sys.exit(f"{k}: a positive whole number")
-        if k == "quota_trigger_on" and v.lower() not in ("true", "false"):
-            sys.exit("quota_trigger_on: true or false")
-        if k == "sweep_trigger_on" and v.lower() not in ("true", "false"):
-            sys.exit("sweep_trigger_on: true or false")
-        if k == "notice_merge" and v not in ("thread", "none"):
-            sys.exit("notice_merge: thread or none")
-        if k == "screen_mode" and v not in ("shadow", "off"):
-            sys.exit("screen_mode: shadow or off")
-        if k == "root_mode" and v not in ("on", "off"):
-            sys.exit(lab(st,"root_mode_error"))
-        if k.startswith("root_") and k != "root_mode" and (not v.isdigit() or int(v) < 1):
-            sys.exit(f"{k}: a positive whole number")
-        if k in ("signals_red_at", "relay_max_per_day", "succ_watchdog_minutes", "signals_window_minutes", "observe_minutes", "grader_timeout_s", "lead_compact_alert", "lead_compact_swap", "drift_window_hours") and (not v.isdigit() or int(v) < 1):
-            sys.exit(f"{k}: a positive whole number")
-        if k=="drift_window_hours" and int(v)>168: sys.exit("drift_window_hours: maximum 168 hours")
-        if k == "archive_idle_days" and (not v.isdigit() or int(v) < 1):
-            sys.exit("archive_idle_days: a positive whole number of days")
-        cur = st["prefs"].get(k)
-        if k == "gpt_private":
-            try:
-                parsed = json.loads(v)
-            except (ValueError, TypeError):
-                parsed = csv(v)
-            if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
-                sys.exit("gpt_private: use a comma list or JSON string list")
-            st["prefs"][k] = [item.strip() for item in parsed if item.strip()]
-            continue
-        if k in ("check_cmd", "language", "short_name", "thread_permission_mode", "skill_edge", "spawn_policy", "perm_policy", "gpt_policy", "screen_mode", "root_mode"):
-            st["prefs"][k] = v  # text, never coerced (check_cmd=true is a command)
-        elif isinstance(cur, bool) or v.lower() in ("true", "false", "yes", "no", "on", "off"):
-            st["prefs"][k] = v.lower() in ("1", "true", "yes", "on")
-        elif v.isdigit():
-            st["prefs"][k] = int(v)
-        else:
-            st["prefs"][k] = v
-        if k == "thread_permission_mode" and v and v not in PERMISSION_MODES:
-            sys.exit(f"thread_permission_mode: one of {', '.join(PERMISSION_MODES)}, or empty for the default "
-                     f"({THREAD_MODE_DEFAULT})")
-        if k == "spawn_policy" and v not in ("", "free", "ask"):
-            sys.exit("spawn_policy: one of free, ask, or empty")
-        if k == "perm_policy" and v not in ("", "managed", "managed-sensitive", "ask"):
-            sys.exit("perm_policy: one of managed, managed-sensitive, ask, or empty")
-        if k in ("spawn_policy", "perm_policy", "gpt_policy") and v:
-            if not (a.user_said or "").strip():
-                sys.exit(f"{k} is the user's decision: add --user-said \"<their words>\"")
-            st["prefs"].setdefault("policy_said", {})[k] = {"text": a.user_said.strip(), "at": now()}
-        if k == "thread_permission_mode" and v in ("auto", "bypassPermissions"):
-            print(f"note: threads get {v} only if the lead runs at least as loose a mode (`tw.py lead --mode`); "
-                  "create_session refuses a thread more permissive than its creator, and bypassPermissions lets a "
-                  "thread run everything without asking except the ask rules", file=sys.stderr)
-        if k == "thread_permission_mode" and (v or THREAD_MODE_DEFAULT) != THREAD_MODE_DEFAULT \
-                and not (a.user_said or "").strip():
-            sys.exit(f"threads run in {THREAD_MODE_DEFAULT} (R45): a tighter mode asks the user for ordinary calls, a "
-                     "looser one skips the checks; either is the user's decision, add --user-said \"<their words>\"")
-        if k == "standing_grants":
-            g = [x for x in csv(v) if x]
-            bad = [x for x in g if x not in STANDING_GRANTS]
-            if bad:
-                sys.exit(f"standing_grants: any of {', '.join(STANDING_GRANTS)} (comma list); not {', '.join(bad)}")
-            if set(g) - set(cur or []) and not (a.user_said or "").strip():
-                sys.exit("a standing grant lets the lead act without asking each time: only the user gives it, add "
-                         "--user-said \"<their words>\"")
-            st["prefs"][k] = g
-        if k == "review_max_rounds":
-            if not re.fullmatch(r"[0-9]{1,2}", v):
-                sys.exit("review_max_rounds: a whole number of review rounds, 0-99 (default 3; 0 = no limit)")
-            if 0 < int(v) < old_cap or (old_cap == 0 and int(v) > 0):
-                if not (a.user_said or "").strip():
-                    sys.exit("a lower review round limit lets work merge with fewer reviews: that is the user's "
-                             "decision, add --user-said \"<their words>\"")
-        if k == "short_name" and v and not re.fullmatch(SHORT_RE, v):
-            sys.exit("short_name: letters/digits/hyphen, max 6 chars (e.g. TFCC)")
-        if k in ("quota_burn_at", "quota_lead_only_at"):
-            other = {**QUOTA_DEFAULTS, **st["prefs"], **dict(x.partition("=")[::2] for x in a.set or [])}
-            if re.fullmatch(r"[0-9]+", str(other["quota_burn_at"])) and re.fullmatch(
-                    r"[0-9]+", str(other["quota_lead_only_at"])) and int(other["quota_burn_at"]) >= int(
-                    other["quota_lead_only_at"]):
-                sys.exit("quota_burn_at must be below quota_lead_only_at (or burn-fable and save never happen)")
-        if k in QUOTA_DEFAULTS and not 0 <= int(v) <= (168 if k.endswith("_hours") else 100):
-            sys.exit(f"{k}: a whole number, " + ("hours from 0 to 168" if k.endswith("_hours") else "percent from 0 to 100"))
+        key, _, value = kv.partition("=")
+        _set_pref_value(st, key, value, a, old_cap)
     retitled = {}
     if any(kv.partition("=")[0] == "short_name" for kv in a.set or []):
         for n, t in st["threads"].items():
@@ -8652,7 +8799,10 @@ def cmd_prefs(a):
         print(json.dumps({"retitled": retitled, "tags": f"teamwork:{tag(st)}",
                           "note": "update each session with set_session_title / set_session_tags"},
                          ensure_ascii=False), file=sys.stderr)
-    print(json.dumps(st["prefs"], ensure_ascii=False))
+    printable_prefs = stored(st).get("prefs", {})
+    printable_prefs.update({key: copy.deepcopy(spec["default"]) for key, spec in PREFS.items()
+                            if key not in printable_prefs})
+    print(json.dumps(printable_prefs, ensure_ascii=False))
 
 
 QUOTA_RANK = ("unknown", "normal", "pre-reset-burn", "burn-fable", "save", "lead-only")  # least to most severe
@@ -8740,7 +8890,8 @@ def cmd_quota(a):
         return
     if getattr(a, "weekly", False):
         d = need(find_dir()); st = load(d)
-        start = (dt.date.today() - dt.timedelta(days=dt.date.today().weekday())).isoformat()
+        current_date = _now_dt().date()
+        start = (current_date - dt.timedelta(days=current_date.weekday())).isoformat()
         rows = []
         try:
             rows = [json.loads(line) for line in (d / "model-log.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -8787,7 +8938,7 @@ def cmd_quota(a):
         pass
     dirs = a.config_dir or [os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")]
     codex_dir = a.codex_dir or str(Path.home() / ".codex")
-    current = dt.datetime.now().timestamp()
+    current = _now_dt().timestamp()
     notes, prefs, prev, changed, state_path, project_dir, prefs_ok = [], {}, None, "no", None, None, True
     write_locked = False
     try:
@@ -8831,7 +8982,8 @@ def cmd_quota(a):
         if i != pick:
             result["notes"].extend(f"config #{i + 1}: {note}" for note in (other.get("notes") or []))
     result["notes"] += notes
-    for key, default in QUOTA_DEFAULTS.items():
+    for key in QUOTA_PREF_KEYS:
+        default = PREFS[key]["default"]
         if key in prefs and quota_reader.num(prefs.get(key)) is None:
             result["notes"].append(f"invalid quota threshold {key}; using default {default}")
     if sum(g[3] != "unknown" for g in graded) > 1:
@@ -8908,7 +9060,7 @@ def _model_log_append(path, record):
 
 
 def _model_deny_change(st, typ, model, allow=False):
-    rows = st.setdefault("model_deny", [])
+    rows = st["model_deny"]
     found = next((x for x in rows if x.get("type") == typ and x.get("model") == model), None)
     if allow:
         if found:
@@ -8927,7 +9079,7 @@ def _denied(st, typ, model):
 
 
 def cmd_model_status(a):
-    d = need(find_dir()); st = load(d); models = st.setdefault("models", {})
+    d = need(find_dir()); st = load(d); models = st["models"]
     model = a.model
     if a.up:
         models.pop(model, None)
@@ -8942,7 +9094,7 @@ def cmd_model_status(a):
     print(model_lab(st, "model_down", model=model.upper(), why=model_lab(st, "model_reason_" + a.why), until=rec["until"]))
     if model == "gpt" and not already_down and not any(
             not q.get("answered") and q.get("kind") == "model-down" for q in st.get("questions", [])):
-        minutes = int(st.get("prefs", {}).get("default_after_minutes", 30))
+        minutes = int(pref(st, 'default_after_minutes'))
         proxy = argparse.Namespace(text=model_lab(st, "gpt_default_q", minutes=minutes), frm="lead", need_thread=None,
                                    default=None, undoable=True, proposal=None, external=False, override=None, answer=None)
         proxy._question_kind = "model-down"
@@ -8973,7 +9125,7 @@ def cmd_model_log(a):
                 skipped += 1
         summary = []
         pairs = sorted({(x["type"], x["model"]) for _, x in rows if x.get("ev") != "allow"})
-        stamp = dt.datetime.now().timestamp()
+        stamp = _now_dt().timestamp()
         for typ, model in pairs:
             pair = [(i, x) for i, x in rows if (x["type"], x["model"]) == (typ, model)]
             marks = [i for i, x in pair if x.get("ev") == "allow"]
@@ -9116,7 +9268,7 @@ OPENING_CHANGE = {"spawn_policy": "ask", "perm_policy": "ask", "gpt_policy": "no
 
 def policy(st, key):
     """The policy in force: the user's answer, else the recommended default (spawn_policy has none)."""
-    value = (st.get("prefs") or {}).get(key)
+    value = pref(st, key)
     return value or OPENING_DEFAULTS.get(key, value)
 
 
@@ -9135,9 +9287,9 @@ def opening_data(d, st):
             continue
         try:
             other = json.loads((folder / ".teamwork" / "state.json").read_text(encoding="utf-8"))
-            for key, record in (other.get("prefs", {}).get("policy_said") or {}).items():
+            for key, record in (pref(other, 'policy_said') or {}).items():
                 if key in OPENING and record.get("text"):
-                    answers.append((record.get("at", ""), key, other["prefs"].get(key), record["text"]))
+                    answers.append((record.get("at", ""), key, pref(other, key), record["text"]))
         except (OSError, ValueError, TypeError, AttributeError):  # another project's broken state is skipped
             continue
     rows = []
@@ -9146,7 +9298,7 @@ def opening_data(d, st):
         if zh: question, scale, costs = OPENING_ZH[key]
         prior = max((x for x in answers if x[1] == key), key=lambda x: (str(x[0]), str(x[2]), str(x[3])), default=None)
         rows.append({"key": key, "question": question, "scale": [{"step": s, "cost": c} for s, c in zip(scale, costs)],
-                     "current": st.get("prefs", {}).get(key) or None,
+                     "current": pref(st, key) or None,
                      "last": ({"value": prior[2], "text": prior[3], "at": prior[0]} if prior else None),
                      **({"default": policy(st, key)} if key in OPENING_DEFAULTS else {}),
                      "recommended": OPENING_RECOMMENDED[key],
@@ -9157,8 +9309,8 @@ def opening_data(d, st):
     started = any(task.get("status") in started_statuses for task in st.get("tasks", {}).values()) \
         and not st.get("lead_trials")  # a relead chain still screens its new lead
     return {"started": started, "questions": rows, "thread_screens": thread_screens,
-            "unanswered_now": [k for k in OPENING if not st.get("prefs", {}).get(k)],
-            "defaults_in_effect": {k: policy(st, k) for k in OPENING_DEFAULTS if not st.get("prefs", {}).get(k)},
+            "unanswered_now": [k for k in OPENING if not pref(st, k)],
+            "defaults_in_effect": {k: policy(st, k) for k in OPENING_DEFAULTS if not pref(st, k)},
             "rule": lab(st, "opening_rule")}
 
 
@@ -9210,7 +9362,7 @@ def _lead_opening_screen(d, st):
     found = next(((k, v) for k, v in reversed(list(st.get("screens", {}).items()))
                   if v.get("seat") == "lead" and (v.get("session_id") or "").strip() == sid), None)
     if not found:
-        if st.get("prefs", {}).get("screen_mode", "shadow") == "off":
+        if pref(st, 'screen_mode') == "off":
             return {"status": "off", "attempt": attempt}
         if st.get("write_lock"):
             return {"status": "locked", "attempt": attempt}
@@ -9303,7 +9455,7 @@ def cmd_selfcheck(a):
     items.append(item("model", a.model == served_model if a.model and served_model else None,
                       lab(st,"selfcheck_model_detail",served=served_model,configured=a.model) if a.model and served_model and a.model != served_model else "",
                       lab(st,"selfcheck_model_fix")))
-    items.append(item("gpt_model", None, str(st.get("prefs", {}).get("gpt_model") or "not recorded")))
+    items.append(item("gpt_model", None, str(pref(st, 'gpt_model') or "not recorded")))
     items.append(item("effort", a.effort == a.want_effort if a.want_effort else None,
                       lab(st,"selfcheck_effort_detail",effort=a.effort,wanted=a.want_effort) if a.want_effort and a.effort != a.want_effort else "",
                       lab(st,"selfcheck_effort_fix")))
@@ -9334,17 +9486,17 @@ def cmd_selfcheck(a):
             gpt_detail = lab(st, "selfcheck_gpt_version_error", error=type(exc).__name__)
     items.append(item("gpt", gpt_status, gpt_detail, lab(st, "selfcheck_gpt_fix")))
     if getattr(a, "gpt_probe", False):
-        model = st.get("prefs", {}).get("gpt_model") or "gpt-6-luna"
+        model = pref(st, 'gpt_model') or "gpt-6-luna"
         try:
             result = subprocess.run([codex, "exec", "--skip-git-repo-check", "-m", model, "reply OK"],
                                     capture_output=True, text=True, timeout=60) if codex else None
-            st.setdefault("selfcheck", {})["gpt_probe"] = {"at": now(), "ok": bool(result and result.returncode == 0),
+            st["selfcheck"]["gpt_probe"] = {"at": now(), "ok": bool(result and result.returncode == 0),
                 "detail": ((result.stdout or result.stderr).strip().splitlines()[-1][:240] if result and (result.stdout or result.stderr).strip() else lab(st, "selfcheck_gpt_probe_missing"))}
         except (OSError, subprocess.TimeoutExpired) as exc:
-            st.setdefault("selfcheck", {})["gpt_probe"] = {"at": now(), "ok": False, "detail": type(exc).__name__}
+            st["selfcheck"]["gpt_probe"] = {"at": now(), "ok": False, "detail": type(exc).__name__}
     label, info = running_version(); newer = newer_release(info)
     host_key = hashlib.sha256(socket.gethostname().encode()).hexdigest()[:8]
-    st.setdefault("versions", {})[host_key] = {"version": label, "at": now()}
+    st["versions"][host_key] = {"version": label, "at": now()}
     other_versions = []
     for k,v in st["versions"].items():
         if k == host_key: continue
@@ -9376,7 +9528,7 @@ def cmd_selfcheck(a):
     errs = guard_errors_recent()
     if errs:  # reported only when there is something to report
         items.append(item("guard_errors", False, lab(st, "guard_errors", n=errs), f"read {guard_log_path()} and report the error"))
-    prefs = st.get("prefs", {}); missing = [k for k in ("perm_policy", "gpt_policy") if not prefs.get(k)]
+    missing = [k for k in ("perm_policy", "gpt_policy") if not pref(st, k)]
     items.append(item("opening", True, lab(st, "opening_defaults_detail", pairs=", ".join(f"{k}={policy(st, k)}" for k in missing))
                       if missing else "answered", ""))
     if st.get("compactions",{}).get("lead"):
@@ -9431,7 +9583,7 @@ def cmd_selfcheck(a):
         items.append(item("gpt_probe", bool(probe_row.get("ok")), f"{probe_row.get('detail', '')}; age {age if age is not None else '?'} min",
                           lab(st, "selfcheck_gpt_probe_fix") if not probe_row.get("ok") else ""))
         items[-1]["how"] = "recorded"
-    st.setdefault("selfcheck", {})["items"] = items
+    st["selfcheck"]["items"] = items
     st["selfcheck"]["at"] = now()
     if d: save(d, st, {"ev": "selfcheck"})
     if not d:
@@ -9511,7 +9663,7 @@ def cmd_worker_prompt(a):
         "WORKTREE": (f"`{t.get('worktree') or worktree_path(st, a.thread)}` (the lead creates it; if it is missing, "
                      f"create it yourself with exactly: `{worktree_cmd(st, a.thread)}`)")
         if t["kind"] == "rc" else "your container's checkout of the repo (cloud thread)",
-        "SOURCE_BASELINE": "事实来源与版本基线：" if st.get("prefs", {}).get("language") == "zh" else "Source of truth and version baseline:",
+        "SOURCE_BASELINE": "事实来源与版本基线：" if pref(st, 'language') == "zh" else "Source of truth and version baseline:",
     }
     out = tpl
     for k, v in fill.items():
@@ -9522,12 +9674,47 @@ def cmd_worker_prompt(a):
     print(out)
 
 
+def clear_thread_tmp(project, thread, names=()):
+    """Delete what is in <project>/.teamwork/private/<thread>/tmp (or only the named entries) without a shell (R84; the space
+    manager uses it too). Walks real directory handles opened with O_NOFOLLOW, so a link swapped in at any moment is
+    removed as a link, never followed. Returns (removed names, bytes freed)."""
+    if not re.fullmatch(NAME_RE, thread): sys.exit(f"bad thread name {thread!r}")
+    bad = [n for n in names if not n or n in (".", "..") or "/" in n or os.sep in n]
+    if bad: sys.exit(f"names inside tmp only, no paths: {', '.join(map(repr, bad))}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(Path(project).resolve(), flags)
+    try:
+        for part in (".teamwork", "private", thread, "tmp"):  # .teamwork itself may not be a link either
+            try: nxt = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError: return [], 0
+            except OSError: sys.exit(f"{part}: not a plain folder (a link on the way?); nothing touched")
+            os.close(fd); fd = nxt
+        removed, freed = [], 0
+        for name in (names or sorted(os.listdir(fd))):
+            try: info = os.lstat(name, dir_fd=fd)
+            except FileNotFoundError: continue
+            if stat.S_ISDIR(info.st_mode):
+                sub = os.open(name, flags, dir_fd=fd)
+                try: freed += sum(os.lstat(f, dir_fd=r).st_size for _, _, fs, r in os.fwalk(dir_fd=sub) for f in fs)
+                finally: os.close(sub)
+                shutil.rmtree(name, dir_fd=fd)  # fd-based: does not follow links (shutil.rmtree.avoids_symlink_attacks)
+            else:
+                freed += info.st_size; os.unlink(name, dir_fd=fd)
+            removed.append(name)
+        return removed, freed
+    finally:
+        os.close(fd)
+
+
 def cmd_worktree(a):
     """Create the rc thread's git worktree and branch if missing (idempotent)."""
     d = need(find_dir())
     st = load(d)
     if a.thread not in st["threads"]:
         sys.exit(f"unknown thread {a.thread}")
+    if a.clear_tmp is not None:
+        removed, freed = clear_thread_tmp(st.get("repo", {}).get("path") or d.parent, a.thread, a.clear_tmp)
+        print(json.dumps({"thread": a.thread, "removed": removed, "freed_bytes": freed}, ensure_ascii=False)); return
     t = st["threads"][a.thread]
     if t["kind"] != "rc":
         sys.exit("cloud threads have no local worktree; they push their branch")
@@ -9711,7 +9898,7 @@ def set_req_status(st, r, q, new, by_import=False, user_said=None):
 def cmd_req(a):
     d = need(find_dir())
     st = load(d)
-    reqs = st.setdefault("requests", {})
+    reqs = st["requests"]
     if a.action == "list":
         rows = {r: q for r, q in reqs.items() if (not a.status or q.get("status") == a.status) and
                 (a.all or a.status or (q["status"] not in REQ_END and q["status"] != "remark"))}
@@ -9932,7 +10119,7 @@ def cmd_req_import(a, d, st):
           "where": col("落到哪里", "where"), "status": col("状态", "status"), "followup": col("回访", "follow")}
     if ci["id"] is None or ci["text"] is None or ci["status"] is None:
         sys.exit(f"table needs id, request and status columns; found header {head}")
-    reqs = st.setdefault("requests", {})
+    reqs = st["requests"]
     out, skipped = {}, []
     for row in body:
         get = lambda k: (row[ci[k]] if ci[k] is not None and ci[k] < len(row) else "").strip()
@@ -10845,7 +11032,7 @@ def archive_candidates(st):
     lead_sid = (st.get("lead") or {}).get("session_id")
     live_sids = {t.get("session_id") for t in st.get("threads", {}).values()
                  if t.get("status") in ("working", "starting", "waiting", "review", "landing") and t.get("session_id")}
-    cutoff = _when(now()) - dt.timedelta(days=int(st.get("prefs", {}).get("archive_idle_days", 3)))
+    cutoff = _when(now()) - dt.timedelta(days=int(pref(st, 'archive_idle_days')))
     for name, t in st.get("threads", {}).items():
         sessions = t.get("sessions") or []
         current = t.get("session_id")
@@ -10893,7 +11080,7 @@ def archive_candidates(st):
 
 def cmd_archive(a):
     d = need(find_dir()); st = load(d)
-    st.setdefault("archive", {})
+    st["archive"]
     if a.action == "candidates":
         rows = archive_candidates(st)
         print(json.dumps(rows, ensure_ascii=False) if a.json else "\n".join(
@@ -10958,11 +11145,11 @@ def cmd_archive(a):
             for q in pending_asks: q["owner"] = target
             for i in pending_issues: i["owner"] = target
             if blockers:
-                st.setdefault("archive_handoffs", []).append({"session": sid, "from": seat, "to": target,
+                st["archive_handoffs"].append({"session": sid, "from": seat, "to": target,
                                                                "items": blockers, "at": now()})
         elif getattr(a, "park", None):
             for item in blockers:
-                notices = st.setdefault("notices", [])
+                notices = st["notices"]
                 if not any(n.get("kind") == "parked" and n.get("text") == item and
                            n.get("original_owner") == seat and n.get("reason") == a.park and not n.get("done")
                            for n in notices):
@@ -10977,7 +11164,7 @@ def cmd_archive(a):
         seat_name = candidates[sid]["seat"]
         current = st.get("threads", {}).get(seat_name, {})
         if current.get("session_id") == sid:
-            archives = st.setdefault("archive_packs", {})
+            archives = st["archive_packs"]
             existing = next(((key, value) for key, value in archives.items() if value.get("session") == sid), None)
             if existing:
                 archive_id, pack = existing
@@ -11002,11 +11189,11 @@ def cmd_archive(a):
         if (rec.get("category") != "replaced" or t.get("last_report_session") == sid) and (int(t.get("report_count") or 0) != int(rec.get("report_count") or 0) or \
                 _later(t.get("last_status_at"), _when(rec["verified_at"]) or EPOCH)):
             sys.exit("a newer report arrived after verification; verify again")
-        direct_disconnected=rec.get("category")=="disconnected" and bool(st.get("prefs",{}).get("archive_disconnected_direct",False))
+        direct_disconnected=rec.get("category")=="disconnected" and bool(pref(st, 'archive_disconnected_direct'))
         if rec.get("category") in ("disconnected", "idle-old") and not direct_disconnected and not (a.user_said or "").strip():
             sys.exit("this category needs --user-said (user decision)")
         rec["archived_at"] = now()
-        if "archive" in st.get("prefs", {}).get("standing_grants", []):
+        if "archive" in pref(st, 'standing_grants'):
             st.setdefault("grant_uses", []).append({"grant": "archive", "at": now(), "what": sid})
         rec.pop("check", None); rec.pop("checked_at", None)
         rec["user_said"] = (a.user_said or "").strip()
@@ -11602,7 +11789,7 @@ def _pack_session(d, st, hid, rec, a):
             text=_row_text(row)
             for match in promise_re.finditer(text):
                 promise=match.group(0).strip()
-                if promise and not any(p.get("source_handover")==hid and p.get("text")==promise for p in st.setdefault("promises",[])):
+                if promise and not any(p.get("source_handover")==hid and p.get("text")==promise for p in st["promises"]):
                     promises=st["promises"]
                     pid="P"+str(max([int(re.search(r"\d+",str(p.get("id","P0"))).group(0)) for p in promises if re.search(r"\d+",str(p.get("id","")))] or [0])+1)
                     promises.append({"id":pid,"text":promise,"confidence":"low","source_handover":hid,"owner":"lead","status":"open","at":now()})
@@ -11625,7 +11812,7 @@ def _pack_session(d, st, hid, rec, a):
                 except (ValueError,TypeError): gaps.append(lab(st,"succ_list_invalid",name=display))
             else: gaps.append(lab(st,"succ_list_missing",name=display))
         rec["move_none_required"] = not getattr(a,"triggers",None) or not getattr(a,"subscriptions",None)
-        lead_extra = f"\n## {lab(st,'succ_team')} ({rec['cutoff_at']})\n{lab(st,'succ_thread_list')}：{json.dumps(team,ensure_ascii=False)}\n{lab(st,'succ_open_requests')}：{json.dumps({k:v for k,v in st.get('requests',{}).items() if v.get('status') not in ('closed','reported','dropped')},ensure_ascii=False)}\n{lab(st,'succ_questions')}：{json.dumps([q for q in st.get('questions',[]) if not q.get('answered_at')],ensure_ascii=False)}\n{lab(st,'succ_promises')}：{json.dumps(st.get('promises',[]),ensure_ascii=False)}\n{lab(st,'succ_grants')}：{json.dumps(st.get('prefs',{}).get('standing_grants',[]),ensure_ascii=False)}\n{lab(st,'succ_prefs')}：{json.dumps(st.get('prefs',{}),ensure_ascii=False)}\n{lab(st,'succ_reminders')}：{' ; '.join(lists) or lab(st,'succ_gap')}\n"
+        lead_extra = f"\n## {lab(st,'succ_team')} ({rec['cutoff_at']})\n{lab(st,'succ_thread_list')}：{json.dumps(team,ensure_ascii=False)}\n{lab(st,'succ_open_requests')}：{json.dumps({k:v for k,v in st.get('requests',{}).items() if v.get('status') not in ('closed','reported','dropped')},ensure_ascii=False)}\n{lab(st,'succ_questions')}：{json.dumps([q for q in st.get('questions',[]) if not q.get('answered_at')],ensure_ascii=False)}\n{lab(st,'succ_promises')}：{json.dumps(st.get('promises',[]),ensure_ascii=False)}\n{lab(st,'succ_grants')}：{json.dumps(pref(st, 'standing_grants'),ensure_ascii=False)}\n{lab(st,'succ_prefs')}：{json.dumps(stored(st).get('prefs',{}),ensure_ascii=False)}\n{lab(st,'succ_reminders')}：{' ; '.join(lists) or lab(st,'succ_gap')}\n"
     changes, memory_added = _seat_change_summary(d, st, rec["seat"], rec.get("cutoff_at") or rec.get("started_at"))
     env_heading = "## " + model_lab(st, "env_heading") + "\n"
     change_rows = []
@@ -11702,7 +11889,7 @@ def _succ_pack_gate(base):
 
 
 def cmd_succ(a):
-    d = need(find_dir()); st = load(d); hs = st.setdefault("handovers", {})
+    d = need(find_dir()); st = load(d); hs = st["handovers"]
     if a.action == "start":
         seat = a.seat
         if seat == "lead" and (st.get("write_lock") or {}).get("relead"):
@@ -11713,7 +11900,7 @@ def cmd_succ(a):
         if seat != "lead" and any(x.get("seat") == "lead" and _ho_open(x) for x in hs.values()): sys.exit(lab(st,"succ_lead_handover_open"))
         if any(x.get("seat") == seat and _ho_open(x) for x in hs.values()):
             sys.exit(lab(st,"succ_seat_handover_open"))
-        relay_count=_succ_relay_count(st,seat); relay_limit=int(st.get("prefs",{}).get("relay_max_per_day",2))
+        relay_count=_succ_relay_count(st,seat); relay_limit=int(pref(st, 'relay_max_per_day'))
         if relay_count >= relay_limit and not (getattr(a,"user_said",None) or "").strip():
             sys.exit(lab(st,"relay_user_said_required"))
         n = max([int(k[2:]) for k in hs if re.fullmatch(r"HO[0-9]+", k)] or [0]) + 1; hid = f"HO{n}"
@@ -11744,7 +11931,7 @@ def cmd_succ(a):
                 seen=_when(x.get("candidate_seen"))
                 if seen:
                     minutes=max(0,int((_when(now())-seen).total_seconds()//60)); row["candidate_idle_minutes"]=minutes
-                    row["watchdog_stuck"]=minutes>int(st.get("prefs",{}).get("succ_watchdog_minutes",45))
+                    row["watchdog_stuck"]=minutes>int(pref(st, 'succ_watchdog_minutes'))
             out.append(row)
         if a.json: print(json.dumps(out,ensure_ascii=False))
         else:
@@ -12260,7 +12447,7 @@ def cmd_succ(a):
         if missing_status: sys.exit("get_session records missing for active sessions: "+", ".join(missing_status))
         if any((session_results.get(sid) or {}).get("archived") or str((session_results.get(sid) or {}).get("status") or "").lower()=="archived" for sid in active_ids if sid and sid!=rec.get("old_session")):
             sys.exit("get_session record shows an active seat or successor archived")
-        ar=st.setdefault("archive",{}).setdefault(rec.get("old_session"),{})
+        ar=st["archive"].setdefault(rec.get("old_session"),{})
         ar.update(archived_at=now(),seat=rec.get("seat"),category="replaced",result="archive-guard release ticket")
         rec["retire_ticket"]=None; rec["phase"]="retired"; _succ_save(d,st,rec,"archived"); print("archived "+str(rec.get("old_session"))); return
 
@@ -12269,7 +12456,7 @@ def cmd_spawn_refused(a):
     d = need(find_dir()); st = load(d)
     if a.thread not in st.get("threads", {}): sys.exit(lab(st, "succ_unknown_thread", thread=a.thread))
     entry = {"thread": a.thread, "surface": a.surface or "rc", "at": now()}
-    st.setdefault("spawn_refusals", []).append(entry)
+    st["spawn_refusals"].append(entry)
     save(d, st, {"ev": "spawn-refused"})
     print(lab(st, "spawn_desktop" if entry["surface"] == "desktop" else "spawn_rc"))
 
@@ -12372,28 +12559,31 @@ def cmd_handover(a):
           + (f"; {args['permission_warning']}" if args.get("permission_warning") else ""), file=sys.stderr)
 
 
-def _blank_state(project, folder):
-    return {"project": project, "goal": "", "created": None, "lead": {"session_id": None},
-            "envs": {"rc": None, "cloud": None}, "repo": {"url": None, "path": str(folder), "base": "main"},
-            "threads": {}, "tasks": {}, "screens": {}, "signals": {}, "observations": {}, "handovers": {}, "plan_approved": False, "questions": [], "requests": {}, "features": {},
-            "promises": [], "notices": [], "archive": {}, "spawn_refusals": [],
-            "prefs": {"max_parallel": 0, "propose_before_start": True, "update_detail": "brief", "checkin_minutes": 10,
-                      "require_review": True, "archive_idle_days": 3, "screen_mode": "shadow", "signals_red_at": 3,
-                      "relay_max_per_day": 2, "signals_window_minutes": 30, "observe_minutes": 20, "grader_timeout_s": 300,
-                      "lead_compact_alert": 2, "lead_compact_swap": 4, "drift_window_hours": 24,
-                      "root_mode": "on", "root_symptoms_at": 2, "root_rework_at": 2,
-                      "root_full_at": 4, "root_debt_at": 2, "root_fresh_at": 3}}
+def new_thread(st, name, kind="rc", focus="", owns=None, session_id=None, status="planned", branch=None,
+               created=None, summary="", sessions=None):
+    return {"kind": kind, "focus": focus, "owns": list(owns or []), "session_id": session_id,
+            "status": status, "branch": branch or f"tw/{st['project']}/{name}", "created": created,
+            "last_seen": None, "summary": summary, "sessions": list(sessions or [])}
 
 
-def _blank_thread(st, name, kind="rc"):
-    return {"kind": kind, "focus": "", "owns": [], "session_id": None, "status": "planned",
-            "branch": f"tw/{st['project']}/{name}", "created": None, "last_seen": None, "summary": "", "sessions": []}
-
-
-def _pref_value(v):
-    if v.lower() in ("true", "false", "yes", "no", "on", "off"):
-        return v.lower() in ("true", "yes", "on")
-    return int(v) if v.isdigit() else v
+def _pref_value(key, value):
+    if key not in PREFS or not isinstance(value, str):
+        return value
+    kind = _pref_kind(PREFS[key])
+    if kind == "bool" and value.lower() in ("true", "false", "yes", "no", "on", "off"):
+        return value.lower() in ("true", "yes", "on")
+    if kind == "int" and re.fullmatch(r"[0-9]+", value):
+        return int(value)
+    if kind == "list":
+        try: parsed = json.loads(value)
+        except (ValueError, TypeError): parsed = csv(value)
+        if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+            return [item.strip() for item in parsed if item.strip()]
+    if kind == "dict":
+        try: parsed = json.loads(value)
+        except (ValueError, TypeError): return value
+        return parsed if isinstance(parsed, dict) else value
+    return value
 
 
 def rebuild_state(d, project=None, sessions=None, short=None):
@@ -12406,7 +12596,7 @@ def rebuild_state(d, project=None, sessions=None, short=None):
         try:
             old = json.loads((d / "state.json").read_text(encoding="utf-8"))
             project = project or old.get("project")
-            old_short = ((old.get("prefs") or {}).get("short_name") or "").strip() or None
+            old_short = (pref(old, "short_name") or "").strip() or None
         except (OSError, ValueError, AttributeError):
             pass
     events = _read_log(d)
@@ -12416,7 +12606,7 @@ def rebuild_state(d, project=None, sessions=None, short=None):
               if not (isinstance(e.get("rev"), int) and not isinstance(e.get("rev"), bool)
                       and last_rev_index[e["rev"]] != i)]
     if not events and isinstance(old, dict):
-        st = _blank_state(project or old.get("project") or "unknown", d.parent)
+        st = _rebuild_base(project or old.get("project") or "unknown", d, _new_state, default_short)
         st["_prior_session_history"] = old.get("threads", {}) if isinstance(old.get("threads"), dict) else {}
         notes.append("log.jsonl has no usable events: session history will be retained from state.json")
     if not project:  # the log lost its head: take the name from any later event, so nothing before it is skipped
@@ -12453,21 +12643,21 @@ def rebuild_state(d, project=None, sessions=None, short=None):
             if not isinstance(st.get(key), dict):
                 notes.append(f"discarded malformed snapshot field {key}")
                 st[key] = {}
-    if st is not None and not (st.get("prefs") or {}).get("short_name"):
-        st.setdefault("prefs", {})["short_name"] = short or old_short or default_short(st["project"])
+    if st is not None and not pref(st, "short_name"):
+        st["prefs"]["short_name"] = short or old_short or default_short(st["project"])
         if not (short or old_short):
             notes.append(f"short name not in the log: using {st['prefs']['short_name']} "
                          "(pass --short <name> if titles and tags used another)")
     seen = set()  # every short name the project ever had: live sessions may still carry an earlier one
     for e in events:
         sm = e.get("snap_meta")
-        if isinstance(sm, dict) and isinstance(sm.get("prefs"), dict) and isinstance(sm["prefs"].get("short_name"), str):
+        if isinstance(sm, dict) and isinstance(sm.get("prefs"), dict) and isinstance(pref(sm, 'short_name'), str):
             seen.add(sm["prefs"]["short_name"])
         for kv in (e.get("set") or []) if isinstance(e.get("set"), list) else []:
             if isinstance(kv, str) and kv.startswith("short_name="):
                 seen.add(kv.partition("=")[2])
     if st is None and project:
-        st = _blank_state(project, d.parent)
+        st = _rebuild_base(project, d, _new_state, default_short)
     leads = {e["session"] for e in events if e.get("ev") in ("lead", "succ-relead-seat")
              and isinstance(e.get("session"), str)}
     if st is not None and not leads and not (st.get("lead") or {}).get("session_id"):
@@ -12479,7 +12669,7 @@ def rebuild_state(d, project=None, sessions=None, short=None):
         if len(parents) == 1:
             parent = next(iter(parents))
             leads.add(parent)
-            st.setdefault("lead", {})["session_id"] = parent
+            st["lead"]["session_id"] = parent
             notes.append(f"lead restored from shared parent_session_id: {parent}; check this is the lead")
     return _finish_rebuild(d, st, project, sessions, notes, short, sorted(x for x in seen if x), leads)
 
@@ -12509,12 +12699,15 @@ def _replay(st, e, project, notes, d):
             name = (e.get("snap_meta") or {}).get("project") or e.get("project") or project
             if not name:
                 return st
-            st = _blank_state(name, d.parent)
+            st = _rebuild_base(name, d, _new_state, default_short)
             st["created"] = e.get("t")
         if e.get("snap_meta"):
             for k, v in e["snap_meta"].items():
                 if v is not None:
-                    st[k] = v
+                    if k == "prefs" and isinstance(v, dict):
+                        st["prefs"].update(v)
+                    else:
+                        st[k] = v
         if isinstance(e.get("snap_areas"), dict): st["areas"] = e["snap_areas"]
         if e.get("snap_screens") is not None:
             if isinstance(e["snap_screens"], dict): st["screens"] = e["snap_screens"]
@@ -12540,7 +12733,7 @@ def _replay(st, e, project, notes, d):
         elif ev == "prefs" and not e.get("snap_meta"):
             for kv in e.get("set") or []:
                 k, _, v = kv.partition("=")
-                st["prefs"][k] = _pref_value(v)
+                st["prefs"][k] = _pref_value(k, v)
         if ev == "prefs" and isinstance(e.get("user_said"), str) and e["user_said"].strip():
             st.setdefault("prefs_user_said", []).append({"t": e.get("t"), "set": e.get("set"), "text": e["user_said"].strip()})
         elif ev == "plan-approved":
@@ -12554,7 +12747,7 @@ def _replay(st, e, project, notes, d):
             notes.append(f"ignored log thread name outside NAME_RE: {str(th)[:40]!r}")
             th = None
         if th and (ev.startswith("thread") or ev == "worktree"):
-            t = st["threads"].setdefault(th, _blank_thread(st, th, e.get("kind") or "rc"))
+            t = st["threads"].setdefault(th, new_thread(st, th, e.get("kind") or "rc"))
             if ev == "thread-add":
                 t["created"] = e.get("t")
                 if e.get("session"):
@@ -12644,14 +12837,14 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
     if st is None:
         if not project:
             sys.exit("log.jsonl has no project name: pass --project <name>")
-        st = _blank_state(project, d.parent)
-        st.setdefault("prefs", {})["short_name"] = short or default_short(project)
+        st = _rebuild_base(project, d, _new_state, default_short)
+        st["prefs"]["short_name"] = short or default_short(project)
         notes.append("no usable log: rebuilt from sessions and branches only")
     prior_threads = st.pop("_prior_session_history", {})
     if isinstance(prior_threads, dict):
         for name, previous in prior_threads.items():
             if isinstance(previous, dict) and previous.get("status") == "archived" and name not in st["threads"]:
-                archived = _blank_thread(st, name, previous.get("kind", "rc"))
+                archived = new_thread(st, name, previous.get("kind", "rc"))
                 archived.update({k: previous[k] for k in ("session_id", "status") if k in previous})
                 archived["sessions"] = [h for h in previous.get("sessions", []) if isinstance(h, dict)] \
                     if isinstance(previous.get("sessions", []), list) else []
@@ -12721,7 +12914,7 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
         if name == "lead":
             sid = sess.get("id") or sess.get("session_id")
             if isinstance(sid, str) and not (st.get("lead") or {}).get("session_id"):
-                st.setdefault("lead", {})["session_id"] = sid
+                st["lead"]["session_id"] = sid
                 leads.add(sid)
                 notes.append(f"lead restored from session {sid}")
             continue
@@ -12754,7 +12947,7 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
                          f"(reseat {name} --session <id> if one should take it again)")
             continue
         kind = "cloud" if cur.get("environment_kind") == "anthropic_cloud" else "rc"
-        t = st["threads"].setdefault(name, _blank_thread(st, name, kind))
+        t = st["threads"].setdefault(name, new_thread(st, name, kind))
         if prior.get("sessions") and not t.get("sessions"):
             t["sessions"] = [h for h in prior["sessions"] if isinstance(h, dict)]
         if t.get("status") == "archived":
@@ -12805,7 +12998,7 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
             continue
         name = rest
         if name not in st["threads"]:
-            st["threads"][name] = _blank_thread(st, name)
+            st["threads"][name] = new_thread(st, name)
             notes.append(f"{name}: thread restored from branch {ref} (kind, owns, focus unknown)")
             roster_changed = True
     def history_time(h):
@@ -12816,7 +13009,7 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
             t["sessions"] = sorted((h for h in t["sessions"] if isinstance(h, dict)),
                                    key=lambda h: (h.get("session_id") == t.get("session_id") and not h.get("to"),
                                                   history_time(h)))
-        for k, v in _blank_thread(st, name, t.get("kind", "rc")).items():
+        for k, v in new_thread(st, name, t.get("kind", "rc")).items():
             t.setdefault(k, v)
         t["title"] = title_for(st, name)
     if roster_changed:
@@ -12895,7 +13088,7 @@ def cmd_rebuild(a):
                      "from it (save the whole list_sessions result)")
     st["updated"] = now()
     preview = d / "state.json.rebuilt"
-    preview.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    preview.write_text(json.dumps(stored(st), ensure_ascii=False, indent=2), encoding="utf-8")
     summary = {"preview": str(preview), "threads": sorted(st["threads"]), "tasks": sorted(st["tasks"]),
                "requests": sorted(st["requests"]), "notes": notes}
     old = None
@@ -12917,11 +13110,13 @@ def cmd_rebuild(a):
                        for i in set(o) & set(n)}
             summary["vs_current"][kind] = {"missing": sorted(set(o) - set(n)), "extra": sorted(set(n) - set(o)),
                                            "changed": {i: f for i, f in sorted(changed.items()) if f}}
-        summary["vs_current"]["other"] = sorted(k for k in ("lead", "prefs", "questions", "plan_approved", "envs",
-                                                             "repo", "goal", "issues", "deliverables",
-                                                             "qa_pending", "features", "promises", "decisions",
-                                                             "docs", "standing", "reconcile", "last_report_at")
-                                                             if (old.get(k) or None) != (st.get(k) or None))  # [] = missing
+        other_fields = ("lead", "prefs", "questions", "plan_approved", "envs", "repo", "goal", "issues",
+                        "deliverables", "qa_pending", "features", "promises", "decisions", "docs", "standing",
+                        "reconcile", "last_report_at")
+        summary["vs_current"]["other"] = sorted(
+            k for k in other_fields
+            if (old.get(k) or None) != (st.get(k) or None) and
+            not (k == "prefs" and all(pref(old, name) == pref(st, name) for name in PREFS)))
         lost = sum(len(old.get(k, {})) for k in ("threads", "tasks", "requests"))
         kept = sum(len(st[k]) for k in ("threads", "tasks", "requests"))
         if a.apply and lost and kept < lost / 2 and not a.force:
@@ -12933,11 +13128,11 @@ def cmd_rebuild(a):
         previous_threads = old.get("threads", {}) if isinstance(old.get("threads"), dict) else {}
         for name, previous in previous_threads.items():
             if isinstance(previous, dict) and previous.get("status") == "archived" and name not in st["threads"]:
-                restored = _blank_thread(st, name, previous.get("kind", "rc"))
+                restored = new_thread(st, name, previous.get("kind", "rc"))
                 restored.update({k: previous[k] for k in ("session_id", "sessions", "status") if k in previous})
                 st["threads"][name] = restored
                 notes.append(f"{name}: retained archived session history from state.json")
-        preview.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+        preview.write_text(json.dumps(stored(st), ensure_ascii=False, indent=2), encoding="utf-8")
     if a.apply:
         if cur.exists():
             stamp = now()[:19].replace(':', '')
@@ -13268,7 +13463,7 @@ def cmd_context(a):
                 continue
         sid = event.get("session_id") if isinstance(event, dict) else None
         host_key = hashlib.sha256(socket.gethostname().encode()).hexdigest()[:8]
-        st.setdefault("versions", {})[host_key] = {"version": label, "at": now()}
+        st["versions"][host_key] = {"version": label, "at": now()}
         save(d, st, {"ev": "session-start-version"})
         if sid and not st.get("write_lock"):  # H9: which version each session started on
             with (d / "session-versions.jsonl").open("a", encoding="utf-8") as f:
@@ -13292,7 +13487,7 @@ def cmd_context(a):
                 mandatory=_compact_block(d,st,seat,int(compact.get("count",1)),qid,_compact_quiz_text(d,st,seat,qid),sid)
     except Exception:
         mandatory=""
-    text = mandatory + "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\nteamwork version: " + label + (f"\nnewer release {newer} available (rollback in effect?)" + (f": {newer_note}" if newer_note else "") if newer else "") + (f"\nThis project tests unreleased teamwork: read {st['prefs']['skill_edge']}/SKILL.md and run {st['prefs']['skill_edge']}/scripts/tw.py instead of the installed copy (staged rollout; the rest of the computer stays on the release)." if st.get("prefs", {}).get("skill_edge") else "") + "\n\n" + (f"Lead: permissions: {pw}\n\n" if pw else "") + reminder + language_rule(st) + "\n\n" + (unreported_note(st) if not in_worktree else
+    text = mandatory + "This folder is a teamwork project (skill: /teamwork). Board below; source of truth is .teamwork/state.json, " "changed only by the lead through tw.py.\n\nteamwork version: " + label + (f"\nnewer release {newer} available (rollback in effect?)" + (f": {newer_note}" if newer_note else "") if newer else "") + (f"\nThis project tests unreleased teamwork: read {st['prefs']['skill_edge']}/SKILL.md and run {st['prefs']['skill_edge']}/scripts/tw.py instead of the installed copy (staged rollout; the rest of the computer stays on the release)." if pref(st, 'skill_edge') else "") + "\n\n" + (f"Lead: permissions: {pw}\n\n" if pw else "") + reminder + language_rule(st) + "\n\n" + (unreported_note(st) if not in_worktree else
     "The board below is the lead's view: its requests, questions and commands are the lead's to act on, not yours. "
     "Read it for the roster, your tasks and the known issues.\n\n") + render_board(
         st
@@ -13399,9 +13594,8 @@ def _run_check(st, test, cwd, env, log, worktree_root=None):
             process.wait()
             if process.stdout: process.stdout.close()
 
-    prefs = st.get("prefs", {})
-    total_limit = _positive_timeout(prefs.get("check_timeout_minutes", 60), 60)
-    shards = str(prefs.get("check_shards") or "").strip()
+    total_limit = _positive_timeout(pref(st, "check_timeout_minutes"), 60)
+    shards = str(pref(st, "check_shards") or "").strip()
     if not shards:
         pr = subprocess.Popen(test, shell=True, cwd=str(cwd), stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
                               stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
@@ -13426,8 +13620,8 @@ def _run_check(st, test, cwd, env, log, worktree_root=None):
     paths = sorted(glob.glob(shards, root_dir=str(cwd)))
     paths = [str(Path(path)) for path in paths if (Path(cwd) / path).is_file()]
     try:
-        jobs = max(1, int(prefs.get("check_jobs", 4)))
-        shard_limit = _positive_timeout(prefs.get("check_shard_timeout_minutes", 20), 20) * 60
+        jobs = max(1, int(pref(st, "check_jobs")))
+        shard_limit = _positive_timeout(pref(st, "check_shard_timeout_minutes"), 20) * 60
     except (TypeError, ValueError):
         jobs, shard_limit = 4, 1200.0
     if not paths:
@@ -13516,7 +13710,7 @@ def _run_check(st, test, cwd, env, log, worktree_root=None):
         except OSError: pass
     result = {"checks": "pass" if not failed and not timed_out else "fail", "check_shards": state,
               "check_output": "\n".join(outputs_text)[-20000:]}
-    errors = [lab(st, "merge_shard_timeout", group=name, minutes=prefs.get("check_shard_timeout_minutes", 20))
+    errors = [lab(st, "merge_shard_timeout", group=name, minutes=pref(st, "check_shard_timeout_minutes"))
               for name in timed_out]
     errors.extend(lab(st, "merge_shard_failed", group=name) for name in failed)
     if errors:
@@ -13546,7 +13740,7 @@ def cmd_merge(a):
         if not a.no_test.strip():
             sys.exit("--no-test needs the reason (\"docs only\")")
     else:
-        test = str(a.test if a.test is not None else st.get("prefs", {}).get("check_cmd") or "")
+        test = str(a.test if a.test is not None else pref(st, 'check_cmd') or "")
     if not test.strip() and a.no_test is None:
         sys.exit("no check to run: pass --test \"<command>\", set prefs check_cmd=\"<command>\", or --no-test "
                  "\"<why>\" for a change with nothing to test")
@@ -13764,7 +13958,7 @@ def cmd_merge(a):
                     feature["where"] = list(dict.fromkeys(_where_paths(feature.get("where")) + ev["files"] + [f"commit {sha[:9]}"]))
             st.setdefault("qa_pending", []).append({"branch": a.branch, "sha": sha, "base": base, "to": new,
                                                     "at": now()})
-            if a.apply and "merge" in st.get("prefs", {}).get("standing_grants", []):
+            if a.apply and "merge" in pref(st, 'standing_grants'):
                 owner = next((n for n in st.get("threads", {}) if branch_of(st, n) == a.branch), None)
                 task = next((n for n, x in st.get("tasks", {}).items()
                              if owner and x.get("owner") == owner and x.get("status") in ("review", "landing", "dispatched")), None)
@@ -14298,7 +14492,7 @@ def _sensitive_policy():
         except (OSError, ValueError, UnicodeError, RecursionError):
             continue
         if isinstance(raw, dict) and isinstance(raw.get("prefs"), dict):
-            return raw if raw["prefs"].get("perm_policy") == "managed-sensitive" else None
+            return raw if pref(raw, 'perm_policy') == "managed-sensitive" else None
     return None
 
 
@@ -14306,6 +14500,7 @@ def cmd_bash_guard(a):
     """PreToolUse hook: read the tool call on stdin, print a decision only for big decisions. Never fails: odd input
     or an internal error prints nothing, so ordinary work is never blocked by the guard itself. Guard changes must
     run scripts/guard_corpus_run.py and BashGuard tests; add newly found bypasses to the corpus first."""
+    ev = {}
     try:
         if a.command is not None:
             cmd = a.command
@@ -14483,7 +14678,7 @@ def cmd_archive_guard(a, event=None):
         for team in projects:
             try:
                 st=load(team)
-                if not isinstance(st.get("lead"),dict) or not isinstance(st.get("threads"),dict):
+                if not _has_required_ledger_keys(st):
                     raise ValueError("state.json missing lead/threads structure")
                 states.append((team,st))
             except (OSError,ValueError,UnicodeError,TypeError) as exc:
@@ -14721,6 +14916,7 @@ def main():
     x.add_argument("--pending-real", action="store_true")
     x.add_argument("--how")
     x.add_argument("--evidence")
+    x.add_argument("--test", help="task verify: test file or file::Class.method using fixtures")
     x.add_argument("--sha")
     x.add_argument("--why")
     x.add_argument("--by", help="who performed task verify (default: lead)")
@@ -14865,8 +15061,8 @@ def main():
         f=cmd_open
     )
     x = s.add_parser(
-        "prefs", help="show or set coordination prefs: --set key=value ...; quota thresholds: "
-        + ", ".join(f"{k}={v}" for k, v in QUOTA_DEFAULTS.items())
+        "prefs", help="show or set coordination prefs: --set key=value ...; registered preferences: "
+        + ", ".join(f"{k}={v['default']}" for k, v in PREFS.items())
     )
     x.add_argument("--set", nargs="*")
     x.add_argument("--grant-use", choices=["archive", "schedule"]); x.add_argument("--what")
@@ -15006,6 +15202,8 @@ def main():
     x = s.add_parser("worktree", help="create an rc thread's git worktree + branch if missing (run before create_session)")
     x.add_argument("thread")
     x.add_argument("--dry-run", action="store_true")
+    x.add_argument("--clear-tmp", nargs="*", metavar="NAME", help="empty the thread's .teamwork/private/<thread>/tmp "
+                   "(or only these entries) without rm -r; no confirmation needed (R84)")
     x.set_defaults(f=cmd_worktree)
     x = s.add_parser("projects", help="portfolio view of all projects under --root")
     x.add_argument("--root", default="."); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_projects)

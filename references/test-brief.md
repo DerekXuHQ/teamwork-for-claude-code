@@ -2,6 +2,8 @@
 
 Use this template for test work. The primary outcome is the first acceptance check.
 
+For Teamwork CLI changes, use `python3 scripts/test_tw.py` for the suite or `python3 scripts/test_tw.py <Class>` for one class.
+
 ## 1. Primary outcome check (real run)
 
 - **Entry point:** exact command, URL, app launch path, or device steps used by a user.

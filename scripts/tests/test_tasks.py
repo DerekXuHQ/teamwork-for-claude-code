@@ -743,6 +743,65 @@ class PrimaryOutcome(TwCase):
         in_project.write_text("{}", encoding="utf-8")
         self.assertTrue(tw._primary_suspect(random_project, "Open the artifact", str(in_project)))
 
+    def fixture_done(self, source, test_id="scripts/tests/primary_fixture_probe.py::Probe.test_reads"):
+        self.add()
+        self.tw("prefs", "--set", "fixtures_dir=scripts/fixtures")
+        self.working()
+        test_file = self.dir / "scripts/tests/primary_fixture_probe.py"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_text("class Probe:\n" + source, encoding="utf-8")
+        return self.tw("task", "verify", "T1", "--seen", "--how", "Open the real artifact",
+                       "--evidence", "output shows 12 records", "--test", test_id)
+
+    def done_after_verify(self):
+        return self.tw("task", "set", "T1", "--status", "done", "--skip-review", "focused gate test",
+                       "--user-said", "skip review for this focused gate test", ok=False)
+
+    def test_fixtures_gate_blocks_done_when_test_reads_no_fixture(self):
+        self.fixture_done("    def test_reads(self):\n        assert True\n")
+        result = self.done_after_verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("done needs", result.stderr)
+
+    def test_fixtures_gate_passes_when_test_reads_fixture_dir_or_sample(self):
+        self.fixture_done("    def test_reads(self):\n        from fixtures.regenerate import sample\n        sample('t80_compaction.jsonl')\n")
+        result = self.done_after_verify()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_fixtures_gate_ignores_comments_and_strings(self):
+        self.fixture_done("    def test_reads(self):\n        # sample('fake.jsonl')\n        note = 'place(\\\"fake\\\") fixtures_dir'\n        assert note\n")
+        result = self.done_after_verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("reads", result.stderr)
+
+    def test_fixtures_gate_rejects_empty_selector(self):
+        result = self.fixture_done("    def test_reads(self):\n        assert True\n",
+                                   "scripts/tests/primary_fixture_probe.py::")
+        result = self.done_after_verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("selector after :: must not be empty", result.stderr)
+
+    def test_fixtures_gate_off_when_pref_empty(self):
+        self.fixture_done("    def test_reads(self):\n        assert True\n")
+        self.tw("prefs", "--set", "fixtures_dir=")
+        self.assertEqual(self.done_after_verify().returncode, 0)
+
+    def test_fixtures_gate_skips_exempt_and_legacy(self):
+        from unittest.mock import Mock
+        st = self.state()
+        st["prefs"]["fixtures_dir"] = "scripts/fixtures"
+        task = {"primary": "visible result", "primary_exempt": True}
+        self.assertIsNone(tw.fixtures_gate(st, "T1", {}, task, {"status_to": "done"}, Mock(), ""))
+        task = {"primary": "visible result", "primary_legacy": True}
+        self.assertIsNone(tw.fixtures_gate(st, "T1", {}, task, {"status_to": "done"}, Mock(), ""))
+
+    def test_evidence_under_fixtures_dir_is_not_suspect(self):
+        self.tw("prefs", "--set", "fixtures_dir=scripts/fixtures")
+        fixture = self.dir / "scripts/fixtures/fixture-output.json"
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text("{}", encoding="utf-8")
+        self.assertFalse(tw._primary_suspect(self.dir / ".teamwork", "Open the output", str(fixture)))
+
     def setUp(self):
         super().setUp()
         self.tw("prefs", "--set", "require_primary=true")

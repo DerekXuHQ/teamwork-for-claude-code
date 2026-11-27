@@ -1,7 +1,13 @@
 try:
     from ._base import *
 except ImportError:
+    # Match _base.py's location-based import setup when this shard runs as a file.
+    from pathlib import Path
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from _base import *
+
+import ast
 
 
 class SessionVersions(TwCase):
@@ -27,6 +33,140 @@ class SessionVersions(TwCase):
         self.tw("prefs", "--set", "skill_edge=/tmp/x")
         self.assertIn("tests unreleased teamwork", self.context())
         self.assertEqual(self.run_context("garbage").returncode, 0)
+
+
+class TestTwEntry(TwCase):
+    def test_unittest_and_named_class_entries_load_tests(self):
+        import importlib
+        from scripts.tests import _runner, test_tasks
+        def test_ids(suite):
+            ids = set()
+            for test in suite:
+                if isinstance(test, unittest.TestSuite):
+                    ids.update(test_ids(test))
+                else:
+                    ids.add(test.id())
+            return ids
+
+        entry = importlib.import_module("scripts.test_tw")
+        all_suite = entry.load_tests(unittest.defaultTestLoader, unittest.TestSuite(), None)
+        runner_ids = set()
+        for path in _runner.FILES:
+            module = importlib.import_module("scripts.tests." + path.stem)
+            runner_ids.update(test_ids(unittest.defaultTestLoader.loadTestsFromModule(module)))
+        all_ids = test_ids(all_suite)
+        self.assertGreater(len(all_ids), 0)
+        self.assertEqual(all_ids, runner_ids)
+
+        selected = entry._suite_for_selectors(["PrimaryOutcome"])
+        expected = unittest.TestLoader().loadTestsFromName("PrimaryOutcome", test_tasks)
+        selected_ids = test_ids(selected)
+        expected_ids = test_ids(expected)
+        self.assertGreater(len(selected_ids), 0)
+        self.assertEqual(selected_ids, expected_ids)
+
+
+class PreferencesState(TwCase):
+    def test_prefs_table_is_the_only_default(self):
+        tree = ast.parse((SCRIPTS / "tw.py").read_text(encoding="utf-8"))
+        keys = set(tw.PREFS)
+        duplicate_defaults = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute) or node.func.attr != "get":
+                continue
+            if len(node.args) != 2 or not isinstance(node.args[0], ast.Constant) or node.args[0].value not in keys:
+                continue
+            receiver = node.func.value
+            direct_prefs = (isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Attribute)
+                            and receiver.func.attr == "get" and receiver.args
+                            and isinstance(receiver.args[0], ast.Constant) and receiver.args[0].value == "prefs")
+            prefs_name = isinstance(receiver, ast.Name) and receiver.id == "prefs"
+            prefs_subscript = (isinstance(receiver, ast.Subscript) and isinstance(receiver.slice, ast.Constant)
+                               and receiver.slice.value == "prefs")
+            if direct_prefs or prefs_name or prefs_subscript:
+                duplicate_defaults.append((node.lineno, node.args[0].value))
+        self.assertEqual(duplicate_defaults, [])
+
+    def test_state_deepcopy_preserves_origin_metadata(self):
+        import copy
+        state = tw._new_state("sample", "", "2026-11-26T00:00:00+00:00", None, "/tmp/sample", "main", "SAMP")
+        cloned = copy.deepcopy(state)
+        self.assertEqual(cloned.origin, state.origin)
+        self.assertIsNot(cloned.origin, state.origin)
+
+    def test_init_and_blank_state_have_same_keys(self):
+        init_state = tw._new_state("sample", "", "2026-11-26T00:00:00+00:00", None, "/tmp/sample", "main", "SAMP")
+        blank_state = tw._new_state("sample", repo_path=str(self.dir), short_name=tw.default_short("sample"))  # rebuild's start state
+        self.assertEqual(set(init_state), set(blank_state))
+        self.assertEqual(set(init_state["prefs"]), set(blank_state["prefs"]))
+        self.assertEqual(init_state["prefs"]["short_name"], "SAMP")
+        for key in ("grant_uses", "roster_version", "lead_trials", "lead_first_message"):
+            self.assertNotIn(key, tw.DEFAULT_STATE)
+
+    def test_old_ledger_missing_prefs_reads_defaults(self):
+        fixture = json.loads((FIXTURES / "old_ledger_prefs.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(fixture), 14)
+        state_path = self.dir / ".teamwork" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["prefs"] = fixture
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        before = state_path.read_bytes()
+        printed = json.loads(self.tw("prefs").stdout)
+        self.assertEqual(state_path.read_bytes(), before)
+        self.assertEqual(printed["gpt_model"], "legacy-model")
+        self.assertEqual(printed["policy_said"], fixture["policy_said"])
+        for key in ("check_shards", "fixtures_dir", "require_primary", "quota_burn_at"):
+            self.assertEqual(printed[key], tw.PREFS[key]["default"])
+        self.tw("prefs", "--set", "gpt_model=model-from-cli")
+        self.assertEqual(self.state()["prefs"]["gpt_model"], "model-from-cli")
+
+    def test_rebuild_preserves_only_old_default_prefs(self):
+        old = self.state()
+        old.pop("areas", None)
+        keep = ("checkin_minutes", "max_parallel", "require_review", "thread_permission_mode", "update_detail")
+        old["prefs"] = {key: tw.PREFS[key]["default"] for key in keep}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(old), encoding="utf-8")
+        (self.dir / ".teamwork" / "log.jsonl").write_text("", encoding="utf-8")
+        self.tw("rebuild")
+        persisted = json.loads((self.dir / ".teamwork" / "state.json.rebuilt").read_text(encoding="utf-8"))
+        self.assertEqual(set(persisted["prefs"]), set(keep) | {"short_name"})
+        self.assertNotIn("areas", persisted)
+        self.assertNotIn("check_shards", persisted["prefs"])
+
+    def test_unknown_pref_is_refused_with_suggestion(self):
+        result = self.tw("prefs", "--set", "stcuk_minutes=15", ok=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown preference 'stcuk_minutes'", result.stderr)
+        self.assertIn("closest is 'stuck_minutes'", result.stderr)
+
+    def test_weekly_and_model_log_follow_tw_now(self):
+        model_log = self.dir / ".teamwork" / "model-log.jsonl"
+        rows = [
+            {"type": "code", "model": "gpt", "result": "ok", "at": "2026-11-23T10:00:00-05:00"},
+            {"type": "code", "model": "fable", "result": "redo", "at": "2026-11-16T10:00:00-05:00"},
+        ]
+        model_log.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        self.env["TW_NOW"] = "2026-11-26T12:00:00-05:00"
+        this_week = self.tw("quota", "--weekly").stdout
+        self.assertIn("Fable used 0 times, GPT 1 times", this_week)
+        self.env["TW_NOW"] = "2026-11-19T12:00:00-05:00"
+        last_week = self.tw("quota", "--weekly").stdout
+        self.assertIn("Fable used 1 times, GPT 1 times", last_week)
+        model_log.write_text(json.dumps({"type": "docs-zh", "model": "fable", "result": "redo",
+                                         "at": "2026-10-01T00:00:00-04:00"}) + "\n", encoding="utf-8")
+        self.env["TW_NOW"] = "2026-11-19T12:00:00-05:00"
+        retry_old = json.loads(self.tw("model-log", "--summary", "--json").stdout)["combinations"][0]["retry"]
+        self.env["TW_NOW"] = "2026-10-15T12:00:00-04:00"
+        retry_recent = json.loads(self.tw("model-log", "--summary", "--json").stdout)["combinations"][0]["retry"]
+        self.assertTrue(retry_old)
+        self.assertFalse(retry_recent)
+
+    def test_prefs_help_lists_every_table_key(self):
+        result = subprocess.run([sys.executable, str(TW), "--help"], cwd=self.dir,
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for key in tw.PREFS:
+            self.assertIn(key + "=", result.stdout)
 
 class OpeningAndSelfcheck(TwCase):
     def test_title_with_goal(self):
@@ -1151,6 +1291,38 @@ class LabelsBothLanguages(unittest.TestCase):
         en, zh = set(twmod.LABELS["en"]), set(twmod.LABELS["zh"])
         self.assertEqual(sorted(zh - en), []); self.assertEqual(sorted(en - zh), [])
 
+class LedgerCopyBoundary(TwCase):
+    """A smoke copy of a ledger must never pull in private/ or nested scratch copies (disk-fill incident)."""
+    def test_copy_skips_private_and_tmp_and_caps_size(self):
+        sys.path.insert(0, str(TW.parent))
+        import importlib
+        lc = importlib.import_module("fixtures.ledger_copy")
+        src = self.dir / "proj" / ".teamwork"
+        (src / "tasks").mkdir(parents=True)
+        (src / "state.json").write_text("{}", encoding="utf-8")
+        (src / "log.jsonl").write_text("", encoding="utf-8")
+        (src / "tasks" / "T1.md").write_text("x", encoding="utf-8")
+        (src / "tasks" / "tmp").mkdir()
+        (src / "tasks" / "tmp" / "big.bin").write_bytes(b"0" * 10)
+        (src / "tasks" / "private").mkdir()
+        (src / "tasks" / "private" / "x").write_text("secret", encoding="utf-8")
+        nested = src / "private" / "slim" / "tmp" / "smoke-copy" / ".teamwork"
+        nested.mkdir(parents=True)
+        (nested / "state.json").write_text("{}", encoding="utf-8")
+        dst = src / "private" / "slim" / "tmp" / "smoke-new" / ".teamwork"
+        outside = self.dir / "outside"; (outside / "x").mkdir(parents=True)
+        (outside / "x" / "secret.txt").write_text("s", encoding="utf-8")
+        (src / "snapshots").symlink_to(outside)
+        (src / "tasks" / "link.md").symlink_to(outside / "x" / "secret.txt")
+        lc.copy_ledger(src, dst)
+        copied = sorted(str(p.relative_to(dst)) for p in dst.rglob("*") if p.is_file())
+        self.assertEqual(copied, ["log.jsonl", "state.json", "tasks/T1.md"])
+        (src / "state.json").write_bytes(b"0" * (2 * 1024 * 1024))
+        with self.assertRaises(SystemExit):
+            lc.copy_ledger(src, self.dir / "capped", max_mb=1)
+        self.assertFalse((self.dir / "capped").exists())
+
+
 class SyntheticFixtureBoundary(TwCase):
     def test_primary_outcome_tests_do_not_use_synthetic_bridge(self):
         import inspect
@@ -1158,9 +1330,14 @@ class SyntheticFixtureBoundary(TwCase):
         import sys
         sys.path.insert(0, str(TW.parent))
         fixtures = importlib.import_module("fixtures.regenerate")
-        SeatSwapFlow = importlib.import_module("test_seat").SeatSwapFlow
-        T80Compact = importlib.import_module("test_screen").T80Compact
-        RootCauseSmokeTest = importlib.import_module("test_root").RootCauseSmokeTest
+        try:
+            SeatSwapFlow = importlib.import_module("scripts.tests.test_seat").SeatSwapFlow
+            T80Compact = importlib.import_module("scripts.tests.test_screen").T80Compact
+            RootCauseSmokeTest = importlib.import_module("scripts.tests.test_root").RootCauseSmokeTest
+        except ModuleNotFoundError:
+            SeatSwapFlow = importlib.import_module("test_seat").SeatSwapFlow
+            T80Compact = importlib.import_module("test_screen").T80Compact
+            RootCauseSmokeTest = importlib.import_module("test_root").RootCauseSmokeTest
         primary_sources = (
             inspect.getsource(SeatSwapFlow),
             inspect.getsource(T80Compact.test_00_compact_hook_quiz_sweep_and_board),
@@ -1172,6 +1349,8 @@ class SyntheticFixtureBoundary(TwCase):
             self.assertNotIn('"isCompactSummary"', source)
             self.assertNotIn('"tool_result"', source)
         self.assertTrue(fixtures.sample("t80_compaction.jsonl"))
+        for source in primary_sources[:2]:
+            self.assertRegex(source, r"\b(?:sample|place)\s*\(")
 
 
 if __name__ == "__main__":

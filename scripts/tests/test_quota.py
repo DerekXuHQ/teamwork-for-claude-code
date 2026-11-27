@@ -274,6 +274,133 @@ class QuotaTrigger(TwCase):
         self.tw("task", "set", "T1", "--status", "blocked")
         self.assertEqual(json.loads(self.tw("wrapup", "--json").stdout)["quota_trigger"], "off")
 
+    def test_create_hint_until_a_timer_is_recorded(self):
+        """T85: work running and no timer recorded -> one copyable create line in ready, wrapup and SessionStart."""
+        cfg = self.dir / "acct-a"; cfg.mkdir(); self.env["CLAUDE_CONFIG_DIR"] = str(cfg)
+        self.tw("prefs", "--set", "language=en"); self.tw("lead", "--session", "lead-session")
+        self.assertNotIn("quota_trigger", json.loads(self.tw("ready").stdout))  # idle: nothing to create
+        self.tw("thread", "add", "ui", "--session", "s-ui", "--status", "working")
+        self.tw("task", "add", "T1", "--title", "page", "--owner", "ui"); self.tw("task", "set", "T1", "--status", "dispatched")
+        r = self.tw("ready")
+        self.assertEqual(json.loads(r.stdout)["quota_trigger"], "create")
+        line = next(x for x in r.stderr.splitlines() if x.startswith("Create the hourly quota timer"))
+        for part in (f"CLAUDE_CONFIG_DIR={cfg}", f"-C {self.dir} quota --due", f"--config-dir {cfg}",
+                     'name="demo hourly quota"', "prefs --set quota_trigger_id=<trig_...> quota_trigger_on=true"):
+            self.assertIn(part, line)
+        self.assertEqual(json.loads(self.tw("wrapup", "--json").stdout)["quota_trigger"], "create")
+        self.assertIn(line, self.context())
+        self.tw("prefs", "--set", "quota_trigger_id=trig_1", "quota_trigger_on=true")
+        self.assertNotIn("quota_trigger", json.loads(self.tw("ready").stdout))
+        self.assertNotIn("Create the hourly quota timer", self.context())
+
+    def test_sendable_only_gives_the_same_line_everywhere(self):
+        """Approved work about to go out, nothing running, no lead session: ready, wrapup and SessionStart agree."""
+        self.tw("prefs", "--set", "language=en")
+        self.tw("thread", "add", "ui", "--session", "s-ui"); self.tw("task", "add", "T1", "--title", "page", "--owner", "ui")
+        self.tw("plan", "approve", "--user-said", "approved")
+        line = next(x for x in self.tw("ready").stderr.splitlines() if x.startswith("Create the hourly quota timer"))
+        self.assertIn(line, self.tw("wrapup").stdout)
+        self.assertIn(line, self.context())
+        self.tw("prefs", "--set", "quota_trigger_id=trig_1")
+        self.assertNotIn("Turn the quota timer off", self.context())
+
+    def test_desktop_samples_read_an_account_without_events(self):
+        """T85: local sessions log no usage events; the desktop app's per-organization samples give the total."""
+        cfg = self.dir / "acct-a"; cfg.mkdir()
+        (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-a"}}))
+        now = 2_000_000_000
+        samples = self.dir / "plan-usage-history.json"
+        samples.write_text(json.dumps({"version": 2, "samples": [
+            {"t": (now - 7200) * 1000, "org": "org-a", "u": {"sd": 71}}, {"t": (now - 600) * 1000, "org": "org-a", "u": {"sd": 77}},
+            {"t": (now - 60) * 1000, "org": "org-b", "u": {"sd": 99}}, {"t": "bad", "org": "org-a", "u": {"sd": 100}}]}))
+        with mock.patch.dict(os.environ, {"TW_DESKTOP_USAGE": str(samples)}):
+            r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)
+            self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["src"]), (77, "desktop"))
+            self.assertNotIn("scoped", r["claude"])  # no events at all: Fable unknown, not 0%
+            self.assertEqual(quota.tier(r, {}, now)[0], "burn-fable")
+            stale = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now + 7 * 3600)
+            self.assertEqual(quota.tier(stale, {}, now + 7 * 3600)[0], "unknown")
+            (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-a"},
+                "cachedUsageUtilization": {"fetchedAtMs": (now - 36000) * 1000,
+                                           "utilization": {"seven_day": {"utilization": 20, "resets_at": now + 86400}}}}))
+            r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)  # a stale cache must not hide fresh samples
+            self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["src"]), (77, "desktop"))
+            samples.write_text(json.dumps({"samples": [{"t": now * 1000, "org": "org-a", "u": {"sd": 5000}}]}))
+            self.assertEqual(quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)["claude"]["total"]["src"], "cache")
+            samples.write_text("{bad")
+            self.assertEqual(quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)["claude"]["total"]["src"], "cache")
+            (cfg / "bridge-transcript-cse_old.jsonl").write_text(json.dumps({"timestamp": now - 30 * 3600,
+                "rate_limit_info": {"unifiedWindows": {"seven_day": {"utilization": 0.404, "resetsAt": now + 3 * 86400}}}}) + "\n")
+            (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-a"},
+                "cachedUsageUtilization": {"fetchedAtMs": (now - 3600) * 1000,
+                                           "utilization": {"seven_day": {"utilization": 40, "resets_at": now + 3 * 86400}}}}))
+            samples.write_text(json.dumps({"samples": [{"t": (now - 5 * 3600) * 1000, "org": "org-a", "u": {"sd": 38}}]}))
+            r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)  # stale event: the fresh cache wins
+            self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["src"]), (40, "cache"))
+            self.assertEqual(quota.tier(r, {}, now)[0], "normal")
+            samples.write_text(json.dumps({"samples": [{"t": (now - 60) * 1000, "org": "org-a", "u": {"sd": 92}}]}))
+            r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)  # a newer desktop sample beats older live ones
+            self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["src"]), (92, "desktop"))
+            self.assertEqual(quota.tier(r, {}, now)[0], "lead-only")
+
+    def test_newer_desktop_sample_keeps_the_window_reset_and_fable_inference(self):
+        """A desktop sample has no reset time: it updates the percentage only, so pre-reset-burn and the inferred 0% stay."""
+        cfg = self.dir / "acct-b"; cfg.mkdir(); now = 2_000_000_000
+        (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-b"}}))
+        (cfg / "bridge-transcript-cse_x.jsonl").write_text(json.dumps({"timestamp": now - 600,
+            "rate_limit_info": {"unifiedWindows": {"seven_day": {"utilization": 0.40, "resetsAt": now + 20 * 3600}}}}) + "\n")
+        samples = self.dir / "samples.json"
+        samples.write_text(json.dumps({"samples": [{"t": (now - 60) * 1000, "org": "org-b", "u": {"sd": 41}}]}))
+        with mock.patch.dict(os.environ, {"TW_DESKTOP_USAGE": str(samples)}):
+            r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)
+        total = r["claude"]["total"]
+        self.assertEqual((total["pct"], total["src"], total["resets_at"]), (41, "desktop", now + 20 * 3600))
+        self.assertEqual(r["claude"]["scoped"]["src"], "inferred")
+        self.assertEqual(quota.tier(r, {}, now)[0], "pre-reset-burn")
+
+    def test_tier_does_not_flip_as_timed_readings_age_behind_a_fresh_sample(self):
+        """Round 5: a stale cache or event still names the window (and its Fable) while the desktop gives the newer total."""
+        cfg = self.dir / "acct-c"; cfg.mkdir(); now = 2_000_000_000
+        samples = self.dir / "samples.json"
+        samples.write_text(json.dumps({"samples": [{"t": (now - 3600) * 1000, "org": "org-c", "u": {"sd": 41}}]}))
+        with mock.patch.dict(os.environ, {"TW_DESKTOP_USAGE": str(samples)}):
+            for age in (5, 7):
+                (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-c"},
+                    "cachedUsageUtilization": {"fetchedAtMs": (now - age * 3600) * 1000,
+                        "utilization": {"seven_day": {"utilization": 40, "resets_at": now + 20 * 3600},
+                            "limits": [{"kind": "weekly_scoped", "percent": 10, "resets_at": now + 20 * 3600,
+                                        "scope": {"model": {"display_name": "Fable"}}}]}}}))
+                r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)
+                self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["resets_at"]), (41, now + 20 * 3600))
+                self.assertEqual(quota.tier(r, {}, now)[0], "pre-reset-burn", age)
+            (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-c"}}))
+            for age in (23, 25):
+                (cfg / "bridge-transcript-cse_x.jsonl").write_text(json.dumps({"timestamp": now - age * 3600,
+                    "rate_limit_info": {"unifiedWindows": {"seven_day": {"utilization": 0.40, "resetsAt": now + 20 * 3600}}}}) + "\n")
+                self.assertEqual(quota.tier(quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now), {}, now)[0],
+                                 "pre-reset-burn", age)
+
+    def test_same_window_across_a_three_hour_boundary(self):
+        """Resets less than 3 hours apart are one window, wherever they fall: the higher reading wins."""
+        cfg = self.dir / "acct-b"; cfg.mkdir()
+        now, reset = 2_000_000_000, 2_000_008_000 // 10800 * 10800 + 10800
+        (cfg / "bridge-transcript-cse_x.jsonl").write_text(json.dumps({"timestamp": now - 60,
+            "rate_limit_info": {"unifiedWindows": {"seven_day": {"utilization": 0.95, "resetsAt": reset - 1}}}}) + "\n")
+        (cfg / ".claude.json").write_text(json.dumps({"cachedUsageUtilization": {"fetchedAtMs": (now - 600) * 1000,
+            "utilization": {"seven_day": {"utilization": 50, "resets_at": reset}}}}))
+        with mock.patch.dict(os.environ, {"TW_DESKTOP_USAGE": str(self.dir / "none.json")}):
+            self.assertEqual(quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)["claude"]["total"]["pct"], 95)
+
+    def test_older_ledger_missing_default_keys_still_runs_ready(self):
+        """T85: a ledger written before some keys existed (here: decisions) must not crash a due default."""
+        state = json.loads((self.dir / ".teamwork" / "state.json").read_text())
+        for key in ("decisions", "notices", "features"):
+            state.pop(key, None)
+        state["questions"] = [{"from": "ui", "text": "Which colour?", "t": "2000-01-01T00:00:00+00:00", "default_action": "blue"}]
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state))
+        self.tw("ready")
+        self.assertEqual(json.loads((self.dir / ".teamwork" / "state.json").read_text())["decisions"][0]["what"], "blue")
+
     def test_zh_hint(self):
         self.tw("prefs", "--set", "language=zh"); self.tw("prefs", "--set", "quota_trigger_id=trig_1")
         self.assertIn("关掉额度定时", self.tw("ready").stderr)

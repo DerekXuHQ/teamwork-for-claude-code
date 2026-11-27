@@ -95,20 +95,53 @@ def _window(obj, reset_key, now, fraction=False, source="events", seen=None):
             "src": source}
 
 
+def _account_file(cfg):
+    """The config folder's state file (the default folder keeps it in $HOME), parsed, or None."""
+    candidates = [os.path.join(cfg, ".claude.json")]
+    if os.path.realpath(cfg) == os.path.realpath(os.path.expanduser("~/.claude")):
+        candidates.append(os.path.expanduser("~/.claude.json"))
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as stream:
+                data = _load(stream.read())
+        except OSError:
+            continue
+        if isinstance(data, dict) and (data.get("cachedUsageUtilization") or data.get("oauthAccount")):
+            return data
+    return None
+
+
+DESKTOP_USAGE = os.path.expanduser("~/Library/Application Support/Claude/plan-usage-history.json")
+
+
+def _desktop(config_dirs, now):
+    """T85: the desktop app's weekly-total samples, per organization; covers accounts with no remote-control session
+    (local sessions write no usage events). Total only, no reset time; older than 6 hours: shown, not used for the tier."""
+    try:
+        with open(os.environ.get("TW_DESKTOP_USAGE") or DESKTOP_USAGE, encoding="utf-8", errors="replace") as stream:
+            data = _load(stream.read())
+    except OSError:
+        return {}
+    samples = data.get("samples") if isinstance(data, dict) else None
+    if not isinstance(samples, list):
+        return {}
+    for cfg in config_dirs:
+        account = (_account_file(cfg) or {}).get("oauthAccount")
+        org = account.get("organizationUuid") if isinstance(account, dict) else None
+        rows = [(epoch(x.get("t")), num((x.get("u") or {}).get("sd"))) for x in samples
+                if isinstance(x, dict) and org and x.get("org") == org and isinstance(x.get("u"), dict)]
+        rows = [(min(t, now), v) for t, v in rows if t and v is not None and v <= 150 and t <= now + 60]  # sd: whole percents
+        if rows:
+            seen, pct = max(rows)
+            age = (now - seen) / 3600
+            return {"total": {"pct": pct, "resets_at": None, "seen_at": seen, "src": "desktop", "age_h": age,
+                              "stale": age > 6}}
+    return {}
+
+
 def _cache(config_dirs, now):
     for cfg in config_dirs:
-        candidates = [os.path.join(cfg, ".claude.json")]
-        if os.path.realpath(cfg) == os.path.realpath(os.path.expanduser("~/.claude")):
-            candidates.append(os.path.expanduser("~/.claude.json"))
-        data = None
-        for path in candidates:
-            try:
-                with open(path, encoding="utf-8", errors="replace") as stream:
-                    data = _load(stream.read())
-                if data is not None:
-                    break
-            except OSError:
-                continue
+        data = _account_file(cfg)
         cached = data.get("cachedUsageUtilization") if isinstance(data, dict) else None
         utilization = cached.get("utilization") if isinstance(cached, dict) else None
         if not isinstance(utilization, dict):
@@ -182,32 +215,42 @@ def _claude_events(config_dirs, now):
         if key in best:
             out[dest] = dict(best[key], **({"model": "Fable"} if dest == "scoped" else {}))
     cache = _cache(config_dirs, now)
-    for key in ("total", "scoped"):  # same window in both: usage only grows, so the higher reading is the newer
-        ev, ca = out.get(key), cache.get(key)
-        if ev and isinstance(ca, dict) and not ca.get("stale") and num(ca.get("pct")) is not None and \
-                num(ca.get("resets_at")) is not None and abs(ca["resets_at"] - ev["resets_at"]) < 3 * 3600 and \
-                ca["pct"] > ev["pct"]:
-            out[key] = dict(ca, **({"model": ev.get("model", "Fable")} if key == "scoped" else {}))
-            out.setdefault("notes", []).append(f"{key} from a newer cache")
-    for key in ("total", "scoped", "five_hour", "scoped_share_of_total_pct"):
+    for row in (out.get("total"), out.get("scoped")):  # a day-old event may be far below today's: not for the tier
+        if row and row.get("seen_at") and now - row["seen_at"] > 86400:
+            row["stale"] = True
+    desk = _desktop(config_dirs, now)  # T85: accounts with only local sessions log no events
+    for key in ("total", "scoped"):
+        rows = [r for r in (out.get(key), cache.get(key), desk.get(key)) if isinstance(r, dict) and num(r.get("pct")) is not None]
+        if not rows:
+            continue
+        live = [r for r in rows if not r.get("stale")]
+        timed = [r for r in live if num(r.get("resets_at")) is not None]
+        window = max((r["resets_at"] for r in rows if num(r.get("resets_at")) is not None), default=None)  # stale ones still name it
+        pick = None
+        if timed:  # the latest window (resets within 3 hours count as one), then the highest: usage only grows
+            last = max(r["resets_at"] for r in timed)
+            pick = max((r for r in timed if last - r["resets_at"] < 10800), key=lambda r: r["pct"])
+        for r in live:  # a reading with no reset time (desktop samples) is a newer percentage for the current window:
+            if num(r.get("resets_at")) is None and (pick is None or (r.get("seen_at") or 0) > (pick.get("seen_at") or 0)):
+                pick = dict(r, resets_at=pick["resets_at"] if pick else window)  # it keeps that window's reset time
+        if pick is None:  # nothing live: the newest reading, shown but not used for the tier
+            pick = max(rows, key=lambda r: r.get("seen_at") or 0)
+        model = (out.get(key) or {}).get("model")
+        out[key] = dict(pick, **({"model": model or pick.get("model") or "Fable"} if key == "scoped" else {}))
+        if pick.get("src") != "events" or pick.get("stale"):
+            age = pick.get("age_h") if pick.get("src") != "events" else (now - pick["seen_at"]) / 3600
+            where = {"desktop": "the desktop app", "cache": "cache"}.get(pick.get("src"), "events")
+            out.setdefault("notes", []).append(f"{key} from {where}" + (f", {age:.0f}h old" if age is not None else ", age unknown")
+                                               + (" (stale: not used for tier)" if pick.get("stale") else ""))
+    for key in ("five_hour", "scoped_share_of_total_pct"):
         if key not in out and key in cache:
             out[key] = cache[key]
-            if key in ("total", "scoped"):
-                age = cache[key].get("age_h")
-                out.setdefault("notes", []).append(f"{key} from cache" + (f", {age:.0f}h old" if age is not None else ", age unknown")
-                                                    + (" (stale: not used for tier)" if cache[key].get("stale") else ""))
     if out.get("scoped") and cache.get("scoped_model"):
         out["scoped"]["model"] = cache["scoped_model"]
-    if "total" in out and "scoped" not in out:
+    if "total" in out and "scoped" not in out and "seven_day" in best:  # only events can say Fable went unused
         out["scoped"] = {"pct": 0.0, "resets_at": out["total"]["resets_at"], "seen_at": None,
                          "src": "inferred", "model": cache.get("scoped_model") or "Fable"}
         out.setdefault("notes", []).append("scoped not seen this window: inferred 0%")
-    for key in ("total", "scoped"):
-        row = out.get(key)
-        if row and row.get("src") == "events" and row.get("seen_at") and now - row["seen_at"] > 86400:
-            row["stale"] = True  # a day-old reading may be far below today's: not used for the tier
-            out.setdefault("notes", []).append(f"{key} last seen {(now-row['seen_at'])/3600:.0f}h ago "
-                                               "(stale: not used for tier)")
     return out
 
 
@@ -276,7 +319,8 @@ def tier(result, prefs=None, now=None):
         return "lead-only", flags
     if total_pct >= threshold("quota_burn_at"):
         return ("save" if done else "burn-fable"), flags
-    if now is not None and num(total.get("resets_at")) is not None and scoped_pct is not None:
-        if (total["resets_at"] - now) / 3600 <= threshold("quota_pre_reset_hours") and scoped_pct < threshold("quota_pre_reset_fable_max"):
+    fable = scoped.get("pct")  # a stale Fable reading of an unexpired window still counts here, so the tier does not flip as it ages
+    if now is not None and num(total.get("resets_at")) is not None and num(fable) is not None:
+        if (total["resets_at"] - now) / 3600 <= threshold("quota_pre_reset_hours") and fable < threshold("quota_pre_reset_fable_max"):
             return "pre-reset-burn", flags
     return "normal", flags

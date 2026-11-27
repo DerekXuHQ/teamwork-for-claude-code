@@ -24,6 +24,7 @@ import functools
 import fnmatch
 import io
 import json
+import math
 import textwrap
 try:
     import fcntl
@@ -100,7 +101,7 @@ def _now_dt():
 
 
 PREFS = {
-    "max_parallel": {"default": 0, "min": 0, "unit": "threads"}, "task_existing_limit": {"default": 5},
+    "max_parallel": {"default": 0, "min": 0, "unit": "threads"}, "task_existing_limit": {"default": 5}, "feature_where_max": {"default": 5, "min": 1, "unit": "paths"},
     "propose_before_start": {"default": True},
     "update_detail": {"default": "brief", "values": ("brief", "full")}, "checkin_minutes": {"default": 10, "min": 0, "unit": "minutes"},
     "short_name": {"default": ""}, "require_review": {"default": True, "user_said_off": True},
@@ -376,7 +377,7 @@ LABELS = {
         "decided_question_source": "answered question {n}", "decided_decision_source": "decision {n}",
         "decided_memory_source": "MEMORY.md line {n}", "decided_state_source": "saved decision",
         "card_grant": "standing grant: merge used {n} times",
-        "board_as_of": "As of {time} ({date})", "possibly_stale": "possibly stale",
+        "board_as_of": "As of {time} ({date})", "possibly_stale": "possibly stale", "feature_needs_location": "Needs location",
         "nothing_changed": "nothing changed since {time}", "card_more": "+{n} more (TW card --all)",
         "features_done": "Features done", "features_not_done": "Features not done yet",
         "version_notice": "{n} sessions still on an older version: {sessions}; each switches after its current turn ends",
@@ -927,7 +928,7 @@ LABELS = {
         "archive_verified": "已核实并归档", "archive_verify_first": "先停手、按会话 ID 核实，再归档",
         "archive_restorable": "lead 可用平台工具恢复",
         "open_session_tests": "开会话的实测情况：已验证（iPhone 开局选自动、认可过的 lead 开出的线程）；按记录推断（网页上中途切换）；待测（手机中途切换、Android、手机上和桌面 lead 聊时开线程、线程是否挂在桌面 lead 下可折叠）",
-        "board_as_of": "截至 {time}（{date}）", "possibly_stale": "可能已过期",
+        "board_as_of": "截至 {time}（{date}）", "possibly_stale": "可能已过期", "feature_needs_location": "待补位置",
         "nothing_changed": "自 {time} 后没有变化", "card_more": "另有 {n} 项（TW card --all）",
         "features_done": "已完成的功能", "features_not_done": "尚未完成的功能",
         "version_notice": "还有 {n} 个会话使用旧版本：{sessions}；各会话当前轮结束后会切换",
@@ -1603,6 +1604,16 @@ def render_features(st):
             where = lab(st, "feature_where", paths=", ".join(paths)) if paths else ""
             out.append(f"- **{fid}** {_md(f['name'])} [{lab(st, 'feature_' + f['status'])}] — {', '.join(f.get('reqs') or []) or _md(f.get('source') or '-')}" + (f" {where}" if where else "") + (f" {moved}" if moved else ""))
     return "\n".join(out)
+
+
+def render_feature_needs_location(st):
+    unknown = [(fid, feature) for fid, feature in st.get("features", {}).items()
+               if feature.get("where_source") == "unknown" or
+               (feature.get("status") == "landed" and not _where_paths(feature.get("where")))]
+    if not unknown:
+        return None
+    return "\n".join([f"## {lab(st, 'feature_needs_location')}", "",
+                       *(f"- **{fid}** {_md(feature.get('name') or '')}" for fid, feature in unknown)])
 
 
 def _where_paths(value):
@@ -2336,6 +2347,9 @@ def render_board(st, all_threads=False):
     features = render_features(st)
     if features:
         out += [f"## {lab(st, 'features')}", "", features, ""]
+    needs_location = render_feature_needs_location(st)
+    if needs_location:
+        out += [needs_location, ""]
     remarks = [(r, q) for r, q in st.get("requests", {}).items() if q.get("status") == "remark"][-10:]
     if remarks: out += ["## " + lab(st, "remark_heading"), ""] + [f"- {r}: {_md(q['text'])}" for r, q in remarks] + [""]
     defaults = [x for x in st.get("decisions", []) if not x.get("answered") and not x.get("confirmed")]
@@ -5435,7 +5449,7 @@ def _json_or_text(a, data, lines):
 
 
 def _feature_history(repo):
-    log = subprocess.run(["git", "-C", str(repo), "log", "--all", "--format=@@%H%x09%s", "--name-only"],
+    log = subprocess.run(["git", "-C", str(repo), "log", "--all", "--format=@@%H%x09%B", "--numstat"],
                          capture_output=True, text=True)
     records = []
     current = None
@@ -5443,37 +5457,133 @@ def _feature_history(repo):
         for line in log.stdout.splitlines():
             if line.startswith("@@"):
                 if current: records.append(current)
-                current = {"subject": line[2:].split("\t", 1)[-1], "files": []}
+                header = line[2:].split("\t", 1)
+                current = {"sha": header[0], "message": header[1] if len(header) > 1 else "",
+                           "subject": "", "files": [], "line_counts": {}}
             elif current and line.strip():
-                current["files"].append(line.strip())
+                fields = line.split("\t", 2)
+                if len(fields) == 3 and fields[0].isdigit() and fields[1].isdigit():
+                    path = fields[2]
+                    current["files"].append(path)
+                    current["line_counts"][path] = current["line_counts"].get(path, 0) + int(fields[0]) + int(fields[1])
+                else:
+                    current["message"] += "\n" + line
         if current: records.append(current)
+    for record in records:
+        record["subject"] = next((line.strip() for line in record["message"].splitlines() if line.strip()), "")
     return records
 
 
+def _feature_where_limit(st):
+    try: return max(1, int(pref(st, "feature_where_max")))
+    except (TypeError, ValueError): return 5
+
+
+def _feature_where_excluded(path):
+    path = str(path).replace("\\", "/")
+    if path.startswith("./"): path = path[2:]
+    lower = path.casefold()
+    name = lower.rsplit("/", 1)[-1]
+    return (lower.startswith(".github/") or name.startswith(("readme", "license", "changelog")) or
+            lower.startswith(("docs/framework", "docs/field-tests/", "scripts/fixtures/", ".teamwork/")) or name == "board.md")
+
+
+def _filter_feature_where(repo, st, feature, candidates):
+    """Apply one exclusion, relevance ranking and limit to inferred or merge-added paths."""
+    terms = _tokens(str(feature.get("name") or ""))
+    files = {}
+    for candidate in candidates:
+        if isinstance(candidate, str): path, lines = candidate, 0
+        else: path, lines = candidate[0], int(candidate[1] or 0)
+        path = str(path).strip().replace("\\", "/")
+        if not path or path.startswith("commit ") or _feature_where_excluded(path): continue
+        files[path] = files.get(path, 0) + lines
+    ranked = []
+    for path, lines in files.items():
+        try: content = (Path(repo) / path).read_text(encoding="utf-8", errors="ignore").casefold()
+        except (OSError, ValueError): content = ""
+        match = any(_mentions(path.casefold(), term) or _mentions(content, term) for term in terms)
+        ranked.append((not match, -lines, path))
+    ranked.sort()
+    return [path for _, _, path in ranked[:_feature_where_limit(st)]]
+
+
+def _merge_feature_where(repo, st, feature, additions):
+    existing = _where_paths(feature.get("where"))
+    if feature.get("where_source") == "manual":
+        capacity = max(0, _feature_where_limit(st) - len(existing))
+        accepted = _filter_feature_where(repo, st, feature, additions)
+        return list(dict.fromkeys(existing + [path for path in accepted if path not in existing][:capacity]))
+    return _filter_feature_where(repo, st, feature, existing + additions)
+
+
+def _feature_numstat(repo, revision_range):
+    result = subprocess.run(["git", "-C", str(repo), "diff", "--numstat", revision_range],
+                            capture_output=True, text=True)
+    candidates = []
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            fields = line.split("\t", 2)
+            if len(fields) == 3:
+                candidates.append((fields[2], sum(int(value) for value in fields[:2] if value.isdigit())))
+    return candidates
+
+
 def _infer_feature_where(repo, st, feature, records, merge_events):
-    terms = [feature.get("id", ""), str(feature.get("name") or ""), *feature.get("tasks", [])]
-    terms += [tid for tid, task in st.get("tasks", {}).items()
-              if tid in (feature.get("tasks") or []) or any(_mentions(str(task.get("title") or ""), t) for t in (feature.get("tasks") or []))]
-    tokens = set(re.findall(r"[A-Za-z0-9_-]{3,}|[\u3400-\u9fff]{2,}", " ".join(map(str, terms))))
-    hits = []
-    task_ids = {str(x).lower() for x in feature.get("tasks", [])}
+    task_commits = []
+    task_ids = {str(x).upper() for x in feature.get("tasks", [])}
+    for request_id in feature.get("reqs", []):
+        request = st.get("requests", {}).get(request_id, {})
+        task_ids.update(str(x).upper() for x in request.get("tasks", []))
+    for event in merge_events:
+        event_tasks = {str(x).upper() for x in event.get("tasks", [])}
+        if event.get("ev") != "merge" or not task_ids & event_tasks: continue
+        # A range shared by several tasks cannot say which files are this feature's: leave it to the task-id grep.
+        if len(event_tasks) > 1: continue
+        if event.get("from") and event.get("to"):
+            task_commits.extend(_feature_numstat(repo, f"{event['from']}..{event['to']}"))
+        else:
+            task_commits.extend((path, 0) for path in event.get("files", []) if path)
+    inferred = _filter_feature_where(repo, st, feature, task_commits)
+    if inferred:
+        return inferred, "task-commits"
+
+    if task_ids:
+        exact_ids = "|".join(re.escape(tid) for tid in sorted(task_ids, key=len, reverse=True))
+        pattern = rf"(^|[^[:alnum:]_])({exact_ids})([^[:alnum:]_]|$)"
+        matched = subprocess.run(["git", "-C", str(repo), "log", "--all", "--extended-regexp",
+                                  f"--grep={pattern}", "--format=%H"], capture_output=True, text=True)
+        commit_ids = set(matched.stdout.splitlines()) if matched.returncode == 0 else set()
+        by_sha = {str(record.get("sha")): record for record in records}
+        task_grep = []
+        for sha in commit_ids:
+            record = by_sha.get(sha)
+            if not record: continue
+            counts = record.get("line_counts") or {}
+            task_grep.extend((path, counts.get(path, 0)) for path in record.get("files", []))
+        inferred = _filter_feature_where(repo, st, feature, task_grep)
+        if inferred:
+            return inferred, "task-grep"
+
+    raw_name = str(feature.get("name") or "").casefold()
+    title_terms = {word for word in _tokens(raw_name)
+                   if (word.isascii() and len(word) >= 3) or (not word.isascii() and len(word) == 2)}
+    title_terms -= _DECISION_ZH_STOP
+    title_terms -= {word for word in title_terms if word.isascii() and word in _STOP}
+    ranked = []
     for record in records:
-        subject = record["subject"]
-        tids = {x.lower() for x in re.findall(r"\bT\d+\b", subject, re.I)}
-        if feature.get("id", "").lower() in subject.lower() or task_ids & tids or any(_mentions(subject, t) for t in tokens if len(t) >= 4):
-            hits.extend(record["files"])
-    for event in reversed(merge_events):
-        if event.get("ev") == "merge" and set(event.get("tasks", [])) & set(feature.get("tasks", [])):
-            paths = event.get("files") or []
-            if not paths and event.get("from") and event.get("to"):
-                changed = subprocess.run(["git", "-C", str(repo), "diff", "--name-only",
-                                          str(event["from"]), str(event["to"])],
-                                         capture_output=True, text=True)
-                paths = changed.stdout.splitlines() if changed.returncode == 0 else []
-            hits.extend(path for path in paths if path)
-            commit = event.get("to") or event.get("sha")
-            if commit: hits.append(f"commit {str(commit)[:9]}")
-    return list(dict.fromkeys(hits))
+        subject = str(record.get("subject") or "").casefold()
+        hits = {word for word in title_terms if _mentions(subject, word)}
+        if len(hits) >= 2:
+            counts = record.get("line_counts") or {}
+            ranked.append((len(hits), [(path, counts.get(path, 0)) for path in record.get("files", [])]))
+    if ranked:
+        best = max(hits for hits, _ in ranked)
+        candidates = [candidate for hits, files in ranked if hits == best for candidate in files]
+        inferred = _filter_feature_where(repo, st, feature, candidates)
+        if inferred:
+            return inferred, "title-words"
+    return [], "unknown"
 
 
 def _landed_feature_where(d, st, fid, feature, explicit, evidence):
@@ -5484,7 +5594,7 @@ def _landed_feature_where(d, st, fid, feature, explicit, evidence):
     if existing:
         return existing
     repo = Path((st.get("repo") or {}).get("path") or d.parent).resolve()
-    inferred = _infer_feature_where(repo, st, {**feature, "id": fid}, _feature_history(repo), _read_log(d))
+    inferred, _ = _infer_feature_where(repo, st, {**feature, "id": fid}, _feature_history(repo), _read_log(d))
     if inferred:
         return inferred
     evidence_path = (evidence or "").strip()
@@ -5495,19 +5605,51 @@ def cmd_feature(a):
     d = need(find_dir()); st = load(d); rows = st.setdefault("features", {})
     if a.action == "backfill":
         repo = Path((st.get("repo") or {}).get("path") or d.parent).resolve()
-        missing = [(fid, f) for fid, f in rows.items() if f.get("status") == "landed" and not _where_paths(f.get("where"))]
-        records = _feature_history(repo)
+        recompute = bool(getattr(a, "recompute", False))
+        landed = [(fid, f) for fid, f in rows.items() if f.get("status") == "landed"]
         merge_events = _read_log(d)
+        legacy_values = {}
+        for event in merge_events:
+            if event.get("ev") == "feature-backfill":
+                for fid in event.get("features", []):
+                    legacy_values.pop(str(fid), None)
+                values = event.get("where_by_feature")
+                if isinstance(values, dict):
+                    legacy_values.update({str(fid): _where_paths(where) for fid, where in values.items()})
+        missing = [(fid, f) for fid, f in landed
+                   if not recompute and not _where_paths(f.get("where"))]
+        records = _feature_history(repo)
         changes = []
-        for fid, feature in missing:
-            where = _infer_feature_where(repo, st, {**feature, "id": fid}, records, merge_events)
-            changes.append({"id": fid, "where": where})
+        preview_rows = []
+        preview_targets = landed if recompute else missing
+        for fid, feature in preview_targets:
+            where, where_source = _infer_feature_where(repo, st, {**feature, "id": fid}, records, merge_events)
+            old = _where_paths(feature.get("where"))
+            preview_rows.append({"id": fid, "old_where": old, "new_where": where, "where_source": where_source})
+            if "where_source" in feature:
+                eligible = str(feature.get("where_source") or "") in ("", "backfill", "unknown")
+            else:
+                eligible = legacy_values.get(fid) == old and fid in legacy_values
+            if not recompute or eligible:
+                changes.append({"id": fid, "where": where, "where_source": where_source})
+        preview_file = None
+        if recompute:
+            private = d / "private"
+            private.mkdir(parents=True, exist_ok=True)
+            preview_file = private / f"feature-backfill-recompute-{now().replace(':', '').replace('-', '')}.json"
+            preview_file.write_text(json.dumps(preview_rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if a.apply:
             for item in changes:
-                if item["where"]: rows[item["id"]]["where"] = item["where"]
-            if any(x["where"] for x in changes): save(d, st, {"ev": "feature-backfill", "features": [x["id"] for x in changes if x["where"]]})
-        print(json.dumps({"missing": len(missing), "matched": sum(bool(x["where"]) for x in changes),
-                          "unmatched": [x["id"] for x in changes if not x["where"]], "preview": not a.apply}, ensure_ascii=False))
+                rows[item["id"]]["where"] = item["where"]
+                rows[item["id"]]["where_source"] = item["where_source"]
+                rows[item["id"]]["name"] = _truncate_boundary(rows[item["id"]].get("name", ""), 40)
+            if changes:
+                save(d, st, {"ev": "feature-backfill", "features": [x["id"] for x in changes],
+                             "where_by_feature": {x["id"]: x["where"] for x in changes}})
+        payload = {"missing": len(missing), "matched": sum(bool(x["where"]) for x in changes),
+                   "unmatched": [x["id"] for x in changes if not x["where"]], "preview": not a.apply}
+        if recompute: payload.update({"features": preview_rows, "preview_file": str(preview_file)})
+        print(json.dumps(payload, ensure_ascii=False, indent=2 if recompute else None))
         return
     if a.action in ("import", "reconcile"):
         try:
@@ -5569,14 +5711,17 @@ def cmd_feature(a):
                 prior = rows.get(fid, {}) if fid else {}
                 candidate = {**prior, "id": fid or r["id"], "name": r["name"],
                              "tasks": list(dict.fromkeys([*(prior.get("tasks") or []), *r["tasks"]]))}
-                inferred = _infer_feature_where(repo, st, candidate, records, merge_events)
+                inferred, inferred_source = _infer_feature_where(repo, st, candidate, records, merge_events)
                 if not inferred:
                     rejected.append(r)
                     continue
                 r["where"] = inferred
-            record = {"name": r["name"], "phase": r["phase"], "status": status, "reqs": [], "tasks": [], "evidence": "", "reason": "", "created": now()}
+            else:
+                inferred_source = ""
+            record = {"name": _truncate_boundary(r["name"], 40), "phase": r["phase"], "status": status, "reqs": [], "tasks": [], "evidence": "", "reason": "", "created": now()}
             if r["tasks"]: record["tasks"] = list(dict.fromkeys(r["tasks"]))
             if r["where"]: record["where"] = r["where"]
+            if r["where"] and inferred_source: record["where_source"] = inferred_source
             if r["from"]:  # where the feature came from (requests, notes), not a phase it was moved from
                 record["source"] = r["from"]
                 record["reqs"] = [x for x in re.findall(r"R\d+", r["from"]) if x in st.get("requests", {})]
@@ -5586,7 +5731,7 @@ def cmd_feature(a):
                 rows[fid] = record; added += 1
             else:
                 old = rows[fid]
-                keys = [k for k in ("name", "phase", "status", "note", "source", "where") if k in record]
+                keys = [k for k in ("name", "phase", "status", "note", "source", "where", "where_source") if k in record]
                 reqs = list(dict.fromkeys((old.get("reqs") or []) + record.get("reqs", [])))
                 if all(old.get(k) == record[k] for k in keys) and reqs == (old.get("reqs") or []): unchanged += 1
                 else:  # overlay only what the file carries: links, tasks, evidence and created time stay
@@ -5626,7 +5771,7 @@ def cmd_feature(a):
         for tid in tasks:
             if tid not in st.get("tasks", {}): sys.exit(f"unknown task {tid}")
         fid = f"F{max([int(x[1:]) for x in rows if re.fullmatch(r'F\d+', x)] or [0])+1}"
-        rows[fid] = {"name": a.name.strip(), "phase": a.phase or "", "reqs": reqs, "tasks": tasks,
+        rows[fid] = {"name": _truncate_boundary(a.name.strip(), 40), "phase": a.phase or "", "reqs": reqs, "tasks": tasks,
                      "status": a.status or "planned", "evidence": a.evidence or "", "reason": a.reason or "", "created": now()}
         if a.where: rows[fid]["where"] = a.where
         if a.status == "landed": rows[fid]["landed_at"] = now()
@@ -5662,8 +5807,10 @@ def cmd_feature(a):
         if a.evidence: f["evidence"] = a.evidence
         if a.where:
             f["where"] = a.where
+            f["where_source"] = "manual"
         if a.reason: f["reason"] = a.reason
         if status == "landed" and f.get("status") != "landed": f["landed_at"] = now()
+        if status == "landed": f["name"] = _truncate_boundary(f.get("name", ""), 40)
         f["status"] = status; save(d, st, {"ev": "feature-set", "feature": a.name}); print(a.name); return
     if a.action == "list":
         selected = [(fid, f) for fid, f in rows.items() if not a.phase or f.get("phase") == a.phase]
@@ -6526,14 +6673,40 @@ def cmd_package_check(a):
     print(lab(st, "package_ok"))
 
 
+def _truncate_boundary(text, limit=40, recover_cut=False):
+    """Shorten display text at punctuation or an English word boundary."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(text) <= limit and (not recover_cut or len(text) < limit):
+        return text
+    punctuation = "，。；、：,.;:"
+    head = text[:limit]
+    cut = max((head.rfind(mark) for mark in punctuation), default=-1)
+    if cut >= 0:
+        return head[:cut + 1].rstrip() + "…"
+    if recover_cut and text and not re.search(r"[，。；、：,.;:!?]$", text):
+        last_mark = max((text.rfind(mark) for mark in punctuation), default=-1)
+        if last_mark >= 0:
+            return text[:last_mark + 1].rstrip() + "…"
+    # For English, back up to the beginning of the partial final word.
+    boundary = head.rfind(" ")
+    if boundary > 0:
+        return head[:boundary].rstrip() + "…"
+    return head.rstrip() + "…"
+
+
 def _task_existing_material(d, st, task):
-    """Rank reusable ledger and repository material against a task title and brief."""
-    query = str(task.get("title") or "") + " " + str(task.get("brief") or "")
+    """Rank each reusable source once by weighted hits in its own text."""
+    query = " ".join(str(task.get(k) or "") for k in ("title", "brief", "primary", "accept", "done"))
     words = {w for w in _tokens(query) if w not in _STOP and w not in _DECISION_ZH_STOP and
              ((w.isascii() and len(w) >= 3) or
               (not w.isascii() and len(w) == 2 and not any(c in "的一了和与在为把上中后前做有没个这那其及并" for c in w)))}
+    weak_zh = "的一了和与在为把上中后前做有没个这那其及并"
+    for run in re.findall(r"[一-鿿]+", query):
+        words.update(term for term in (run[i:i + 3] for i in range(len(run) - 2))
+                     if sum(char not in weak_zh for char in term) >= 2)
     repo = Path((st.get("repo") or {}).get("path") or d.parent)
-    rows = []
+    sources = []
+
     def display_path(path):
         value = str(path).strip()
         try:
@@ -6547,43 +6720,55 @@ def _task_existing_material(d, st, task):
         except (OSError, RuntimeError):
             pass
         value = value.replace("\\", "/")
-        value = re.sub(r"^/(?:Users|home)/[^/]+(?=/|$)", "~", value)
-        return value
-    def add(path, description, text="", source=2):
-        path = display_path(path)
-        hay = (str(path) + " " + str(description) + " " + str(text)).casefold()
-        score = sum(1 for word in words if _mentions(hay, word))
-        if score:
-            lower = path.casefold()
-            generic = bool(re.search(r"(?:^|/)(?:readme(?:\.[^/]*)?|framework(?:-[^/]*)?|issues?(?:\.[^/]*)?)(?:$|/)", lower))
-            code_rank = 0 if re.search(r"(?:^|/)(?:tests?|__tests__|test_)[^/]*|\.(?:py|js|ts|tsx|jsx|go|rs|swift|sh)$", lower) else 1
-            rows.append((source, -score, code_rank, len(rows), generic, lab(st, "existing_material_task", what=description, path=path)))
+        return re.sub(r"^/(?:Users|home)/[^/]+(?=/|$)", "~", value)
+
+    def add(kind, order, label, title, body, paths):
+        paths = list(dict.fromkeys(display_path(path) for path in paths if path))
+        sources.append({"kind": kind, "order": order, "label": label, "title": str(title or ""),
+                        "body": str(body or ""), "paths": paths})
+
     for fid, feature in st.get("features", {}).items():
         if feature.get("status") == "landed":
-            paths = _where_paths(feature.get("where"))
-            if feature.get("evidence"): paths = [*paths, feature["evidence"]]
-            for path in paths:
-                if path: add(path, f"{fid} {feature.get('name','已落地功能')}", feature.get("evidence", ""), source=0)
-    for tid, done in st.get("tasks", {}).items():
-        if done.get("status") == "done":
-            primary = done.get("primary_check") or {}
-            paths = [done.get("deliverable"), done.get("evidence"), done.get("primary_evidence"), primary.get("evidence")]
-            merged = str(done.get("merged_sha") or "")
-            if re.fullmatch(r"[0-9a-fA-F]{7,40}", merged):
-                changed = subprocess.run(["git", "-C", str(repo), "show", "--format=", "--name-only", merged],
-                                         capture_output=True, text=True)
-                paths.extend(path.strip() for path in changed.stdout.splitlines() if path.strip())
-            for deliverable in st.get("deliverables", []):
-                if deliverable.get("task") == tid:
-                    paths.append(deliverable.get("link") or deliverable.get("missing"))
-            paths = list(dict.fromkeys(display_path(path) for path in paths if path))
-            if paths: add(", ".join(paths), f"{tid} 交付物、证据与已合并改动", done.get("title", ""), source=1)
+            add(0, len(sources), f"{fid} {_truncate_boundary(feature.get('name', '已落地功能'), recover_cut=True)}",
+                feature.get("name", ""), " ".join(str(feature.get(k) or "") for k in ("evidence", "note", "phase")),
+                _where_paths(feature.get("where")) + ([feature["evidence"]] if feature.get("evidence") else []))
+    done_tasks = [(tid, done) for tid, done in st.get("tasks", {}).items() if done.get("status") == "done"]
+    valid_shas = list(dict.fromkeys(str(done.get("merged_sha") or "") for _, done in done_tasks
+                                    if re.fullmatch(r"[0-9a-fA-F]{7,40}", str(done.get("merged_sha") or ""))))
+    changed_by_sha = {}
+    if valid_shas:
+        changed = subprocess.run(["git", "-C", str(repo), "log", "--no-walk", "--name-only", "--format=%H",
+                                  *valid_shas], capture_output=True, text=True)
+        current = None
+        if changed.returncode == 0:
+            for line in changed.stdout.splitlines():
+                if re.fullmatch(r"[0-9a-fA-F]{40}", line.strip()):
+                    current = line.strip().lower()
+                    changed_by_sha.setdefault(current, [])
+                elif current and line.strip():
+                    changed_by_sha[current].append(line.strip())
+    for tid, done in done_tasks:
+        primary = done.get("primary_check") or {}
+        paths = [done.get(k) for k in ("deliverable", "evidence", "primary_evidence")]
+        paths.extend([primary.get("evidence"), primary.get("deliverable")])
+        merged = str(done.get("merged_sha") or "")
+        if re.fullmatch(r"[0-9a-fA-F]{7,40}", merged):
+            full_sha = next((sha for sha in changed_by_sha if sha.startswith(merged.lower())), None)
+            if full_sha:
+                paths.extend(changed_by_sha[full_sha])
+        paths.extend(item.get("link") or item.get("missing") for item in st.get("deliverables", [])
+                     if item.get("task") == tid)
+        body = " ".join(str(done.get(k) or "") for k in ("brief", "primary", "accept", "done", "merged_sha"))
+        add(1, len(sources), f"{tid} {_truncate_boundary(done.get('title') or '已完成任务')}",
+            done.get("title", ""), body, paths)
     for i, dec in enumerate(st.get("decisions", []), 1):
-        add(f".teamwork/state.json decisions[{i}]", str(dec.get("what") or dec.get("text") or dec.get("answer") or "已决定事项"),
-            " ".join(str(dec.get(k) or "") for k in ("what", "text", "answer")), source=2)
+        original = " ".join(str(dec.get(k) or "") for k in ("what", "text", "answer", "why", "context"))
+        add(2, len(sources), "决定事项", dec.get("what") or dec.get("text") or dec.get("answer") or "已决定事项",
+            original, [f".teamwork/state.json decisions[{i}]"])
     if words:
+        grep_words = {word for word in words if word.isascii() or len(word) == 2}
         grep_args = ["git", "-C", str(repo), "grep", "-n", "-I", "-i"]
-        for word in sorted(words): grep_args.extend(["-e", word])
+        for word in sorted(grep_words): grep_args.extend(["-e", word])
         grep_args.extend(["HEAD", "--"])
         grep = subprocess.run(grep_args, capture_output=True, text=True)
         grep_files = {}
@@ -6591,24 +6776,72 @@ def _task_existing_material(d, st, task):
             parts = line.split(":", 2)
             path = parts[1] if len(parts) > 1 and parts[0] == "HEAD" else parts[0]
             if path:
-                entry = grep_files.setdefault(path, [set(), []])
-                entry[0].update(word for word in words if _mentions(line, word))
-                entry[1].append(line)
-        for path, (matched, lines) in grep_files.items():
-            if len(matched) >= 2:
-                add(path, "git grep 命中", " ".join(lines), source=3)
+                entry = grep_files.setdefault(path, [])
+                entry.append(line)
+        for path, lines in grep_files.items():
+            if len({word for word in grep_words for line in lines if _mentions(line, word)}) >= 2:
+                add(3, len(sources), "git grep 命中", "", " ".join(lines), [path])
+
+    # IDF is computed over distinct sources; paths never contribute a hit.
+    document_words = []
+    for source in sources:
+        title_words = {word for word in words if _mentions(source["title"].casefold(), word)}
+        body_words = {word for word in words if (source["kind"] != 3 or word.isascii() or len(word) == 2) and
+                      _mentions(source["body"].casefold(), word)}
+        document_words.append((title_words, body_words))
+    count = len(sources)
+    for source, (title_words, body_words) in zip(sources, document_words):
+        score = 0.0
+        source["title_hits"] = bool(title_words)
+        for word in title_words | body_words:
+            df = sum(word in title or word in body for title, body in document_words)
+            idf = 1.0 + math.log((count + 1) / (df + 1))
+            score += idf * (8.0 if word in title_words else 1.0)
+        source["score"] = score
+        path_hits = [path for path in source["paths"] if any(_mentions(Path(path).name.casefold(), word) for word in words)]
+        preferred = path_hits + [path for path in source["paths"] if path not in path_hits]
+        source["paths"] = [path for path in preferred if ".teamwork/private/" not in path.replace("\\", "/")]
+        source["paths"] += [path for path in preferred if ".teamwork/private/" in path.replace("\\", "/")]
+
     limit = pref(st, "task_existing_limit")
     try: limit = max(1, min(20, int(limit)))
     except (ValueError, TypeError): limit = 5
-    rows.sort(key=lambda row: (row[0], 2 if row[4] else row[2], row[1], row[3]))
+    def tie_path_rank(source):
+        if source["kind"] != 3 or not source["paths"]:
+            return 0
+        path = source["paths"][0].casefold()
+        if re.search(r"(?:^|/)(?:readme(?:\.[^/]*)?|framework(?:-[^/]*)?|issues?(?:\.[^/]*)?)(?:$|/)", path):
+            return 2
+        return 0 if re.search(r"(?:^|/)(?:tests?|__tests__|test_)[^/]*|\.(?:py|js|ts|tsx|jsx|go|rs|swift|sh)$", path) else 1
+
+    kind_rank = {1: 0, 0: 1, 2: 2, 3: 3}  # done tasks, landed features, decisions, grep
+    scored = sorted((source for source in sources if source["score"] > 0),
+                    key=lambda source: (-source["score"], kind_rank[source["kind"]], tie_path_rank(source), source["order"]))
+    if scored:
+        floor = scored[0]["score"] / 2
+        scored = [source for source in scored if source["score"] >= floor]
     selected = []
     generic_count = 0
-    for row in rows:
-        if row[4]:
-            if generic_count: continue
+    for source in scored:
+        paths = source["paths"]
+        generic = any(re.search(r"(?:^|/)(?:readme(?:\.[^/]*)?|framework(?:-[^/]*)?|issues?(?:\.[^/]*)?)(?:$|/)", path.casefold())
+                      for path in paths)
+        if generic and generic_count:
+            continue
+        if generic:
             generic_count += 1
-        selected.append(row[5])
-        if len(selected) >= limit: break
+        shown = paths[:3]
+        if len(paths) == 4:
+            shown = paths
+        path_text = ", ".join(shown)
+        if len(paths) > 4:
+            path_text += f" 等 {len(paths) - 3} 个"
+        rendered = lab(st, "existing_material_task", what=source["label"], path=path_text)
+        if not path_text:
+            rendered = re.sub(r"\s*[（(]\s*[）)]", "", rendered)
+        selected.append(rendered)
+        if len(selected) >= limit:
+            break
     return selected or [lab(st, "existing_material_none")]
 
 
@@ -15253,7 +15486,9 @@ def cmd_merge(a):
             fresh = st = load(d)  # fresh: the checks may have run for minutes
             for fid, feature in st.get("features", {}).items():
                 if set(feature.get("tasks") or []) & set(associated):
-                    feature["where"] = list(dict.fromkeys(_where_paths(feature.get("where")) + ev["files"] + [f"commit {sha[:9]}"]))
+                    repo = Path((st.get("repo") or {}).get("path") or d.parent).resolve()
+                    additions = _feature_numstat(repo, f"{old}..{sha}")
+                    feature["where"] = _merge_feature_where(repo, st, {**feature, "id": fid}, additions)
             st.setdefault("qa_pending", []).append({"branch": a.branch, "sha": sha, "base": base, "to": new,
                                                     "at": now()})
             if a.apply and "merge" in pref(st, 'standing_grants'):
@@ -16067,7 +16302,7 @@ def main():
     x.add_argument("--file"); x.add_argument("--to"); x.add_argument("--why")
     x.add_argument("--phase"); x.add_argument("--req", action="append", nargs="+"); x.add_argument("--task", action="append", nargs="+")
     x.add_argument("--status", choices=["planned", "building", "landed", "dropped"]); x.add_argument("--evidence"); x.add_argument("--reason")
-    x.add_argument("--json", action="store_true"); x.add_argument("--done-since"); x.add_argument("--where", action="append"); x.add_argument("--apply", action="store_true"); x.set_defaults(f=cmd_feature)
+    x.add_argument("--json", action="store_true"); x.add_argument("--done-since"); x.add_argument("--where", action="append"); x.add_argument("--apply", action="store_true"); x.add_argument("--recompute", action="store_true"); x.set_defaults(f=cmd_feature)
     x = s.add_parser("reconcile", help="compare requests, features and tasks")
     x.add_argument("--strict", action="store_true"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_reconcile)
     x = s.add_parser("wrapup", help="end-of-round ledger self-check")

@@ -375,6 +375,46 @@ class FeatureLedger(TwCase):
 
 
 class T83ExistingMaterials(TwCase):
+    def test_material_ranks_unique_sources_and_coalesces_backfilled_feature_paths(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "worker")
+        self.tw("task", "add", "T84", "--title", "做一个压缩后提醒", "--owner", "worker",
+                "--accept", "相关压缩任务排在前面")
+        state = self.state()
+        state["repo"] = {"path": str(self.dir)}
+        state["tasks"].update({
+            "T80": {"status": "done", "title": "压缩后自检：次数到了提醒用户", "brief": "压缩后自检达到设定次数时提醒用户。",
+                    "done": "次数到了提醒用户", "deliverable": "docs/T80.md", "merged_sha": "a" * 40},
+            "T81": {"status": "done", "title": "压缩后原文注入要点卡", "brief": "压缩后把原文注入要点卡。",
+                    "deliverable": "docs/T81.md"},
+        })
+        where = ["scripts/tw.py", "scripts/test_tw.py", ".github/workflows/test.yml"]
+        where.extend(f"src/module_{i}/compression.py" for i in range(24))
+        state["features"]["J15"] = {"status": "landed", "name": "换届后每个线程都确认认了新 lead，定时提醒和订阅都转到新 lead 身上，换",
+                                      "evidence": "docs/J15.md", "where": where}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+        message = self.tw("task-msg", "T84").stdout
+        material = message.split("已有资料:\n", 1)[1].split("\nBrief:", 1)[0]
+        lines = material.splitlines()
+        self.assertIn("T80", lines[0])
+        self.assertIn("T81", lines[1])
+        self.assertLessEqual(sum("J15" in line for line in lines), 1)
+        self.assertEqual(len([line for line in lines if "T80" in line]), 1)
+        self.assertEqual(len([line for line in lines if "T81" in line]), 1)
+        self.assertTrue(all(not re.search(r"(?:换|到|身|提|醒)$", line) for line in lines if "J15" in line))
+        j15_line = next((line for line in lines if "J15" in line), None)
+        if j15_line:
+            paths = re.search(r"（(.*?)）", j15_line).group(1)
+            self.assertLessEqual(len(paths.split(", ")) - int("等 " in paths), 3)
+            self.assertTrue("等" in paths or len(paths.split(", ")) <= 4)
+
+    def test_truncate_boundary_uses_chinese_punctuation_and_english_word_edges(self):
+        self.assertEqual(tw._truncate_boundary("压缩后提醒用户，超过长度的内容应该省略", 11), "压缩后提醒用户，…")
+        self.assertEqual(tw._truncate_boundary("Compression reminder should stop before a partial word", 28), "Compression reminder should…")
+        self.assertEqual(tw._truncate_boundary("短中文名", 40, recover_cut=True), "短中文名")
+        self.assertEqual(tw._truncate_boundary("Short English", 40, recover_cut=True), "Short English")
+
     def test_feature_backfill_preview_and_apply_use_task_commit(self):
         self.tw("thread", "add", "worker")
         self.tw("task", "add", "T80", "--title", "compression reminder")
@@ -393,9 +433,204 @@ class T83ExistingMaterials(TwCase):
         preview = json.loads(self.tw("feature", "backfill", "--json").stdout)
         self.assertTrue(preview["preview"])
         self.assertEqual(preview["missing"], 1)
+        self.assertEqual(preview["unmatched"], [])
         self.assertNotIn("where", self.state()["features"]["F1"])
         self.tw("feature", "backfill", "--apply", "--json")
         self.assertIn("compression.py", self.state()["features"]["F1"]["where"])
+        self.assertEqual(self.state()["features"]["F1"]["where_source"], "task-grep")
+
+    def test_task_grep_uses_exact_task_word_outside_merge_range(self):
+        self.tw("task", "add", "T5", "--title", "database maintenance")
+        self.tw("task", "add", "T50", "--title", "notice routing")
+        subprocess.run(["git", "-C", str(self.dir), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.name", "t"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.email", "t@example.invalid"], check=True)
+        (self.dir / "src").mkdir()
+        (self.dir / "src" / "notice.py").write_text("def route_notice(): return True\n")
+        subprocess.run(["git", "-C", str(self.dir), "add", "src/notice.py"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "commit", "-qm", "T50: route notice (T50)"], check=True)
+        state = self.state()
+        state["features"] = {
+            "F50": {"name": "Notice routing", "status": "landed", "tasks": ["T50"]},
+            "F5": {"name": "Database maintenance", "status": "landed", "tasks": ["T5"]},
+        }
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        preview = json.loads(self.tw("feature", "backfill", "--recompute").stdout)
+        by_id = {row["id"]: row for row in preview["features"]}
+        self.assertEqual(by_id["F50"]["new_where"], ["src/notice.py"])
+        self.assertEqual(by_id["F50"]["where_source"], "task-grep")
+        self.assertEqual(by_id["F5"]["where_source"], "unknown")
+        self.assertEqual(by_id["F5"]["new_where"], [])
+
+    def test_title_word_fallback_requires_two_feature_terms_and_board_lists_unknown(self):
+        self.tw("prefs", "--set", "language=zh")
+        subprocess.run(["git", "-C", str(self.dir), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.name", "t"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.email", "t@example.invalid"], check=True)
+        commits = [("src/single.py", "compression helper"), ("src/matched.py", "compression reminder handler")]
+        for path, title in commits:
+            target = self.dir / path; target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("def handler(): return True\n")
+            subprocess.run(["git", "-C", str(self.dir), "add", path], check=True)
+            subprocess.run(["git", "-C", str(self.dir), "commit", "-qm", title], check=True)
+        state = self.state()
+        state["features"] = {
+            "F1": {"name": "compression reminder", "status": "landed"},
+            "F2": {"name": "unmatched release planning", "status": "landed"},
+        }
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        preview = json.loads(self.tw("feature", "backfill", "--recompute").stdout)
+        by_id = {row["id"]: row for row in preview["features"]}
+        self.assertEqual(by_id["F1"]["where_source"], "title-words")
+        self.assertEqual(by_id["F1"]["new_where"], ["src/matched.py"])
+        self.assertEqual(by_id["F2"]["where_source"], "unknown")
+        self.assertEqual(by_id["F2"]["new_where"], [])
+        self.tw("feature", "backfill", "--recompute", "--apply")
+        board = self.tw("board").stdout
+        self.assertIn("待补位置", board)
+        self.assertIn("F2", board)
+        self.assertIn("unmatched release planning", board)
+
+    def test_recompute_does_not_overwrite_where_manually_edited_after_backfill(self):
+        self.tw("task", "add", "T80", "--title", "compression reminder")
+        subprocess.run(["git", "-C", str(self.dir), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.name", "t"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.email", "t@example.invalid"], check=True)
+        (self.dir / "src").mkdir()
+        (self.dir / "src" / "compression.py").write_text("def compression_reminder(): return True\n")
+        subprocess.run(["git", "-C", str(self.dir), "add", "src/compression.py"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "commit", "-qm", "T80: compression reminder"], check=True)
+        self.tw("feature", "add", "compression reminder", "--task", "T80")
+        state = self.state(); state["features"]["F1"].update(status="landed", evidence="T80")
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.tw("feature", "backfill", "--apply")
+        self.tw("feature", "set", "F1", "--where", "manual/location.py")
+        self.assertEqual(self.state()["features"]["F1"]["where_source"], "manual")
+        manual_where = self.state()["features"]["F1"]["where"]
+        self.tw("feature", "backfill", "--recompute", "--apply")
+        self.assertEqual(self.state()["features"]["F1"]["where"], manual_where)
+        self.assertEqual(self.state()["features"]["F1"]["where_source"], "manual")
+
+    def test_done_task_git_paths_are_loaded_in_one_batch(self):
+        subprocess.run(["git", "-C", str(self.dir), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.name", "t"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.email", "t@example.invalid"], check=True)
+        (self.dir / "artifact.py").write_text("def artifact(): return True\n")
+        subprocess.run(["git", "-C", str(self.dir), "add", "artifact.py"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "commit", "-qm", "artifact"], check=True)
+        sha = subprocess.run(["git", "-C", str(self.dir), "rev-parse", "HEAD"], capture_output=True,
+                             text=True, check=True).stdout.strip()
+        state = self.state(); state["repo"] = {"path": str(self.dir)}
+        state["tasks"] = {f"T{i}": {"status": "done", "title": f"finished work {i}", "merged_sha": sha}
+                          for i in range(1, 61)}
+        with mock.patch.object(tw.subprocess, "run", wraps=subprocess.run) as run:
+            tw._task_existing_material(self.dir / ".teamwork", state,
+                                       {"title": "artifact changes", "brief": "artifact"})
+        git_logs = [call for call in run.call_args_list if call.args and len(call.args[0]) > 1 and
+                    call.args[0][0] == "git" and call.args[0][1] == "-C" and "log" in call.args[0]]
+        git_shows = [call for call in run.call_args_list if call.args and "show" in call.args[0]]
+        self.assertEqual(len(git_logs), 1)
+        self.assertEqual(git_shows, [])
+
+    def test_merge_preserves_manual_where_order_and_limit(self):
+        state = {"prefs": {"feature_where_max": 3}}
+        feature = {"name": "compression reminder", "where_source": "manual",
+                   "where": ["src/hand-a.py", "src/hand-b.py", "src/hand-c.py"]}
+        self.assertEqual(tw._merge_feature_where(self.dir, state, feature, [("src/new.py", 20)]),
+                         feature["where"])
+        feature["where"] = ["src/hand-a.py", "src/hand-b.py"]
+        self.assertEqual(tw._merge_feature_where(self.dir, state, feature, [("src/new.py", 20)]),
+                         ["src/hand-a.py", "src/hand-b.py", "src/new.py"])
+
+    def test_where_excludes_board_and_shared_merge_ranges(self):
+        self.assertTrue(tw._feature_where_excluded(".teamwork/BOARD.md"))
+        self.assertTrue(tw._feature_where_excluded("BOARD.md"))
+        self.assertFalse(tw._feature_where_excluded("scripts/board_view.py"))
+        state = {"prefs": {"feature_where_max": 5}, "requests": {}}
+        feature = {"name": "compression reminder", "tasks": ["T80"]}
+        shared = [{"ev": "merge", "tasks": ["T80", "T81"], "files": ["src/t81_only.py"]}]
+        own = [{"ev": "merge", "tasks": ["T80"], "files": ["src/compression.py"]}]
+        with mock.patch.object(tw.subprocess, "run", return_value=mock.Mock(returncode=1, stdout="", stderr="")):
+            self.assertNotIn("src/t81_only.py", tw._infer_feature_where(self.dir, state, feature, [], shared)[0])
+        self.assertEqual(tw._infer_feature_where(self.dir, state, feature, [], own), (["src/compression.py"], "task-commits"))
+
+    def test_backfill_filters_overview_fixture_and_other_task_commits(self):
+        self.tw("task", "add", "T80", "--title", "compression reminder")
+        self.tw("task", "add", "T81", "--title", "unrelated work")
+        subprocess.run(["git", "-C", str(self.dir), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.name", "t"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.email", "t@example.invalid"], check=True)
+        files = {
+            "scripts/tw.py": "# compression helper\n" * 12,
+            "src/compression.py": "def compression_reminder(): return True\n",
+            ".github/ISSUE_TEMPLATE/bug.md": "compression reminder\n",
+            "README.md": "compression reminder\n",
+            "docs/framework-audit.md": "compression reminder\n",
+            "docs/field-tests/report.md": "compression reminder\n",
+            "scripts/fixtures/sample.json": '{"compression": "reminder"}\n',
+            "LICENSE.txt": "compression reminder\n",
+            "CHANGELOG.md": "compression reminder\n",
+            "src/other.py": "unrelated task artifact\n",
+        }
+        for name, body in files.items():
+            path = self.dir / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(body)
+        first = list(files)[:-1]
+        subprocess.run(["git", "-C", str(self.dir), "add", *first], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "commit", "-qm", "T80: compression reminder implementation"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "add", "src/other.py"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "commit", "-qm", "T81: unrelated implementation"], check=True)
+        self.tw("feature", "add", "compression reminder", "--task", "T80")
+        state = self.state(); state["features"]["F1"]["status"] = "landed"
+        state["prefs"]["feature_where_max"] = 5
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.tw("feature", "backfill", "--apply")
+        where = self.state()["features"]["F1"]["where"]
+        self.assertIn("src/compression.py", where)
+        self.assertLessEqual(len(where), 5)
+        self.assertFalse(any(path.startswith((".github/", "docs/field-tests/", "scripts/fixtures/")) or
+                             path.startswith("docs/framework") or Path(path).name.startswith(("README", "LICENSE", "CHANGELOG"))
+                             for path in where))
+        self.assertNotIn("src/other.py", where)
+
+    def test_backfill_recompute_preview_and_preserves_manual_where(self):
+        self.tw("task", "add", "T80", "--title", "compression reminder")
+        subprocess.run(["git", "-C", str(self.dir), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.name", "t"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "config", "user.email", "t@example.invalid"], check=True)
+        (self.dir / "src").mkdir()
+        (self.dir / "src" / "compression.py").write_text("def compression_reminder(): return True\n")
+        subprocess.run(["git", "-C", str(self.dir), "add", "src/compression.py"], check=True)
+        subprocess.run(["git", "-C", str(self.dir), "commit", "-qm", "T80: compression reminder"], check=True)
+        state = self.state()
+        state["features"] = {
+            "F1": {"name": "compression reminder", "status": "landed", "tasks": ["T80"],
+                   "where": ["old/backfill.py"]},
+            "F2": {"name": "compression reminder", "status": "landed", "tasks": ["T80"],
+                   "where": ["manual/location.py"]},
+            "F3": {"name": "compression reminder", "status": "landed", "tasks": ["T80"]},
+            "F4": {"name": "compression reminder", "status": "landed", "tasks": ["T80"],
+                   "where_source": ""},
+        }
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        (self.dir / ".teamwork" / "log.jsonl").write_text(json.dumps({"ev": "feature-backfill", "features": ["F1"],
+                                                                          "where_by_feature": {"F1": ["old/backfill.py"]}}) + "\n")
+        before = self.state()
+        preview = json.loads(self.tw("feature", "backfill", "--recompute").stdout)
+        self.assertEqual([row["id"] for row in preview["features"]], ["F1", "F2", "F3", "F4"])
+        self.assertEqual(preview["features"][0]["old_where"], ["old/backfill.py"])
+        self.assertEqual(preview["features"][0]["new_where"], ["src/compression.py"])
+        self.assertTrue(Path(preview["preview_file"]).is_file())
+        self.assertEqual(self.state(), before)
+        self.tw("feature", "backfill", "--recompute", "--apply")
+        after = self.state()["features"]
+        self.assertEqual(after["F1"]["where"], ["src/compression.py"])
+        self.assertEqual(after["F1"]["where_source"], "task-grep")
+        self.assertEqual(after["F2"]["where"], ["manual/location.py"])
+        self.assertNotIn("where_source", after["F2"])
+        self.assertNotIn("where", after["F3"])
+        self.assertNotIn("where_source", after["F3"])
+        self.assertEqual(after["F4"]["where"], ["src/compression.py"])
+        self.assertEqual(after["F4"]["where_source"], "task-grep")
 
     def test_feature_import_infers_landed_where_and_rejects_only_unmatched_rows(self):
         self.tw("task", "add", "T80", "--title", "compression reminder")
@@ -429,6 +664,27 @@ class T83ExistingMaterials(TwCase):
         self.assertIn("src/compress.py", message)
         self.assertIn("~/private/提醒.md", message)
         self.assertNotIn("/Users/alice", message)
+
+    def test_task_msg_omits_empty_path_and_lists_single_extra_path(self):
+        self.tw("prefs", "--set", "language=zh")
+        self.tw("thread", "add", "worker")
+        self.tw("task", "add", "T80", "--title", "compression reminder", "--owner", "worker",
+                "--accept", "compression reminder is available")
+        state = self.state()
+        state["repo"] = {"path": str(self.dir)}
+        state["features"] = {
+            "F1": {"name": "compression reminder", "status": "landed", "note": "compression reminder"},
+            "F2": {"name": "compression reminder", "status": "landed", "note": "compression reminder",
+                   "where": ["src/a.py", "src/b.py", "src/c.py", "src/d.py"]},
+        }
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        message = self.tw("task-msg", "T80").stdout
+        lines = message.split("已有资料:\n", 1)[1].split("\nDone when:", 1)[0].splitlines()
+        f1 = next(line for line in lines if "F1" in line)
+        f2 = next(line for line in lines if "F2" in line)
+        self.assertNotIn("（）", f1)
+        self.assertIn("src/a.py, src/b.py, src/c.py, src/d.py", f2)
+        self.assertNotIn("等 1 个", f2)
 
     def test_git_grep_requires_multiple_terms_and_prefers_code_over_overview_docs(self):
         self.tw("prefs", "--set", "language=zh")

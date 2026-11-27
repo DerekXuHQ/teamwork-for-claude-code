@@ -921,7 +921,8 @@ class MergeRehearsal(GitCase):
         self.merge("--apply")
         where = json.loads((self.proj / ".teamwork" / "state.json").read_text(encoding="utf-8"))["features"]["F1"]["where"]
         self.assertIn("quix.py", where)
-        self.assertTrue(any(item.startswith("commit ") for item in where))
+        self.assertLessEqual(len(where), 5)
+        self.assertFalse(any(item.startswith("commit ") for item in where))
         self.assertIn("docs/quixbar.md", where)
 
     def test_conflict_leaves_live_untouched(self):

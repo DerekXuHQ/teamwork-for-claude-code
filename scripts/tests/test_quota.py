@@ -309,8 +309,15 @@ class QuotaTrigger(TwCase):
             self.assertEqual(quota.tier(r, {}, now)[0], "burn-fable")
             stale = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now + 7 * 3600)
             self.assertEqual(quota.tier(stale, {}, now + 7 * 3600)[0], "unknown")
+            (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-a"},
+                "cachedUsageUtilization": {"fetchedAtMs": (now - 36000) * 1000,
+                                           "utilization": {"seven_day": {"utilization": 20, "resets_at": now + 86400}}}}))
+            r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)  # a stale cache must not hide fresh samples
+            self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["src"]), (77, "desktop"))
+            samples.write_text(json.dumps({"samples": [{"t": now * 1000, "org": "org-a", "u": {"sd": 5000}}]}))
+            self.assertEqual(quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)["claude"]["total"]["src"], "cache")
             samples.write_text("{bad")
-            self.assertNotIn("total", quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)["claude"])
+            self.assertEqual(quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)["claude"]["total"]["src"], "cache")
 
     def test_older_ledger_missing_default_keys_still_runs_ready(self):
         """T85: a ledger written before some keys existed (here: decisions) must not crash a due default."""

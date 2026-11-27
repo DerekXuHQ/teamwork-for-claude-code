@@ -130,7 +130,7 @@ def _desktop(config_dirs, now):
         org = account.get("organizationUuid") if isinstance(account, dict) else None
         rows = [(epoch(x.get("t")), num((x.get("u") or {}).get("sd"))) for x in samples
                 if isinstance(x, dict) and org and x.get("org") == org and isinstance(x.get("u"), dict)]
-        rows = [r for r in rows if r[0] and r[1] is not None and r[0] <= now + 60]
+        rows = [r for r in rows if r[0] and r[1] is not None and r[1] <= 150 and r[0] <= now + 60]  # sd: whole percents
         if rows:
             seen, pct = max(rows)
             age = (now - seen) / 3600
@@ -222,8 +222,12 @@ def _claude_events(config_dirs, now):
                 ca["pct"] > ev["pct"]:
             out[key] = dict(ca, **({"model": ev.get("model", "Fable")} if key == "scoped" else {}))
             out.setdefault("notes", []).append(f"{key} from a newer cache")
-    if "total" not in out and "total" not in cache:
-        cache = dict(cache, **_desktop(config_dirs, now))
+    have = out.get("total") or cache.get("total")
+    if not have or have.get("stale") or now - (have.get("seen_at") or now) > 86400:  # T85: no usable total: desktop
+        desk = _desktop(config_dirs, now).get("total")
+        if desk and (not have or (desk.get("seen_at") or 0) > (have.get("seen_at") or 0)):
+            out.pop("total", None)
+            cache = dict(cache, total=desk)
     for key in ("total", "scoped", "five_hour", "scoped_share_of_total_pct"):
         if key not in out and key in cache:
             out[key] = cache[key]

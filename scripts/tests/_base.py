@@ -103,6 +103,14 @@ class TwCase(unittest.TestCase):
         guard_dir = self.dir / "guard-log"
         guard_dir.mkdir()
         self.env["TW_GUARD_LOG"] = str(guard_dir / "guard-errors.jsonl")
+        # Space management scans the temp root (tw-merge-*), so every test gets its own, never the machine's.
+        tmp_holder = tempfile.TemporaryDirectory(); self.addCleanup(tmp_holder.cleanup)
+        fake_tmp = Path(tmp_holder.name)
+        self.env["TMPDIR"] = str(fake_tmp)
+        # The sweep also inspects disk space under HOME; never let a test walk the real home folder.
+        fake_home = fake_tmp / "home"; fake_home.mkdir(); self.env["HOME"] = str(fake_home)
+        saved_tempdir = tempfile.tempdir; tempfile.tempdir = str(fake_tmp)
+        self.addCleanup(setattr, tempfile, "tempdir", saved_tempdir)
         self.tw("init", "demo", "--goal", "test project")
         # Legacy suites here cover non-R71 behavior; PrimaryOutcome owns the enabled-gate coverage.
         self.tw("prefs", "--set", "require_primary=false", "--user-said", "legacy fixture covers other task behavior")

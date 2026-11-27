@@ -33,8 +33,10 @@ import os
 import re
 import shutil
 import shlex
+import signal
 import socket
 import stat
+import statistics
 import struct
 import subprocess
 import sys
@@ -43,6 +45,7 @@ import tempfile
 import time
 import unicodedata
 import zipfile
+from types import SimpleNamespace
 import zlib
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # quota.py sits next to tw.py (also under python -P)
@@ -133,6 +136,15 @@ PREFS = {
     "quota_pre_reset_hours": {"default": 36, "min": 0, "max": 168, "unit": "hours", "quota_threshold": True}, "quota_pre_reset_fable_max": {"default": 80, "min": 0, "max": 100, "unit": "percent", "quota_threshold": True},
     "quota_fable_done_at": {"default": 95, "min": 0, "max": 100, "unit": "percent", "quota_threshold": True}, "quota_5h_tight": {"default": 80, "min": 0, "max": 100, "unit": "percent", "quota_threshold": True},
     "quota_gpt_tight": {"default": 90, "min": 0, "max": 100, "unit": "percent", "quota_threshold": True},
+    "disk_low_pct": {"default": 10, "min": 0, "max": 100, "unit": "percent"}, "disk_low_gb": {"default": 30, "min": 0, "unit": "GiB"},
+    "disk_private_tmp_gb": {"default": 5, "min": 1, "unit": "GiB"}, "disk_growth_gb_per_hour": {"default": 2, "min": 1, "unit": "GiB per hour"},
+    "disk_scratch_days": {"default": 7, "min": 1, "unit": "days"}, "disk_keep_snapshots": {"default": 3, "min": 1, "unit": "snapshots"},
+    "disk_top_n": {"default": 10, "min": 1, "unit": "folders"}, "disk_private_budget_s": {"default": 5, "min": 0, "unit": "seconds"},
+    "disk_scan_budget_s": {"default": 30, "min": 0, "unit": "seconds"}, "disk_preview_budget_s": {"default": 3, "min": 0, "unit": "seconds"},
+    "disk_scan_interval_hours": {"default": 24, "min": 1, "unit": "hours"}, "disk_protect_globs": {"default": []},
+    "health_load1_cpu_multiple": {"default": 8, "min": 1}, "health_pipe_min_bytes": {"default": 16384, "min": 0, "unit": "bytes"},
+    "health_process_max": {"default": 3000, "min": 1, "unit": "processes"}, "health_disconnect_window": {"default": 20, "min": 1, "unit": "disconnects"},
+    "health_app_server_idle_hours": {"default": 2, "min": 1, "unit": "hours"}, "health_orphan_min_minutes": {"default": 120, "min": 1, "unit": "minutes"},
 }
 def _pref_kind(spec):
     if "type" in spec: return spec["type"]
@@ -202,6 +214,11 @@ def pref(st, key):
     """Return a stored preference or its single registered default."""
     spec = PREFS[key]
     return st.get("prefs", {}).get(key, spec["default"])
+
+
+def _pref_in(prefs, key):
+    """pref() for code that already holds the prefs dict."""
+    return prefs.get(key, PREFS[key]["default"])
 
 
 def _default_prefs():
@@ -308,6 +325,26 @@ LABELS = {
         "stuck_silent": "no reply", "stuck_other": "an issue", "nudge_recent": "Already nudged once: tell the user which thread is stuck",
         "nudge_closed": "Cannot nudge an archived, idle, or resolved thread",
         "notice_heading": "Unprocessed notices", "notice_saved": "Already recorded", "urgent_advice": "recall and reassign",
+        "disk_board": "Space inspection", "disk_heading": "Disk and memory inspection", "disk_free": "Free space: {free} ({pct}%)",
+        "disk_growth": "Fastest growth: {rows}", "disk_private_alarm": "URGENT: thread {thread} private tmp is {size} (growth {growth})",
+        "disk_top": "Largest directories: {rows}", "disk_sim": "Booted simulators: {rows}", "disk_process": "Large long-running processes: {rows}", "disk_alarms": "Private tmp alarms: {rows}",
+        "disk_sim_options": "Simulator options (shutdown / erase / delete): {rows}",
+        "disk_sim_exact": "exact", "disk_sim_estimated": "estimated from directory time",
+        "disk_sim_preview": "Simulator {action} preview for {udid}; fingerprint {fingerprint}",
+        "disk_sim_done": "Simulator {action} completed for {udid}", "disk_sim_failed": "Simulator {action} failed for {udid}: {detail}", "disk_sim_action_invalid": "Invalid simulator action",
+        "health_line": "Health: load1/5/15m {load}; processes {processes}; free disk {free}; pipe {pipe} bytes; booted simulators {simulators}; orphan candidates {orphans}",
+        "health_load_alarm": "ALERT: load1 {load} exceeds {threshold}", "health_pipe_alarm": "ALERT: pipe capacity {size} below {threshold}",
+        "health_process_alarm": "ALERT: process count {count} exceeds {threshold}", "health_orphan_alarm": "ALERT: {count} orphan process candidates",
+        "health_orphan_preview": "Orphan candidates (preview): {rows}", "health_killed": "Sent SIGTERM to verified PIDs: {pids}",
+        "health_disconnect_summary": "Recent disconnections ({n}): load over limit {load}; pipe below limit {pipe}; disk below limit {disk}",
+        "disk_none": "none",
+        "disk_fp_changed": "Pending cleanup list changed; re-list before applying",
+        "disk_apply_requires": "Pending cleanup requires --apply after the user approves the list",
+        "disk_unsafe": "Refusing changed, protected, or in-use path: {path}",
+        "disk_pending_omitted": "{count} smaller or unmeasured items not listed; they come up once the listed ones are cleared or measured",
+        "disk_held_by_snapshots": "Free space barely changed: {count} local Time Machine snapshot(s) still hold the deleted data; it is released when they expire",
+        "disk_guard_incomplete": "Protection and ledger scanning did not finish; all cleanup items are disabled",
+        "disk_auto": "Auto cleanup preview", "disk_pending": "Pending approval list", "disk_cleaned": "Space cleanup logged",
         "notice_foreign_session": "not a session in this project",
         "t_other": "other unmerged work on", "t_no_tasks": "no tasks linked",
         "s_title": "where things stand", "s_updated": "Updated", "s_deliverables": "Deliverables",
@@ -743,6 +780,26 @@ LABELS = {
         "stuck_silent": "没有回音", "stuck_other": "其他问题", "nudge_recent": "已经催过一次：直接告诉用户哪个线程卡在哪",
         "nudge_closed": "不能催归档、空闲或已完结的线程",
         "notice_heading": "未处理的提醒", "notice_saved": "已记过", "urgent_advice": "收回再改派",
+        "disk_board": "空间巡检", "disk_heading": "磁盘和内存巡检", "disk_free": "可用空间：{free}（{pct}%）",
+        "disk_growth": "增长最快：{rows}", "disk_private_alarm": "紧急：线程 {thread} 的 private/tmp 为 {size}（增长 {growth}）",
+        "disk_top": "占用最大的目录：{rows}", "disk_sim": "已启动的模拟器：{rows}", "disk_process": "长期运行且内存较大的进程：{rows}", "disk_alarms": "private/tmp 报警：{rows}",
+        "disk_sim_options": "模拟器处理选项（关机 / 抹掉 / 删除）：{rows}",
+        "disk_sim_exact": "精确时间", "disk_sim_estimated": "按目录时间估算",
+        "disk_sim_preview": "模拟器 {udid} 的 {action} 预览；指纹 {fingerprint}",
+        "disk_sim_done": "模拟器 {udid} 已执行 {action}", "disk_sim_failed": "模拟器 {udid} 执行 {action} 失败：{detail}", "disk_sim_action_invalid": "模拟器处理选项无效",
+        "health_line": "机器健康：负载1/5/15分钟 {load}；进程 {processes}；可用磁盘 {free}；管道 {pipe} 字节；已启动模拟器 {simulators}；遗留候选 {orphans}",
+        "health_load_alarm": "报警：load1 {load} 超过 {threshold}", "health_pipe_alarm": "报警：管道容量 {size} 小于 {threshold}",
+        "health_process_alarm": "报警：进程数 {count} 超过 {threshold}", "health_orphan_alarm": "报警：发现 {count} 个遗留进程候选",
+        "health_orphan_preview": "遗留进程（预览）：{rows}", "health_killed": "已向核验通过的 PID 发送 SIGTERM：{pids}",
+        "health_disconnect_summary": "最近 {n} 次断连：负载超阈值 {load} 次；管道偏低 {pipe} 次；磁盘不足 {disk} 次",
+        "disk_none": "无",
+        "disk_fp_changed": "待批清单内容已变化；请重新列清单后再执行",
+        "disk_apply_requires": "用户批准待批清单后，执行时还必须带 --apply",
+        "disk_unsafe": "拒绝处理已变化、受保护或正在使用的路径：{path}",
+        "disk_pending_omitted": "另有 {count} 项较小或未测，未列出；清掉或测完上面这些后会轮到它们",
+        "disk_held_by_snapshots": "可用空间几乎没变：{count} 个 Time Machine 本地快照还占着删掉的数据，快照过期后才会释放",
+        "disk_guard_incomplete": "保护路径和台账扫描未完成；所有清理项均禁用",
+        "disk_auto": "自动清理预览", "disk_pending": "待批清理清单", "disk_cleaned": "空间清理已记账",
         "notice_foreign_session": "不是本项目的会话",
         "t_other": "分支上其他未合并的工作", "t_no_tasks": "没有关联任务",
         "s_title": "进展一览", "s_updated": "更新于", "s_deliverables": "交付物", "s_none_yet": "（还没有）",
@@ -2340,6 +2397,8 @@ def render_board(st, all_threads=False):
     if merges: out += ["", f"## {lab(st, 'waiting_merge_heading')}", ""] + merges
     collisions = board_collisions(st)
     if collisions: out += ["", f"## {lab(st, 'collision_heading')}", ""] + collisions
+    disk = st.get("disk_space") or {}
+    if disk.get("summary"): out += ["", f"## {lab(st, 'disk_board')}", "", disk["summary"], ""]
     return "\n".join(out) + "\n"
 
 
@@ -7062,11 +7121,1241 @@ def cmd_open(a):
     )
 
 
+def _disk_blocks(info):
+    return int(getattr(info, "st_blocks", 0)) * 512
+
+
+def _disk_stamp():
+    return dt.datetime.now().astimezone().isoformat(timespec="microseconds")
+
+
+def _disk_frame(path):
+    return {"path": str(path), "names": [], "index": 0, "listing_offset": 0, "listed": False}
+
+
+def _disk_seed(path, deadline=None):
+    """Start with the root block; directory contents are enumerated incrementally."""
+    root = Path(path)
+    try:
+        info = root.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode): return None
+    except OSError:
+        return None
+    row = {"bytes": _disk_blocks(info), "complete": False, "measured_at": None,
+           "updated_at": _disk_stamp(), "device": int(info.st_dev), "stack": [],
+           "signature_chain": hashlib.sha256(f"{root}\0{info.st_mode}\0{info.st_size}\0{info.st_mtime_ns}\0{info.st_ino}".encode()).hexdigest()}
+    row["stack"].append(_disk_frame(root))
+    return row
+
+
+def _disk_measure_step(path, row, deadline):
+    """Advance one persistent scandir frame; return true when this tree is complete."""
+    if row.get("complete"): return True
+    stack = row.setdefault("stack", [])
+    processed = 0
+    while stack and time.monotonic() < deadline:
+        frame = stack[-1]
+        if not frame.get("listed"):
+            try:
+                with os.scandir(frame["path"]) as entries:
+                    frame["names"] = sorted(entry.name for entry in entries)
+                    frame["listing_offset"] = len(frame["names"])
+                    frame["listed"] = True
+            except OSError:
+                row["unreadable"] = True
+                stack.pop()
+            if not frame.get("listed"):
+                break
+            if time.monotonic() >= deadline: break
+        if frame["index"] >= len(frame["names"]):
+            stack.pop(); continue
+        name = frame["names"][frame["index"]]
+        frame["index"] += 1
+        processed += 1
+        child = Path(frame["path"]) / name
+        try:
+            info = child.lstat()
+            if info.st_dev != int(row["device"]) or stat.S_ISLNK(info.st_mode):
+                row["updated_at"] = _disk_stamp()
+                break
+            row["bytes"] = int(row.get("bytes", 0)) + _disk_blocks(info)
+            prior=row.get("signature_chain","")
+            row["signature_chain"]=hashlib.sha256(f"{prior}\0{child}\0{info.st_mode}\0{info.st_size}\0{info.st_mtime_ns}\0{info.st_ino}".encode()).hexdigest()
+            if stat.S_ISDIR(info.st_mode):
+                stack.append(_disk_frame(child))
+        except OSError:
+            row["updated_at"] = _disk_stamp()
+            break
+        row["updated_at"] = _disk_stamp()
+        if processed >= 1: break
+    if not stack and not row.get("unreadable"):
+        row["complete"] = True
+        row["measured_at"] = _disk_stamp()
+        row["updated_at"] = row["measured_at"]
+        row["cached_bytes"] = int(row.get("bytes", 0))
+        row["cached_at"] = row["measured_at"]
+    return bool(row.get("complete"))
+
+
+def _disk_cached_value(row):
+    if not isinstance(row, dict): return None, None
+    if row.get("complete"): return int(row.get("bytes", 0)), row.get("measured_at")
+    if row.get("cached_bytes") is not None: return int(row["cached_bytes"]), row.get("cached_at")
+    if row.get("bytes") is not None: return int(row["bytes"]), row.get("updated_at")
+    return None, None
+
+
+def _disk_refresh(paths, cache, budget_s, seed_paths=(), priority_paths=()):
+    """Round-robin the oldest measurements until the wall-clock budget is consumed."""
+    deadline = time.monotonic() + max(0.0, float(budget_s))
+    wanted=[]; seen=set()
+    for path in paths:
+        if time.monotonic() >= deadline: break
+        key=str(Path(path))
+        if key not in seen: seen.add(key); wanted.append(key)
+    seeds=set(); priority={}
+    for path in seed_paths:
+        if time.monotonic() >= deadline: break
+        seeds.add(str(Path(path)))
+    for index,path in enumerate(priority_paths):
+        if time.monotonic() >= deadline: break
+        priority[str(Path(path))]=index
+    for key in wanted:
+        if time.monotonic() >= deadline: break
+        path = Path(key)
+        if not path.exists() or path.is_symlink(): continue
+        row = cache.get(key)
+        if not isinstance(row, dict):
+            row = _disk_seed(path, deadline) if key in seeds else None
+            if row is None:
+                try:
+                    info = path.lstat()
+                    row = {"bytes": _disk_blocks(info), "complete": False, "measured_at": None,
+                           "updated_at": _disk_stamp(), "device": int(info.st_dev), "stack": [],
+                           "signature_chain": hashlib.sha256(f"{path}\0{info.st_mode}\0{info.st_size}\0{info.st_mtime_ns}\0{info.st_ino}".encode()).hexdigest()}
+                    row["stack"].append(_disk_frame(path))
+                except OSError: continue
+            cache[key] = row
+        elif row.get("complete"):
+            try:
+                if row.get("measured_at") and time.time()-dt.datetime.fromisoformat(row["measured_at"]).timestamp() < 300:
+                    continue
+            except (ValueError,TypeError): pass
+            seeded = _disk_seed(path, deadline)
+            row["cached_bytes"] = int(row.get("bytes", 0))
+            row["cached_at"] = row.get("measured_at")
+            row["stack"] = seeded.get("stack", []) if seeded else []
+            row["bytes"] = int(seeded.get("bytes", 0)) if seeded else 0
+            row["complete"] = False
+            if seeded:
+                row["device"] = int(seeded["device"])
+                row["signature_chain"] = seeded.get("signature_chain")
+            row["updated_at"] = _disk_stamp()
+    keys=[]
+    for key in wanted:
+        if time.monotonic() >= deadline: break
+        if isinstance(cache.get(key), dict) and not cache[key].get("complete") and (cache[key].get("stack") or not cache[key].get("unreadable")):
+            keys.append(key)
+    while keys and time.monotonic() < deadline:
+        keys.sort(key=lambda key: (0 if _disk_cached_value(cache[key])[0] is None else 1,
+                                   priority.get(key, len(priority)),
+                                   cache[key].get("measured_at") or cache[key].get("cached_at") or
+                                   cache[key].get("updated_at") or ""))
+        advanced = False
+        for key in keys[:]:
+            if time.monotonic() >= deadline: break
+            _disk_measure_step(key, cache[key], deadline)
+            advanced = True
+            if cache[key].get("complete"): keys.remove(key)
+        if not advanced: break
+    return cache
+
+
+def _disk_cache_bytes(cache, path):
+    row = cache.get(str(path), {})
+    return int(row.get("bytes", 0)) if isinstance(row, dict) else 0
+
+
+def _disk_rank(home, cache, count, budget_s, deadline=None, du_budget=None, known_paths=()):
+    home = Path(home); library = home / "Library"; scratch = home / ".dev-scratch"
+    known = [scratch / name for name in ("backups", "tmp", "cache")]
+    known += [library / "Caches", home / "Library/Developer/CoreSimulator/Devices",
+              home / "Library/Developer/Xcode/DerivedData", home / "Library/Developer/Xcode/iOS DeviceSupport",
+              home / ".npm", home / ".codex"]
+    for path in home.glob(".claude*"):
+        if deadline is not None and time.monotonic() >= deadline: break
+        known.append(path)
+    for path in known_paths:
+        if deadline is not None and time.monotonic() >= deadline: break
+        known.append(path)
+    try:
+        for p in home.iterdir():
+            if deadline is not None and time.monotonic() >= deadline: break
+            if p.is_dir() and not p.is_symlink() and (p.name.endswith("-worktrees") or p.name in ("Claude-A", "Claude-B", "Claude-C")):
+                known.append(p)
+    except OSError: pass
+    valid=[]; seen=set()
+    for value in known:
+        if deadline is not None and time.monotonic() >= deadline: break
+        path=Path(value)
+        if path != Path("/") and str(path) not in seen and path.is_dir() and not path.is_symlink():
+            seen.add(str(path)); valid.append(path)
+    known=valid
+    seed_paths = set(str(p) for p in known)
+    _disk_refresh(known, cache, budget_s, seed_paths, known)
+    rows=[]
+    for path,row in cache.items():
+        if isinstance(row,dict) and Path(path).exists() and not Path(path).is_symlink():
+            value,_stamp=_disk_cached_value(row)
+            if value is not None: rows.append((value,path))
+    present={path for _size,path in rows}
+    rows.extend((None,str(path)) for path in known if str(path) not in present and path.exists() and not path.is_symlink())
+    rows.sort(key=lambda item:(item[0] is not None,item[0] if item[0] is not None else -1,item[1]),reverse=True)
+    partial = any(not cache[str(p)].get("complete") for p in known if str(p) in cache)
+    if deadline is not None and time.monotonic() >= deadline: partial = True
+    if du_budget is not None:
+        du_budget["rank_measured"] = [str(p) for p in known if cache.get(str(p), {}).get("complete")]
+        du_budget["rank_unmeasured"] = [str(p) for p in known if not cache.get(str(p), {}).get("complete")]
+    # Keep the largest useful ancestor when both it and a child were measured.
+    # Simulator device directories are listed in their dedicated section.
+    chosen=[]
+    limit=max(0,int(count))
+    if limit == 0: return [],partial
+    simulator_root=str(home / "Library/Developer/CoreSimulator/Devices")
+    measured_paths={path for _size,path in rows}
+    for size,path in rows:
+        if path.startswith(simulator_root + "/"): continue
+        if any(path.startswith(candidate.rstrip("/") + "/") for candidate in measured_paths if candidate != path): continue
+        if any(path.startswith(parent.rstrip("/") + "/") for _n,parent in chosen): continue
+        chosen.append((size,path))
+        if len(chosen) >= limit: break
+    return chosen, partial
+
+
+def _disk_cached_fingerprint(path, cached_size):
+    try:
+        info=Path(path).lstat()
+        raw=f"{path}\0{cached_size}\0{info.st_mode}\0{info.st_mtime_ns}\0{info.st_ino}\n"
+        return hashlib.sha256(raw.encode()).hexdigest()[:24]
+    except OSError: return "unreadable"
+
+
+def _disk_measure_fingerprint(row, path, cached_size):
+    chain=row.get("signature_chain") if isinstance(row,dict) else None
+    if chain:
+        try:
+            info=Path(path).lstat()
+            return hashlib.sha256(f"{path}\0{cached_size}\0{chain}\0{info.st_mode}\0{info.st_mtime_ns}\0{info.st_ino}".encode()).hexdigest()[:24]
+        except OSError: return "unreadable"
+    return _disk_cached_fingerprint(path,cached_size)
+
+
+def _disk_human(n):
+    n = float(max(0, n))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB": return f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def _disk_duration(seconds):
+    if seconds is None: return "unknown"
+    seconds=max(0,int(seconds)); hours,remaining=divmod(seconds,3600); minutes=remaining//60
+    return f"{hours}h {minutes}m" if hours else f"{minutes}m"
+
+
+def _disk_pipe_capacity():
+    read_fd, write_fd = os.pipe()
+    total = 0
+    try:
+        os.set_blocking(write_fd, False)
+        chunk = b"x" * 65536
+        while True:
+            try: total += os.write(write_fd, chunk)
+            except BlockingIOError: break
+        return total
+    finally:
+        os.close(read_fd); os.close(write_fd)
+
+
+def _disk_elapsed(start_time):
+    value = str(start_time or "")
+    for fmt in ("%a %b %d %H:%M:%S %Y",):
+        try: started = dt.datetime.strptime(value, fmt).astimezone()
+        except ValueError: continue
+        return max(0.0, time.time() - started.timestamp())
+    try:
+        started = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if started.tzinfo is None: started = started.astimezone()
+        return max(0.0, time.time() - started.timestamp())
+    except ValueError: return None
+
+
+def _disk_cmd_args(cmdline):
+    try: return shlex.split(str(cmdline))
+    except ValueError: return str(cmdline).split()
+
+
+def _disk_option(cmdline, name):
+    args = _disk_cmd_args(cmdline)
+    for index, value in enumerate(args[:-1]):
+        if value == name: return args[index + 1]
+        if value.startswith(name + "="): return value.split("=", 1)[1]
+    return None
+
+
+def _disk_process_app_servers(rows, prefs, deadline=None):
+    by_pid={}; children_by_ppid={}
+    for row in rows:
+        if deadline is not None and time.monotonic() >= deadline: break
+        if not isinstance(row,dict): continue
+        pid=int(row.get("pid",0)); by_pid[pid]=row
+        children_by_ppid.setdefault(int(row.get("ppid",0)),[]).append(row)
+    servers = []
+    idle_after = float(_pref_in(prefs,"health_app_server_idle_hours")) * 3600
+    for server in rows:
+        if deadline is not None and time.monotonic() >= deadline: break
+        if not isinstance(server, dict): continue
+        cmd = str(server.get("cmdline", server.get("command", "")))
+        if not re.search(r"(?:^|[/\s])codex\s+app-server(?:\s|$)", cmd): continue
+        pid = int(server.get("pid", 0)); descendants=[]; seen={pid}; frontier={pid}
+        while frontier:
+            if deadline is not None and time.monotonic() >= deadline: break
+            direct=[]
+            for parent_pid in frontier:
+                if deadline is not None and time.monotonic() >= deadline: break
+                for child in children_by_ppid.get(parent_pid,[]):
+                    child_pid=int(child.get("pid",0))
+                    if child_pid not in seen: seen.add(child_pid); direct.append(child)
+            descendants.extend(direct); frontier={int(r.get("pid", 0)) for r in direct}
+        children = descendants
+        repl = [r for r in children if re.search(r"node_repl", str(r.get("cmdline", r.get("command", ""))), re.I)]
+        active = [r for r in children if r not in repl]
+        parent = by_pid.get(int(server.get("ppid", 0)), {})
+        broker_cmd = str(parent.get("cmdline", parent.get("command", "")))
+        if "app-server-broker.mjs" not in broker_cmd: broker_cmd = ""
+        cwd = _disk_option(broker_cmd, "--cwd") if broker_cmd else None
+        pid_file = _disk_option(broker_cmd, "--pid-file") if broker_cmd else None
+        broker_dir = Path(pid_file).parent if pid_file else None
+        if broker_dir is None and broker_cmd:
+            args = _disk_cmd_args(broker_cmd)
+            script = next((arg for arg in args if "app-server-broker.mjs" in arg), None)
+            if script: broker_dir = Path(script).parent
+        if broker_dir is None and cwd: broker_dir = Path(cwd) / ".teamwork"
+        job_running = None
+        if broker_dir and broker_dir.is_dir():
+            for pattern in ("*.json", "**/*.json"):
+                for status_file in broker_dir.glob(pattern):
+                    if deadline is not None and time.monotonic() >= deadline: break
+                    try:
+                        payload = json.loads(status_file.read_text(encoding="utf-8"))
+                        states = []
+                        def collect(value):
+                            if deadline is not None and time.monotonic() >= deadline: return
+                            if isinstance(value, dict):
+                                if "status" in value: states.append(str(value["status"]).lower())
+                                for item in value.values(): collect(item)
+                            elif isinstance(value, list):
+                                for item in value: collect(item)
+                        collect(payload)
+                        if "running" in states: job_running = True; break
+                        if states: job_running = False
+                    except (OSError, ValueError): continue
+                if job_running is True or deadline is not None and time.monotonic() >= deadline: break
+        log_times = []
+        if broker_dir and broker_dir.is_dir():
+            try:
+                for pattern in ("**/*.jsonl", "**/*.log"):
+                    for log_path in broker_dir.glob(pattern):
+                        if deadline is not None and time.monotonic() >= deadline: break
+                        try: log_times.append(log_path.stat().st_mtime)
+                        except OSError: pass
+            except OSError: pass
+        last_log_age = max(0.0, time.time() - max(log_times)) if log_times else None
+        idle_processes = not active
+        idle_status = job_running is False
+        idle = (idle_processes or idle_status) and last_log_age is not None and last_log_age >= idle_after
+        repl_ages = [age for age in (_disk_elapsed(r.get("start_time")) for r in repl) if age is not None]
+        servers.append({"broker_pid": int(parent.get("pid", 0)) if broker_cmd else None,
+            "broker_cmdline": broker_cmd, "broker_start_time": str(parent.get("start_time", "")) if broker_cmd else "",
+            "broker_dir": str(broker_dir) if broker_dir else None, "app_server_pid": pid,
+            "app_server_cmdline": cmd, "app_server_start_time": str(server.get("start_time", "")),
+            "app_server_age_s": _disk_elapsed(server.get("start_time")), "node_repl_count": len(repl),
+            "node_repl_longest_s": max(repl_ages) if repl_ages else None,
+            "node_repl_median_s": statistics.median(repl_ages) if repl_ages else None,
+            "worktree": cwd, "active_child_pids": [int(r.get("pid", 0)) for r in active],
+            "job_running": job_running, "last_log_age_s": last_log_age, "idle": bool(idle)})
+    return servers
+
+
+def _disk_pipe_holders(fixture=None, deadline=None, budget_s=3.0):
+    if isinstance(fixture, list): return fixture[:5], ("fixture returned no holders" if not fixture else None)
+    tool=shutil.which("lsof")
+    if not tool: return [], "lsof is unavailable"
+    try:
+        timeout=max(.01,float(budget_s))
+        raw_result=subprocess.run([tool, "-nP", "-Fpcft"], capture_output=True, text=True, timeout=timeout)
+        if raw_result.stderr and any(term in raw_result.stderr.lower() for term in ("permission", "operation not permitted")):
+            return [], "no permission: " + raw_result.stderr.strip()[:120]
+        if raw_result.returncode not in (0,1):
+            reason=(raw_result.stderr or "lsof exited with status %s" % raw_result.returncode).strip()
+            return [], "no permission" if "permission" in reason.lower() or "operation not permitted" in reason.lower() else "lsof failed: " + reason[:160]
+        raw=raw_result.stdout
+    except subprocess.TimeoutExpired: return [], "timed out after %.1f seconds" % timeout
+    except PermissionError: return [], "no permission"
+    except (OSError, subprocess.SubprocessError) as exc: return [], "lsof failed: " + str(exc)[:160]
+    counts = {}; current_pid = None; current_name = "?"; pipe_fd = False
+    for line in raw.splitlines():
+        if deadline is not None and time.monotonic() >= deadline: break
+        if not line: continue
+        tag, value = line[0], line[1:]
+        if tag == "p": current_pid = value; current_name = "?"
+        elif tag == "c": current_name = value
+        elif tag == "f": pipe_fd = False
+        elif tag == "t": pipe_fd = value.upper() in ("FIFO", "PIPE")
+        if tag == "t" and pipe_fd and current_pid:
+            key = (current_pid, current_name); counts[key] = counts.get(key, 0) + 1
+    try:
+        holders=[{"pid": int(pid), "name": name, "pipes": count} for (pid, name), count in
+                sorted(counts.items(), key=lambda item: item[1], reverse=True)[:5]]
+    except (TypeError,ValueError): return [], "parse failed: invalid process id"
+    saw_type=any(line.startswith("t") for line in raw.splitlines())
+    reason=None if holders else ("parse failed: no file-type records" if raw.strip() and not saw_type else "lsof found no pipe holders")
+    return holders, reason
+
+
+def _disk_health(st, deadline=None):
+    timings={}; health_started=time.monotonic()
+    fixture_path = os.environ.get("TEAMWORK_HEALTH_FIXTURE")
+    fixture = {}
+    if fixture_path:
+        try: fixture = json.loads(Path(fixture_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError): fixture = {}
+    try: loads = list(fixture["load"]) if "load" in fixture else list(os.getloadavg())
+    except (OSError, AttributeError, TypeError): loads = [0.0, 0.0, 0.0]
+    try: cpus = int(fixture.get("cpu_count", os.cpu_count() or 1))
+    except (TypeError, ValueError): cpus = os.cpu_count() or 1
+    pipe_bytes = int(fixture["pipe_bytes"]) if "pipe_bytes" in fixture else _disk_pipe_capacity()
+    rows = fixture.get("processes")
+    process_inventory_complete = isinstance(rows, list)
+    phase_started=time.monotonic()
+    if not isinstance(rows, list):
+        rows = []
+        try:
+            timeout = max(.01, min(2, deadline - time.monotonic())) if deadline is not None else 2
+            raw = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,lstart=,command="], capture_output=True,
+                                 text=True, timeout=timeout).stdout
+            process_inventory_complete = True
+            for line in raw.splitlines():
+                if deadline is not None and time.monotonic() >= deadline:
+                    process_inventory_complete = False
+                    break
+                bits = line.strip().split(None, 8)
+                if len(bits) < 9: continue
+                rows.append({"pid": int(bits[0]), "ppid": int(bits[1]), "uid": int(bits[2]),
+                             "start_time": " ".join(bits[3:8]), "cmdline": bits[8]})
+        except (OSError, ValueError, subprocess.SubprocessError): process_inventory_complete = False
+    timings["health_processes"] = time.monotonic()-phase_started
+    user_uid = os.getuid() if hasattr(os, "getuid") else None
+    proc_count = int(fixture.get("process_count", len(rows)))
+    pids = {int(x.get("pid", 0)) for x in rows if isinstance(x, dict)}
+    children = {int(x.get("ppid", 0)) for x in rows if isinstance(x, dict)}
+    orphans = []
+    prefs = st.get("prefs", {})
+    orphan_min_minutes = float(_pref_in(prefs,"health_orphan_min_minutes"))
+    for row in rows if process_inventory_complete else []:
+        if not isinstance(row, dict): continue
+        cmd = str(row.get("cmdline", row.get("command", "")))
+        if not re.search(r"(?:^|[/\s])(?:tw\.py|test_tw\.py|unittest|tw-merge)(?:$|[/\s-])", cmd, re.I): continue
+        if int(row.get("uid", -1)) != user_uid or int(row.get("ppid", 0)) != 1 and int(row.get("ppid", 0)) in pids: continue
+        age_s = _disk_elapsed(row.get("start_time"))
+        if age_s is None or age_s < orphan_min_minutes * 60 or int(row.get("pid", 0)) in children: continue
+        row = {"pid": int(row.get("pid", 0)), "uid": int(row.get("uid", -1)), "ppid": int(row.get("ppid", 0)),
+               "cmdline": cmd, "start_time": str(row.get("start_time", ""))}
+        if row["pid"] > 0: orphans.append(row)
+    threshold = float(_pref_in(prefs,"health_load1_cpu_multiple")) * max(1, cpus)
+    pipe_limit = int(_pref_in(prefs,"health_pipe_min_bytes"))
+    proc_limit = int(_pref_in(prefs,"health_process_max"))
+    alarms = []
+    if loads and float(loads[0]) > threshold: alarms.append(lab(st, "health_load_alarm", load=loads[0], threshold=threshold))
+    phase_started=time.monotonic()
+    pipe_budget=max(0.0,float(prefs.get("health_lsof_budget_s",3)))
+    pipe_holders,pipe_reason = _disk_pipe_holders(fixture.get("pipe_holders") if fixture_path and "pipe_holders" in fixture else None,
+        budget_s=pipe_budget) if pipe_bytes < pipe_limit else ([],None)
+    timings["lsof_pipe_stats"] = time.monotonic()-phase_started
+    if pipe_bytes < pipe_limit:
+        holder_text = ", ".join(f"{x.get('name','?')} pid={x.get('pid','?')} pipes={x.get('pipes',0)}" for x in pipe_holders) or ("unavailable (" + (pipe_reason or "unknown reason") + ")")
+        alarms.append(lab(st, "health_pipe_alarm", size=pipe_bytes, threshold=pipe_limit) + f"; holders: {holder_text}")
+    if proc_count > proc_limit: alarms.append(lab(st, "health_process_alarm", count=proc_count, threshold=proc_limit))
+    if orphans: alarms.append(lab(st, "health_orphan_alarm", count=len(orphans)))
+    if fixture_path:
+        disk_free=int(fixture.get("disk_free",0)); disk_total=int(fixture.get("disk_total",1))
+    else:
+        try:
+            disk=shutil.disk_usage(Path(os.environ.get("HOME") or Path.home()))
+            disk_free,disk_total=disk.free,disk.total
+        except OSError: disk_free=disk_total=0
+    simulator_devices=fixture.get("simulator_devices")
+    phase_started=time.monotonic()
+    if simulator_devices is None and not fixture_path:
+        try:
+            timeout = max(.01, min(2, deadline - time.monotonic())) if deadline is not None else 2
+            sim=subprocess.run(["xcrun","simctl","list","devices","--json"],capture_output=True,text=True,timeout=timeout)
+            raw_sim=json.loads(sim.stdout) if sim.returncode==0 else {}
+            simulator_devices=[{**item,"runtime":runtime} for runtime,items in raw_sim.get("devices",{}).items() for item in items]
+        except (OSError,ValueError,TypeError,subprocess.SubprocessError): simulator_devices=[]
+    simulator_devices=simulator_devices or []
+    timings["simulator_inventory"] = time.monotonic()-phase_started
+    simulator_count=fixture.get("simulator_count")
+    if simulator_count is None: simulator_count=sum(1 for item in simulator_devices if str(item.get("state","")).lower()=="booted")
+    simulators=[f"{item.get('name','?')} ({item.get('udid','?')})" for item in simulator_devices if str(item.get("state","")).lower()=="booted"]
+    phase_started=time.monotonic()
+    app_servers = _disk_process_app_servers(rows, prefs, deadline)
+    timings["app_server_stats"] = time.monotonic()-phase_started
+    timings["health_total"] = time.monotonic()-health_started
+    return {"load": loads, "cpu_count": cpus, "process_count": proc_count, "pipe_bytes": pipe_bytes,
+            "simulator_count": int(simulator_count), "disk_free": disk_free, "disk_total": disk_total, "orphans": orphans, "alarms": alarms,
+            "simulator_devices": simulator_devices,"simulators":simulators,"process_rows":rows,
+            "pipe_holders": pipe_holders, "app_servers": app_servers,"timings_s":timings,
+            "thresholds": {"load1": threshold, "pipe_bytes": pipe_limit, "process_count": proc_limit}}
+
+
+def _disk_processes():
+    fixture_path = os.environ.get("TEAMWORK_HEALTH_FIXTURE")
+    if fixture_path:
+        try:
+            data = json.loads(Path(fixture_path).read_text(encoding="utf-8"))
+            return data.get("processes", [])
+        except (OSError, ValueError): return []
+    try:
+        raw = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,lstart=,command="], capture_output=True, text=True, timeout=10).stdout
+        rows=[]
+        for line in raw.splitlines():
+            bits=line.strip().split(None,8)
+            if len(bits)==9: rows.append({"pid":int(bits[0]),"ppid":int(bits[1]),"uid":int(bits[2]),"start_time":" ".join(bits[3:8]),"cmdline":bits[8]})
+        return rows
+    except (OSError, ValueError, subprocess.SubprocessError): return []
+
+
+def _disk_kill_orphans(rows):
+    current = {int(x.get("pid", 0)): x for x in _disk_processes() if isinstance(x, dict)}
+    killed = []
+    for row in rows:
+        live = current.get(int(row["pid"]))
+        if not live or int(live.get("uid", -1)) != (os.getuid() if hasattr(os, "getuid") else None): continue
+        if str(live.get("cmdline", live.get("command", ""))) != row["cmdline"] or str(live.get("start_time", "")) != row["start_time"]: continue
+        if not re.search(r"(?:^|[/\s])(?:test_tw\.py|unittest|tw-merge)(?:$|[/\s-])", row["cmdline"], re.I): continue
+        os.kill(int(row["pid"]), signal.SIGTERM); killed.append(int(row["pid"]))
+    return killed
+
+
+def _disk_kill_idle_brokers(rows):
+    current = {int(x.get("pid", 0)): x for x in _disk_processes() if isinstance(x, dict)}
+    killed = []
+    for row in rows:
+        pid = row.get("broker_pid")
+        if not pid or not row.get("idle"): continue
+        live = current.get(int(pid))
+        expected = str(row.get("broker_cmdline", ""))
+        if not live or not expected or "app-server-broker.mjs" not in expected: continue
+        actual = str(live.get("cmdline", live.get("command", "")))
+        if actual != expected or str(live.get("start_time", "")) != str(row.get("broker_start_time", "")): continue
+        os.kill(int(pid), signal.SIGTERM); killed.append(int(pid))
+    return killed
+
+
+def _disk_projects(home, d, deadline=None):
+    roots = {Path(home), Path(d).parent}
+    parent=Path(d).parent.resolve()
+    found=set() if parent==Path("/") else {parent}
+    for root in roots:
+        if root.resolve() == Path("/"): continue
+        if root.is_dir():
+            try: found.update(find_projects(root,deadline))
+            except OSError: pass
+    return sorted(path for path in found if path != Path("/"))
+
+
+def _disk_guards(d, deadline=None, status=None):
+    st = load(d); patterns = list(_pref_in(st.get("prefs",{}),"disk_protect_globs")); exact = set()
+    if status is not None: status["complete"] = True
+    private = Path(d) / "PRIVATE.md"
+    if private.is_file():
+        try:
+            with private.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        if status is not None: status["complete"] = False
+                        break
+                    match=re.match(r"\s*(?:#\s*)?disk:\s*(.+)$",line)
+                    if match: patterns.append(match.group(1).strip())
+        except OSError:
+            if status is not None: status["complete"] = False
+    patterns = [str(Path(x).expanduser()) if x.startswith("~/") else x for x in patterns]
+    refs = set()
+    def walk(obj):
+        if deadline is not None and time.monotonic() >= deadline:
+            if status is not None: status["complete"] = False
+            return
+        if isinstance(obj, dict):
+            for k,v in obj.items():
+                if deadline is not None and time.monotonic() >= deadline:
+                    if status is not None: status["complete"] = False
+                    return
+                if isinstance(v,str) and k in ("evidence", "evidence_path", "proof", "artifact"): refs.add(v)
+                elif isinstance(v,str) and k == "path":
+                    candidate=Path(v).expanduser()
+                    if not candidate.is_dir(): refs.add(v)
+                walk(v)
+        elif isinstance(obj,list):
+            for v in obj: walk(v)
+    walk(st)
+    log = Path(d) / "log.jsonl"
+    if log.is_file():
+        try:
+            with log.open(encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        if status is not None: status["complete"] = False
+                        break
+                    try: walk(json.loads(line))
+                    except ValueError: pass
+        except OSError:
+            if status is not None: status["complete"] = False
+    for raw in refs:
+        if deadline is not None and time.monotonic() >= deadline:
+            if status is not None: status["complete"] = False
+            break
+        p = Path(raw).expanduser(); exact.add((p if p.is_absolute() else Path(d).parent / p).resolve(strict=False))
+    return exact, patterns
+
+
+def _disk_safe(path, roots, exact, patterns):
+    p = Path(path)
+    try:
+        resolved = p.resolve(strict=False)
+        if p.is_symlink() or not any(resolved == Path(r).resolve() or Path(r).resolve() in resolved.parents for r in roots): return False
+        if any(x == resolved or x in resolved.parents or resolved in x.parents for x in exact): return False
+        if any(fnmatch.fnmatch(str(resolved), pat) or fnmatch.fnmatch(str(p), pat) for pat in patterns): return False
+        q = p
+        while q != q.parent:
+            if q.is_symlink(): return False
+            q = q.parent
+        return True
+    except OSError: return False
+
+
+def _disk_in_use(path, timeout_s=10):
+    fixture_path=os.environ.get("TEAMWORK_HEALTH_FIXTURE")
+    if fixture_path:
+        try: return str(Path(path)) in json.loads(Path(fixture_path).read_text(encoding="utf-8")).get("in_use", [])
+        except (OSError,ValueError,TypeError): return False
+    tool = shutil.which("lsof")
+    if not tool: return True
+    try: return subprocess.run([tool, "-t", "--", str(path)], capture_output=True, timeout=timeout_s).returncode == 0
+    except (OSError, subprocess.SubprocessError): return True
+
+
+def _disk_open_paths(timeout_s=30):
+    fixture_path=os.environ.get("TEAMWORK_HEALTH_FIXTURE")
+    if fixture_path:
+        try:
+            data=json.loads(Path(fixture_path).read_text(encoding="utf-8"))
+            return {str(Path(value)) for value in data.get("in_use", [])}
+        except (OSError,ValueError,TypeError) as exc:
+            raise RuntimeError(f"lsof fixture failed: {exc}") from exc
+    tool=shutil.which("lsof")
+    if not tool: raise RuntimeError("lsof unavailable")
+    try:
+        result=subprocess.run([tool,"-nP","-Fn"],capture_output=True,text=True,timeout=timeout_s)
+    except (OSError,subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"lsof failed: {exc}") from exc
+    if result.returncode:
+        raise RuntimeError(f"lsof exited {result.returncode}: {(result.stderr or '').strip()[:160]}")
+    return {line[1:] for line in result.stdout.splitlines() if line.startswith("n") and len(line)>1}
+
+
+def _disk_kept_releases(config, keep_n=3):
+    try:
+        data = json.loads((Path(config) / "teamwork-releases" / "index.json").read_text(encoding="utf-8"))
+        keep = {x for x in (data.get("current"), data.get("previous"), *(data.get("history") or [])[-2:]) if x}
+        releases = sorted((r for r in data.get("releases", []) if r.get("name")), key=lambda r:(r.get("at", ""), r["name"]))
+        keep.update(x["name"] for x in releases[-int(keep_n):])
+        link = Path(config) / "skills" / "teamwork"
+        if link.is_symlink():
+            target = link.resolve(strict=False)
+            if target.parent == (Path(config) / "teamwork-releases").resolve(): keep.add(target.name)
+        return keep
+    except (OSError, ValueError, TypeError): return None
+
+
+def _disk_has_unmerged_worktree(project, deadline=None):
+    def timeout(): return max(.01,min(10,deadline-time.monotonic())) if deadline is not None else 10
+    directory=Path(project).resolve()
+    if not any((parent/".git").exists() for parent in (directory,*directory.parents)):
+        return False
+    try:
+        if deadline is not None and time.monotonic() >= deadline: return True
+        raw=subprocess.run(["git","-C",str(project),"worktree","list","--porcelain"],capture_output=True,text=True,timeout=timeout())
+        if raw.returncode: return True
+        branches=[]
+        for line in raw.stdout.splitlines():
+            if line.startswith("branch refs/heads/"): branches.append(line.removeprefix("branch refs/heads/"))
+        current_result=subprocess.run(["git","-C",str(project),"branch","--show-current"],capture_output=True,text=True,timeout=timeout())
+        if current_result.returncode: return True
+        current=current_result.stdout.strip()
+        for branch in branches:
+            if deadline is not None and time.monotonic() >= deadline: return True
+            if branch != current and subprocess.run(["git","-C",str(project),"merge-base","--is-ancestor",branch,current or "HEAD"],capture_output=True,timeout=timeout()).returncode != 0:
+                return True
+    except (OSError,subprocess.SubprocessError): return True
+    return False
+
+
+def _disk_scan(d, st, health=None, include_sim_details=False):
+    round_started=time.monotonic()
+    prefs=st.get("prefs",{})
+    cheap_limit=min(5.0,max(0.0,float(_pref_in(prefs,"disk_private_budget_s"))))
+    scan_limit=min(30.0,max(0.0,float(_pref_in(prefs,"disk_scan_budget_s"))))
+    cheap_deadline=round_started+cheap_limit
+    scan_deadline=cheap_deadline+scan_limit
+    du_budget={"cheap_deadline":cheap_deadline,"deadline":scan_deadline,"rank_measured":[],"rank_unmeasured":[]}
+    timings={}
+    phase_started=time.monotonic()
+    health = health or _disk_health(st, cheap_deadline)
+    timings.update(health.get("timings_s",{}))
+    timings["health"] = timings.get("health_total",0.0)
+    timings["health"] = time.monotonic()-phase_started
+    fixture_data={}
+    fixture_path=os.environ.get("TEAMWORK_HEALTH_FIXTURE")
+    if fixture_path:
+        try: fixture_data=json.loads(Path(fixture_path).read_text(encoding="utf-8"))
+        except (OSError,ValueError): fixture_data={}
+    home = Path(os.environ.get("HOME") or Path.home()).expanduser()
+    phase_started=time.monotonic()
+    projects = _disk_projects(home, d, cheap_deadline)
+    timings["project_discovery"] = time.monotonic()-phase_started
+    old_report = st.get("disk_space") or {}; previous = old_report.get("sizes", {})
+    measure_cache=old_report.get("measure_cache",{})
+    if not isinstance(measure_cache,dict): measure_cache={}
+    legacy_stamp=old_report.get("at") or old_report.get("ranked_at")
+    legacy_complete=old_report.get("measurements",{})
+    legacy_sizes=dict(previous) if isinstance(previous,dict) else {}
+    legacy_sizes.update(old_report.get("rank_sizes",{}) if isinstance(old_report.get("rank_sizes"),dict) else {})
+    legacy_sizes.update({path:size for size,path in old_report.get("top",[]) if isinstance(path,str)})
+    phase_started=time.monotonic()
+    complete_rank=set(old_report.get("rank_measured",[]))
+    for path,value in legacy_sizes.items():
+        key=str(path)
+        if key in measure_cache or not isinstance(value,(int,float)) or not Path(key).is_dir() or Path(key).is_symlink(): continue
+        complete=bool(legacy_complete.get(key,False)) if key in previous else key in complete_rank
+        if complete:
+            measure_cache[key]={"bytes":int(value),"cached_bytes":int(value),"complete":True,
+                "measured_at":legacy_stamp,"cached_at":legacy_stamp,"updated_at":legacy_stamp,"stack":[]}
+        else:
+            seeded=_disk_seed(key)
+            if seeded:
+                seeded["cached_bytes"]=int(value); seeded["cached_at"]=legacy_stamp
+                measure_cache[key]=seeded
+    for device in old_report.get("simulator_inventory",[]):
+        path=str(home/"Library/Developer/CoreSimulator/Devices"/str(device.get("udid","")))
+        value=device.get("bytes")
+        if value is None or path in measure_cache or not Path(path).is_dir() or Path(path).is_symlink(): continue
+        complete=bool(device.get("bytes_complete"))
+        seeded={"bytes":int(value),"cached_bytes":int(value),"complete":complete,
+            "measured_at":legacy_stamp if complete else None,"cached_at":legacy_stamp,"updated_at":legacy_stamp,"stack":[]}
+        if not complete:
+            fresh=_disk_seed(path)
+            if fresh: seeded.update(fresh); seeded["cached_bytes"]=int(value); seeded["cached_at"]=legacy_stamp
+        measure_cache[path]=seeded
+    timings["cache_migration"] = time.monotonic()-phase_started
+    sizes = dict(fixture_data.get("disk_sizes", {})) if fixture_path else {}
+    measurements={}
+    at = now(); baseline = None
+    try:
+        cutoff = dt.datetime.fromisoformat(at) - dt.timedelta(hours=1)
+        samples = list(old_report.get("samples", []))
+        eligible = [(dt.datetime.fromisoformat(x["at"]), x.get("sizes", {})) for x in samples
+                    if isinstance(x, dict) and x.get("at")]
+        eligible = [(stamp, row) for stamp, row in eligible if stamp <= cutoff]
+        if eligible: baseline = max(eligible, key=lambda x:x[0])[1]
+        elif old_report.get("at") and dt.datetime.fromisoformat(old_report["at"]) <= cutoff: baseline = previous
+    except (ValueError, TypeError): baseline = None
+    private_paths=[]
+    phase_started=time.monotonic()
+    for project in projects:
+        if time.monotonic() >= cheap_deadline: break
+        try:
+            for p in (project / ".teamwork" / "private").glob("*/tmp"):
+                if time.monotonic() >= cheap_deadline: break
+                if p.is_dir() and not p.is_symlink(): private_paths.append(p)
+        except OSError: pass
+    if not fixture_path:
+        _disk_refresh(private_paths,measure_cache,max(0,cheap_deadline-time.monotonic()))
+    for tmp in private_paths:
+        key=str(tmp); row=measure_cache.get(key,{})
+        if fixture_path:
+            sizes[key]=int(fixture_data.get("disk_sizes",{}).get(key,0)); measurements[key]=True
+        elif row:
+            sizes[key],_= _disk_cached_value(row); measurements[key]=bool(row.get("complete"))
+        else:
+            sizes[key]=None; measurements[key]=False
+    timings["private_tmp"] = time.monotonic()-phase_started
+    growth = sorted(((int(sizes[k]) - int((baseline or {})[k]), k) for k in sizes
+                     if sizes[k] is not None and measurements.get(k) and baseline and (baseline or {}).get(k) is not None), reverse=True)
+    usage=SimpleNamespace(free=int(fixture_data.get("disk_free",0)),total=int(fixture_data.get("disk_total",1))) if fixture_path else shutil.disk_usage(home)
+    alarms=[]; lim=int(_pref_in(prefs,"disk_private_tmp_gb"))*1024**3; glim=int(_pref_in(prefs,"disk_growth_gb_per_hour"))*1024**3
+    for tmp in private_paths:
+        size=sizes[str(tmp)]
+        if size is None: continue
+        delta=int(size)-int((baseline or {}).get(str(tmp),size)) if measurements.get(str(tmp)) and baseline and (baseline or {}).get(str(tmp)) is not None else 0
+        if size > lim or delta > glim:
+            alarms.append(lab(st,"disk_private_alarm",thread=tmp.parent.name,size=_disk_human(size),growth=_disk_human(max(0,delta))))
+    alarms.extend(health["alarms"])
+    simulators=list(health.get("simulators",fixture_data.get("simulators", [])))
+    simulator_inventory=[]
+    phase_started=time.monotonic()
+    try:
+        device_data=health.get("simulator_devices",[])
+        device_root=home/"Library/Developer/CoreSimulator/Devices"
+        sim_paths=[device_root/device.get("udid") for device in device_data if device.get("udid")]
+        if sim_paths and time.monotonic()<scan_deadline:
+            sim_budget=max(0,scan_deadline-time.monotonic())*.2
+            _disk_refresh(sim_paths,measure_cache,min(sim_budget,scan_deadline-time.monotonic()))
+        for device in device_data:
+            if time.monotonic() >= scan_deadline: break
+            runtime=device.get("runtime", "unknown")
+            udid=device.get("udid")
+            if not udid: continue
+            folder=device_root/udid
+            last_value=device.get("lastBootedAt") or device.get("lastUsedAt") or device.get("last_used_at")
+            estimated = not bool(last_value)
+            if last_value:
+                try: last_used=dt.datetime.fromisoformat(str(last_value).replace("Z","+00:00")).astimezone().isoformat(timespec="minutes")
+                except ValueError: last_value=None; estimated=True
+            if not last_value:
+                try: last_used=dt.datetime.fromtimestamp(folder.stat().st_mtime).astimezone().isoformat(timespec="minutes")
+                except OSError: last_used="unknown"
+            cached=next((x for x in (old_report.get("simulator_inventory") or []) if x.get("udid")==udid),{})
+            measure=measure_cache.get(str(folder),{})
+            complete=bool(measure.get("complete"))
+            sim_bytes,sim_stamp= _disk_cached_value(measure)
+            sim_age=max(0,int(time.time()-dt.datetime.fromisoformat(sim_stamp).timestamp())) if sim_stamp else None
+            sim_value_complete=complete
+            tree_fingerprint=_disk_measure_fingerprint(measure,folder,sim_bytes) if sim_bytes is not None else ""
+            simulator_inventory.append({"udid":udid,"name":device.get("name","?"),"runtime":runtime,
+                "state":device.get("state","unknown"),"bytes":sim_bytes,"bytes_complete":sim_value_complete,"bytes_age_s":sim_age,
+                "last_used":last_used,"last_used_estimated":estimated,
+                "tree_fingerprint":tree_fingerprint,"actions":["shutdown","erase","delete"]})
+    except (OSError,ValueError,TypeError,subprocess.SubprocessError): pass
+    timings["simulators"] = time.monotonic()-phase_started
+    timings["simulator_fingerprints"] = timings["simulators"]
+    processes=[]
+    phase_started=time.monotonic()
+    if not fixture_path:
+        try:
+            if time.monotonic() >= cheap_deadline: raise subprocess.TimeoutExpired("ps", 0)
+            raw=subprocess.run(["ps","-axo","pid,etime,rss,comm"],capture_output=True,text=True,
+                               timeout=max(.01,min(2,cheap_deadline-time.monotonic()))).stdout
+            for line in raw.splitlines()[1:]:
+                if time.monotonic() >= cheap_deadline: break
+                m=re.match(r"\s*(\d+)\s+(\S+)\s+(\d+)\s+(.+)",line)
+                if not m: continue
+                etime=m[2]; pieces=etime.split("-"); days=int(pieces[0]) if len(pieces)==2 else 0; clock=pieces[-1].split(":")
+                seconds=days*86400+(int(clock[-3])*3600+int(clock[-2])*60+int(clock[-1]) if len(clock)==3 else int(clock[-2])*60+int(clock[-1]))
+                if re.search(r"node|python|codex|simulator|CoreSimulator",m[4],re.I) and int(m[3])>=524288 and seconds>=3600:
+                    processes.append({"pid":int(m[1]),"etime":m[2],"rss":int(m[3]),"name":Path(m[4]).name})
+        except (OSError,subprocess.SubprocessError): pass
+    timings["ps_processes"] = time.monotonic()-phase_started
+    health["simulator_count"] = sum(1 for x in simulator_inventory if x["state"].lower() == "booted") if simulator_inventory else health["simulator_count"]
+    health["disk_free"] = usage.free
+    health["disk_total"] = usage.total
+    recent = list(st.get("computer_unreachable_recent", []))[-int(_pref_in(st.get("prefs",{}),"health_disconnect_window")):]
+    load_limit=health["thresholds"]["load1"]; pipe_limit=health["thresholds"]["pipe_bytes"]
+    low_disk_gb=int(_pref_in(prefs,"disk_low_gb"))*1024**3; low_disk_pct=float(_pref_in(prefs,"disk_low_pct"))
+    def disk_low(event):
+        metrics=event.get("health",{}); free=int(metrics.get("disk_free",0)); total=max(1,int(metrics.get("disk_total",1)))
+        return free<low_disk_gb or free*100/total<low_disk_pct
+    summary=lab(st,"health_disconnect_summary",n=len(recent),load=sum(float(x.get("health",{}).get("load",[0])[0])>load_limit for x in recent),
+                pipe=sum(int(x.get("health",{}).get("pipe_bytes",pipe_limit))<pipe_limit for x in recent),
+                disk=sum(disk_low(x) for x in recent))
+    samples=list(old_report.get("samples", [])); samples.append({"at":at,"sizes":{k:v for k,v in sizes.items() if v is not None and measurements.get(k)}}); samples=samples[-24:]
+    top_n=int(_pref_in(prefs,"disk_top_n"))
+    phase_started=time.monotonic()
+    rank_budget=max(0,scan_deadline-time.monotonic())
+    ranked, rank_partial = _disk_rank(home, measure_cache, top_n, rank_budget,scan_deadline,du_budget,projects)
+    timings["ranking"] = time.monotonic()-phase_started
+    rank_sizes={}
+    for path,row in measure_cache.items():
+        if time.monotonic() >= scan_deadline: break
+        if isinstance(row,dict):
+            value,_stamp=_disk_cached_value(row)
+            if value is not None: rank_sizes[path]=value
+    ranked_at=at
+    ages={}
+    for key,row in measure_cache.items():
+        if time.monotonic() >= scan_deadline: break
+        if isinstance(row,dict):
+            _value,stamp=_disk_cached_value(row)
+            if stamp: ages[key]=max(0,int(time.time()-dt.datetime.fromisoformat(stamp).timestamp()))
+    return {"at":at,"samples":samples,"free":usage.free,"total":usage.total,"pct":round(100*usage.free/max(1,usage.total),1),"sizes":sizes,
+        "growth":growth[:5],"top":sorted(ranked,key=lambda item:(item[0] is not None,item[0] if item[0] is not None else -1,item[1]),reverse=True)[:top_n],"ranked_at":ranked_at,"rank_sizes":rank_sizes,"rank_partial":rank_partial,
+        "measurements":measurements,"measurement_ages_s":ages,"measure_cache":measure_cache,
+        "alarms":alarms,"simulators":simulators,"simulator_inventory":simulator_inventory,
+        "processes":sorted(processes,key=lambda x:x["rss"],reverse=True)[:10],"projects":[str(x) for x in projects],
+        "health":health,"disconnect_summary":summary,"rank_measured":du_budget["rank_measured"],
+        "rank_unmeasured":list(dict.fromkeys(du_budget["rank_unmeasured"])),
+        "timings_s":timings,"_scan_deadline":scan_deadline,"_cheap_deadline":cheap_deadline,"_du_budget":du_budget}
+
+
+def _disk_disconnect_time(row):
+    metadata=row.get("external_metadata") if isinstance(row.get("external_metadata"),dict) else {}
+    error=metadata.get("last_init_error")
+    if not isinstance(error,dict) or error.get("error_kind")!="computer_unreachable": return None
+    for key in ("at","time","timestamp","created_at","occurred_at","updated_at"):
+        if error.get(key): return str(error[key])
+    return None
+
+
+def _disk_record_disconnect(d,st,sid,stamp,health):
+    seen=st.setdefault("computer_unreachable_seen",{})
+    previous=seen.get(sid)
+    if previous:
+        old,new=_when(previous),_when(stamp)
+        if not new or old and new<=old: return False
+    event={"ev":"computer-unreachable","session_id":sid,"disconnected_at":stamp,
+           "health":{k:health.get(k) for k in ("load","process_count","disk_free","disk_total","pipe_bytes","simulator_count","cpu_count")},"at":now()}
+    log(d,event)
+    seen[sid]=stamp
+    recent=st.setdefault("computer_unreachable_recent",[]); recent.append(event); recent[:]=recent[-max(1,int(_pref_in(st.get("prefs",{}),"health_disconnect_window"))):]
+    return True
+
+
+def _disk_candidates(d, report, pending=False, deadline=None, du_budget=None, measure=True):
+    home=Path(os.environ.get("HOME") or Path.home()).expanduser(); st=load(d); prefs=st.get("prefs",{})
+    if deadline is None: deadline=time.monotonic()+float(_pref_in(prefs,"disk_preview_budget_s"))
+    guard_budget=max(0.0,deadline-time.monotonic())
+    guard_deadline=min(deadline,time.monotonic()+max(.05,min(.5,guard_budget*.25)))
+    roots=[home,Path(d).parent.parent,Path(tempfile.gettempdir())]; guard_status={}; exact,patterns=_disk_guards(d,guard_deadline,guard_status); rows=[]; requests=[]
+    def signature(path, size):
+        return _disk_measure_fingerprint(report.get("measure_cache",{}).get(str(path),{}),path,size)
+    def add(p,category):
+        if deadline is not None and time.monotonic() >= deadline: return
+        if not p.exists() or not _disk_safe(p,roots,exact,patterns): return
+        in_use=None
+        for row in rows:
+            try:
+                if os.path.samefile(p,row["path"]): return
+            except OSError:
+                if str(p)==row["path"]: return
+        request={"path":str(p),"category":category,"in_use":in_use}
+        requests.append(request); rows.append(request)
+    def finish():
+        if not isinstance(report.get("measure_cache"),dict): report["measure_cache"]={}
+        cache=report["measure_cache"]
+        # Without a full measure, spend what is left of the preview budget on candidates never measured, so they become eligible over later sweeps.
+        todo=[row["path"] for row in requests] if measure else [row["path"] for row in requests if row["path"] not in cache]
+        if deadline is not None and todo and time.monotonic() < deadline:
+            _disk_refresh(todo,cache,max(0,deadline-time.monotonic()))
+        result=[]
+        for request in requests:
+            measured=cache.get(request["path"],{})
+            size,measured_at=_disk_cached_value(measured)
+            complete=bool(measured.get("complete"))
+            eligible=size is not None and complete and guard_status.get("complete",True)
+            size=int(size) if size is not None else None
+            age_seconds=max(0,int(time.time()-dt.datetime.fromisoformat(measured_at).timestamp())) if measured_at else None
+            item={"path":request["path"],"category":request["category"],"bytes":size,
+                  "size_display":(("" if complete else "≥ ")+_disk_human(size)) if size is not None else "未测",
+                  "measured":size is not None,"complete":complete,"eligible":eligible,"measured_age_s":age_seconds}
+            if not guard_status.get("complete",True): item["ineligible_reason"]=lab(st,"disk_guard_incomplete")
+            if pending:
+                item["in_use"]=request["in_use"]
+                item["signature"]=signature(item["path"],size)
+            result.append(item)
+        if pending:
+            # Keep the list one person can read and approve: the largest items first, the rest only counted.
+            result.sort(key=lambda row:(not row["eligible"],-(row["bytes"] or 0),row["path"]))
+            cap=max(10,3*int(_pref_in(prefs,"disk_top_n")))
+            report["pending_omitted"]=max(0,len(result)-cap); result=result[:cap]
+        return result
+    if pending:
+        for p,cat in ((home/"Backups","backup"),(home/"backups","backup"),
+            (home/".dev-scratch"/"backups","backup"),
+            (home/".dev-scratch"/"cache","scratch cache"),
+            (home/"Library/Caches","application cache"),
+            (home/"Library/Developer/Xcode/iOS DeviceSupport","iOS DeviceSupport")):
+            if deadline is not None and time.monotonic() >= deadline: break
+            add(p,cat)
+        for device in (report.get("health") or {}).get("simulator_devices",[]):
+            if deadline is not None and time.monotonic() >= deadline: break
+            udid=device.get("udid")
+            if udid: add(home/"Library/Developer/CoreSimulator/Devices"/udid,"simulator data")
+        project_paths=report.get("projects")
+        if project_paths is None: project_paths=_disk_projects(home,d,deadline)
+        for project in map(Path,project_paths):
+            if deadline is not None and time.monotonic() >= deadline: break
+            if _disk_has_unmerged_worktree(project,deadline): continue
+            try:
+                for tmp in (project/".teamwork"/"private").glob("*/tmp"):
+                    if tmp.is_dir() and not tmp.is_symlink(): add(tmp,"other project tmp")
+            except OSError: pass
+        caches=home/"Library/Caches"
+        measured_apps=sorted(Path(path) for path in report.get("measure_cache",{}) if Path(path).parent==caches)
+        for p in measured_apps:
+            if deadline is not None and time.monotonic() >= deadline: break
+            add(p,"application cache")
+        if caches.is_dir():
+            for p in caches.iterdir():
+                if deadline is not None and time.monotonic() >= deadline: break
+                add(p,"application cache")
+        scratch=home/".dev-scratch"/"tmp"
+        if scratch.is_dir():
+            for p in scratch.iterdir():
+                if deadline is not None and time.monotonic() >= deadline: break
+                # Only stale entries; claude-* is the running harness's own temp folder.
+                try: stale=p.lstat().st_mtime<time.time()-int(_pref_in(prefs,"disk_scratch_days"))*86400
+                except OSError: stale=False
+                if stale and not p.name.startswith("claude-") and not (p/".teamwork").exists(): add(p,"other scratch tmp")
+        try:
+            for p in home.iterdir():
+                if deadline is not None and time.monotonic() >= deadline: break
+                if p.is_dir() and re.search(r"backup|\.(?:bak|backup)$",p.name,re.I): add(p,"backup")
+        except OSError: pass
+        return finish()
+    if report.get("pct",0) >= int(_pref_in(prefs,"disk_low_pct")) and report.get("free",0) >= int(_pref_in(prefs,"disk_low_gb"))*1024**3: return finish()
+    npm_cache=home/".npm"/"_cacache"
+    for p,cat in ((npm_cache,"npm cache"),(home/".cache"/"pip","pip cache"),(home/".cache"/"yarn","yarn cache"),
+        (home/"Library/Caches/Homebrew","Homebrew cache"),(home/".cache"/"go-build","Go build cache"),(home/"Library/Developer/Xcode/DerivedData","Xcode DerivedData")):
+        if deadline is not None and time.monotonic() >= deadline: break
+        add(p,cat)
+    for p in Path(tempfile.gettempdir()).glob("tw-merge-*"):
+        if deadline is not None and time.monotonic() >= deadline: break
+        if (p / "wt").exists() and _disk_has_unmerged_worktree(p / "wt",deadline): continue
+        add(p,"tw-merge temp")
+    cutoff=time.time()-int(_pref_in(prefs,"disk_scratch_days"))*86400
+    for project in map(Path,report["projects"]):
+        if deadline is not None and time.monotonic() >= deadline: break
+        if _disk_has_unmerged_worktree(project,deadline): continue
+        for tmp in (project/".teamwork"/"private").glob("*/tmp"):
+            if deadline is not None and time.monotonic() >= deadline: break
+            for p in tmp.iterdir():
+                if deadline is not None and time.monotonic() >= deadline: break
+                try:
+                    if p.stat().st_mtime<cutoff: add(p,"private tmp old copy")
+                except OSError: pass
+    configs=[home/".claude",*home.glob(".claude-*")]
+    if os.environ.get("CLAUDE_CONFIG_DIR"): configs.append(Path(os.environ["CLAUDE_CONFIG_DIR"]).expanduser())
+    for config in dict.fromkeys(configs):
+        if deadline is not None and time.monotonic() >= deadline: break
+        base=config/"teamwork-releases"
+        if base.is_dir():
+            keep=_disk_kept_releases(config,_pref_in(prefs,"disk_keep_snapshots"))
+            if keep is None: continue
+            for p in base.iterdir():
+                if deadline is not None and time.monotonic() >= deadline: break
+                if p.name not in keep and p.is_dir(): add(p,"old teamwork snapshot")
+    return finish()
+
+
+def _disk_apply(d, st, rows, roots):
+    before=shutil.disk_usage(Path(os.environ.get("HOME") or Path.home())).free; guard_status={}; exact,patterns=_disk_guards(d,status=guard_status); deleted={}; items=[]; failed=[]
+    if not guard_status.get("complete",True): raise ValueError(lab(st,"disk_unsafe",path="incomplete protection scan"))
+    try: open_paths=_disk_open_paths()
+    except RuntimeError as exc: raise ValueError(lab(st,"disk_unsafe",path=str(exc))) from exc
+    for row in sorted(rows,key=lambda item:len(Path(item["path"]).parts),reverse=True):
+        if not row.get("eligible", True): continue
+        p=Path(row["path"])
+        if not p.exists() or not _disk_safe(p,roots,exact,patterns): raise ValueError(lab(st,"disk_unsafe",path=p))
+        if any(opened==str(p) or opened.startswith(str(p).rstrip("/")+"/") for opened in open_paths):
+            failed.append({"path":str(p),"error":"在用"}); continue
+        try:
+            # A thread's private tmp (or one entry in it) goes through the shared link-safe remover.
+            tmp_root=p if p.name=="tmp" else p.parent
+            if row["category"] in ("private tmp old copy","other project tmp") and tmp_root.name=="tmp" \
+                    and tmp_root.parent.parent.name=="private" and tmp_root.parent.parent.parent.name==".teamwork":
+                clear_thread_tmp(tmp_root.parents[3],tmp_root.parent.name,() if p==tmp_root else (p.name,))
+            elif p.is_dir(): shutil.rmtree(p)
+            elif p.exists(): p.unlink()
+        except (OSError,SystemExit) as exc:
+            failed.append({"path":str(p),"error":str(exc)[:160]}); continue
+        deleted[row["category"]]=deleted.get(row["category"],0)+int(row.get("bytes") or 0); items.append(str(p))
+    after=shutil.disk_usage(Path(os.environ.get("HOME") or Path.home())).free
+    event={"ev":"disk-space-cleanup","before_free":before,"after_free":after,"deleted":deleted,"items":items,"at":now()}
+    if failed: event["failed"]=failed
+    # APFS keeps blocks that a local Time Machine snapshot still references, so free space only rises when it expires.
+    if sum(deleted.values())>2*max(0,after-before)+64*1024**2 and shutil.which("tmutil"):
+        try: snaps=subprocess.run(["tmutil","listlocalsnapshots","/"],capture_output=True,text=True,timeout=5).stdout
+        except (OSError,subprocess.SubprocessError): snaps=""
+        held=[x.strip() for x in snaps.splitlines() if x.strip().startswith("com.apple.")]
+        if held: event["held_by_local_snapshots"]=held; print(lab(st,"disk_held_by_snapshots",count=len(held)))
+    log(d,event); st["disk_space_cleanup"]=event
+    return event
+
+
+def _disk_fingerprint(rows):
+    stable=sorted((str(row.get("path","")),str(row.get("category","")),str(row.get("signature", "")))
+                  for row in rows if isinstance(row,dict))
+    return hashlib.sha256(json.dumps(stable,ensure_ascii=False,separators=(",",":")).encode()).hexdigest()[:20]
+
+
+def _disk_sim_fingerprint(device, action):
+    state={k:device.get(k) for k in ("name","runtime","state","bytes","bytes_complete","last_used","last_used_estimated","tree_fingerprint")}
+    return _disk_fingerprint([{"path":device.get("udid"),"category":action,"signature":json.dumps(state,sort_keys=True,ensure_ascii=False)}])
+
+
+def _disk_sim_action(a,d,st):
+    if not getattr(a,"sim_udid",None): return False
+    action=getattr(a,"sim_action",None)
+    if action not in ("shutdown","erase","delete"): raise ValueError(lab(st,"disk_sim_action_invalid"))
+    scan_state=st
+    if getattr(a,"apply",False):
+        scan_state=dict(st); scan_state["disk_space"]=dict(st.get("disk_space") or {})
+        measure_cache=dict(scan_state["disk_space"].get("measure_cache") or {})
+        home=Path(os.environ.get("HOME") or Path.home()).expanduser()
+        measure_cache.pop(str(home/"Library/Developer/CoreSimulator/Devices"/str(a.sim_udid)),None)
+        scan_state["disk_space"]["measure_cache"]=measure_cache
+    current=_disk_scan(d,scan_state,include_sim_details=bool(getattr(a,"apply",False)))["simulator_inventory"]
+    device=next((x for x in current if x["udid"]==a.sim_udid),None)
+    if not device or not a.sim_fingerprint or _disk_sim_fingerprint(device,action)!=a.sim_fingerprint:
+        raise ValueError(lab(st,"disk_fp_changed"))
+    if not getattr(a,"apply",False):
+        print(lab(st,"disk_sim_preview",action=action,udid=a.sim_udid,fingerprint=_disk_sim_fingerprint(device,action))); return True
+    result=subprocess.run(["xcrun","simctl",action,a.sim_udid],capture_output=True,text=True,timeout=120)
+    if result.returncode: raise ValueError(lab(st,"disk_sim_failed",action=action,udid=a.sim_udid,detail=(result.stderr or result.stdout).strip()))
+    log(d,{"ev":"simulator-action","udid":a.sim_udid,"action":action,"at":now()})
+    print(lab(st,"disk_sim_done",action=action,udid=a.sim_udid)); return True
+
+
+def _disk_command(a,d,st):
+    if _disk_sim_action(a,d,st): return
+    if getattr(a,"space_apply",False):
+        if not getattr(a,"apply",False): raise ValueError(lab(st,"disk_apply_requires"))
+        plan=(st.get("disk_space") or {}).get("pending_plan") or {}
+        if not a.space_fingerprint or a.space_fingerprint!=plan.get("fingerprint"): raise ValueError(lab(st,"disk_fp_changed"))
+        saved_report=st.get("disk_space") or {}
+        preview_budget=max(0.0,float(_pref_in(st.get("prefs",{}),"disk_preview_budget_s")))
+        current=_disk_candidates(d,saved_report,True,deadline=time.monotonic()+preview_budget,measure=False)
+        if _disk_fingerprint(current)!=plan.get("fingerprint"): raise ValueError(lab(st,"disk_fp_changed"))
+        planned={(str(x.get("path")),str(x.get("category")),str(x.get("signature",""))) for x in plan.get("items",[]) if isinstance(x,dict)}
+        current=[x for x in current if (str(x.get("path")),str(x.get("category")),str(x.get("signature",""))) in planned]
+        planned_eligible={(str(x.get("path")),str(x.get("category")),str(x.get("signature",""))) for x in plan.get("items",[]) if isinstance(x,dict) and x.get("eligible")}
+        if any(not item.get("eligible") for item in current if (str(item.get("path")),str(item.get("category")),str(item.get("signature",""))) in planned_eligible):
+            raise ValueError(lab(st,"disk_fp_changed"))
+        scan_budget=max(0.0,float(_pref_in(st.get("prefs",{}),"disk_scan_budget_s")))
+        for item in current:
+            if not item.get("eligible"): continue
+            fresh={}; deadline=time.monotonic()+scan_budget
+            _disk_refresh([item["path"]],fresh,scan_budget)
+            measured=fresh.get(item["path"],{})
+            if not measured.get("complete") or _disk_cached_value(measured)[0] != item.get("bytes") or _disk_measure_fingerprint(measured,item["path"],item.get("bytes")) != item.get("signature"):
+                raise ValueError(lab(st,"disk_fp_changed"))
+            if time.monotonic()>deadline: raise ValueError(lab(st,"disk_fp_changed"))
+        event=_disk_apply(d,st,current,[Path(os.environ.get("HOME") or Path.home())])
+        st["disk_space"]["pending_plan"]={}; _save_locked(d,st,None); print(json.dumps(event,ensure_ascii=False)); return
+    report=_disk_scan(d,st,getattr(a,"_health_report",None))
+    fixture_path=os.environ.get("TEAMWORK_HEALTH_FIXTURE")
+    if fixture_path:
+        try: fixture_data=json.loads(Path(fixture_path).read_text(encoding="utf-8"))
+        except (OSError,ValueError): fixture_data={}
+        if "auto_candidates" in fixture_data and "pending_candidates" in fixture_data:
+            auto=list(fixture_data.get("auto_candidates",[])); pending=list(fixture_data.get("pending_candidates",[]))
+        else:
+            pending=_disk_candidates(d,report,True,deadline=time.monotonic()+.25,measure=False)
+            auto=_disk_candidates(d,report,deadline=time.monotonic()+.25,measure=False)
+    else:
+        preview_budget=max(0.0,float(_pref_in(st.get("prefs",{}),"disk_preview_budget_s")))
+        preview_started=time.monotonic()
+        pending_deadline=time.monotonic()+preview_budget
+        pending=_disk_candidates(d,report,True,deadline=pending_deadline,measure=False)
+        auto_deadline=time.monotonic()+preview_budget
+        auto=_disk_candidates(d,report,deadline=auto_deadline,measure=False)
+        report.setdefault("timings_s",{})["candidate_previews"]=time.monotonic()-preview_started
+        report["preview_partial"]=time.monotonic()>=pending_deadline or time.monotonic()>=auto_deadline or any("ineligible_reason" in row for row in pending+auto)
+    fingerprint=_disk_fingerprint(pending)
+    report["pending_plan"]={"fingerprint":fingerprint,"items":pending}; report["auto"]=auto; report["pending"]=pending
+    report["summary"]=lab(st,"disk_free",free=_disk_human(report["free"]),pct=report["pct"])+"\n"+lab(st,"disk_growth",rows="; ".join(f"{_disk_human(n)} {p}" for n,p in report["growth"][:5]))
+    timing_text="; ".join(f"{name}={seconds:.3f}s" for name,seconds in report.get("timings_s",{}).items())
+    report["summary"]+="\nInspection phase timings: "+(timing_text or "unavailable")
+    private_rows=[]
+    for path,value in report.get("sizes",{}).items():
+        age=report.get("measurement_ages_s",{}).get(path)
+        row=report.get("measure_cache",{}).get(path,{})
+        value_complete=bool(row.get("complete"))
+        display="未测" if value is None else (("" if value_complete else "≥ ")+_disk_human(value))
+        if age is not None: display+=f"（{age} 秒前）" if st.get("prefs",{}).get("language")=="zh" else f" ({age}s old)"
+        private_rows.append(f"{display} {path}")
+    report["summary"]+="\n"+("私有 tmp 测量：" if st.get("prefs",{}).get("language")=="zh" else "Private tmp measurements: ")+("; ".join(private_rows) or lab(st,"disk_none"))
+    measured_paths=set(report.get("rank_measured",[]))
+    def ranked_row(n,p):
+        row=report.get("measure_cache",{}).get(p,{})
+        value_complete=bool(row.get("complete"))
+        text="未测" if n is None else (("" if value_complete else "≥ ")+_disk_human(n))
+        text += " " + p
+        age=report.get("measurement_ages_s",{}).get(p)
+        if age is not None and age>0:
+            text+=(f"（{age} 秒前测量）" if st.get("prefs",{}).get("language")=="zh" else f" ({age}s old)")
+        elif p not in measured_paths:
+            text+=("（上次测量）" if st.get("prefs",{}).get("language")=="zh" else " (last measured)")
+        return text
+    top_label=lab(st,"disk_top",rows="; ".join(ranked_row(n,p) for n,p in report["top"]))
+    if report.get("rank_partial"): top_label += " [partial]" if st.get("prefs",{}).get("language")!="zh" else "【部分结果】"
+    report["summary"]+="\n"+top_label
+    if report.get("rank_partial"):
+        measured="; ".join(report.get("rank_measured",[])) or lab(st,"disk_none")
+        unmeasured="; ".join(report.get("rank_unmeasured",[])) or lab(st,"disk_none")
+        if st.get("prefs",{}).get("language")=="zh": report["summary"]+="\n全盘排行量测状态：已量到 "+measured+"；未量到 "+unmeasured
+        else: report["summary"]+="\nRanking measurements: measured "+measured+"; not measured "+unmeasured
+    report["summary"]+="\n"+lab(st,"disk_sim",rows="; ".join(report["simulators"]) or lab(st,"disk_none"))
+    def simulator_row(x):
+        size=(('' if x.get('bytes_complete') else '≥ ')+_disk_human(x['bytes'])) if x.get('bytes') is not None else ('≥ 已知值不可用' if st.get('prefs',{}).get('language')=='zh' else '≥ known size unavailable')
+        age=x.get("bytes_age_s")
+        age_text=(f"（{age} 秒前）" if st.get("prefs",{}).get("language")=="zh" else f" ({age}s old)") if age is not None else ""
+        return f"{x['name']} {x['udid']} {size}{age_text} {x['last_used']} ({lab(st,'disk_sim_estimated') if x.get('last_used_estimated') else lab(st,'disk_sim_exact')}) [{'/'.join(x['actions'])}; fingerprint: "+','.join(f"{action}={_disk_sim_fingerprint(x,action)}" for action in x['actions'])+"]"
+    sim_rows="; ".join(simulator_row(x) for x in report["simulator_inventory"]) or lab(st,"disk_none")
+    report["summary"]+="\n"+lab(st,"disk_sim_options",rows=sim_rows)
+    report["summary"]+="\n"+lab(st,"disk_process",rows="; ".join(f"{x['name']} pid={x['pid']} {_disk_human(x['rss']*1024)} {x['etime']}" for x in report["processes"]) or lab(st,"disk_none"))
+    report["summary"]+="\n"+lab(st,"disk_alarms",rows="; ".join(report["alarms"]) or lab(st,"disk_none"))
+    h=report["health"]
+    report["summary"]+="\n"+lab(st,"health_line",load=','.join(f"{float(x):.2f}" for x in h["load"]),processes=h["process_count"],free=_disk_human(h["disk_free"]),pipe=h["pipe_bytes"],simulators=h["simulator_count"],orphans=len(h["orphans"]))
+    report["summary"]+="\n"+report["disconnect_summary"]
+    if h["orphans"]: report["summary"]+="\n"+lab(st,"health_orphan_preview",rows='; '.join(f"pid={x['pid']} {x['cmdline']}" for x in h["orphans"]))
+    idle_servers=[x for x in h.get("app_servers",[]) if x.get("idle")]
+    h["app_server_pending"]=[{key:x.get(key) for key in ("broker_pid","app_server_pid","node_repl_count","worktree","broker_start_time","broker_cmdline","idle")} for x in idle_servers]
+    server_rows='; '.join(f"broker pid={x.get('broker_pid')} app-server pid={x['app_server_pid']} node_repl={x['node_repl_count']} worktree={x.get('worktree') or 'unknown'}" for x in idle_servers) or lab(st,"disk_none")
+    report["summary"]+="\nCodex app-server (broker SIGTERM candidates; preview): "+server_rows
+    report["summary"]+="\nCodex app-server metrics: "+('; '.join(f"broker pid={x.get('broker_pid')} app-server pid={x['app_server_pid']} node_repl={x['node_repl_count']} longest={_disk_duration(x.get('node_repl_longest_s'))} median={_disk_duration(x.get('node_repl_median_s'))} server_age={_disk_duration(x.get('app_server_age_s'))} worktree={x.get('worktree') or 'unknown'} idle={x['idle']}" for x in h.get('app_servers',[])) or lab(st,"disk_none"))
+    for line in report["alarms"]: print(line,file=sys.stderr)
+    print(lab(st,"disk_heading")+": "+report["summary"])
+    print("Pending app-server approval list: "+json.dumps(h["app_server_pending"],ensure_ascii=False))
+    preview_suffix=(" [partial]" if st.get("prefs",{}).get("language")!="zh" else "【部分结果】") if report.get("preview_partial") else ""
+    print(lab(st,"disk_auto")+preview_suffix+": "+json.dumps(auto,ensure_ascii=False)); print(lab(st,"disk_pending")+preview_suffix+f" [{fingerprint}]: "+json.dumps(pending,ensure_ascii=False))
+    if report.get("pending_omitted"): print(lab(st,"disk_pending_omitted",count=report["pending_omitted"]))
+    report.pop("_scan_deadline",None); report.pop("_cheap_deadline",None); report.pop("_du_budget",None)
+    st["disk_space"]=report
+    if getattr(a,"apply",False) and h["orphans"]:
+        killed=_disk_kill_orphans(h["orphans"])
+        if killed: log(d,{"ev":"health-orphans-terminated","pids":killed,"at":now()}); print(lab(st,"health_killed",pids=','.join(map(str,killed))))
+    if getattr(a,"apply",False) and idle_servers:
+        killed=_disk_kill_idle_brokers(idle_servers)
+        if killed: log(d,{"ev":"health-idle-app-servers-terminated","pids":killed,"at":now()}); print("Sent SIGTERM to verified idle app-server brokers: "+','.join(map(str,killed)))
+    if getattr(a,"space_auto",False) and getattr(a,"apply",False) and auto:
+        print(json.dumps(_disk_apply(d,st,auto,[Path(os.environ.get("HOME") or Path.home()),Path(d).parent.parent,Path(tempfile.gettempdir())]),ensure_ascii=False))
+    _save_locked(d,st,{"ev":"disk-space-inspection","free":report["free"],"pct":report["pct"],"alarms":len(report["alarms"]),"auto_items":len(auto),"pending_items":len(pending)})
+
+
 def cmd_sweep(a):
     """Read the newest ledger and save it under the shared save lock (T72), so a lead write during a sweep is
     never lost and never refused."""
     d = need(find_dir())
-    _with_save_lock(d, lambda: _sweep_locked(a, d, load(d)))
+    if getattr(a, "space_apply", False):
+        _with_save_lock(d, lambda: _disk_command(a, d, load(d)))
+        return
+    # The disk report reads what the sweep recorded, but callers read the sweep JSON from the last stdout line.
+    held = io.StringIO()
+    with contextlib.redirect_stdout(held):
+        _with_save_lock(d, lambda: _sweep_locked(a, d, load(d)))
+    _with_save_lock(d, lambda: _disk_command(a, d, load(d)))
+    sys.stdout.write(held.getvalue())
 
 
 def _sweep_locked(a, d, st):
@@ -7085,6 +8374,7 @@ def _sweep_locked(a, d, st):
     if a.sessions:
         raw = json.loads(Path(a.sessions).read_text(encoding="utf-8"))
         rows = payload_rows(raw, ("data", "sessions", "rows"))
+    a._health_report = _disk_health(st)
     event_sets = []
     event_specs = list(getattr(a, "event_files", []) or [])
     if not event_specs:
@@ -7141,6 +8431,8 @@ def _sweep_locked(a, d, st):
         t = st.get("threads", {}).get(name)
         if not t: continue
         matched.add(sid or name)
+        disconnected_at=_disk_disconnect_time(row)
+        if sid and disconnected_at and _disk_record_disconnect(d,st,sid,disconnected_at,a._health_report): changed=True
         wanted_tags = [f"teamwork:{tag(st)}", f"teamwork-thread:{name}"]
         present_tags = row.get("tags") if isinstance(row.get("tags"), list) else []
         prefix = f"[{tag(st)}] {name} ·"
@@ -10168,6 +11460,7 @@ PRIVATE_HELP = """# Private words and paths: never in commits, branches, message
 # This file lives in .teamwork/ and is never committed. One entry per line, case-insensitive.
 #   some-private-product        a word or phrase (substring match)
 #   path: secrets/**            a path glob that must never be committed
+#   disk: ~/Library/MyApp/**    a path glob that disk cleanup must never remove
 # Private notes and files go in .teamwork/private/ (ignored, never committed).
 """
 
@@ -12742,6 +14035,9 @@ def _replay(st, e, project, notes, d):
                 st.setdefault("plan_user_said", []).append({"t": e.get("t"), "text": e["user_said"].strip()})
         elif ev == "plan-reopened":
             st["plan_approved"] = False
+        elif ev == "computer-unreachable" and e.get("session_id") and e.get("disconnected_at"):
+            st.setdefault("computer_unreachable_seen", {})[str(e["session_id"])] = e["disconnected_at"]
+            st.setdefault("computer_unreachable_recent", []).append(e)
         th = e.get("thread")
         if th and not re.fullmatch(NAME_RE, th):
             notes.append(f"ignored log thread name outside NAME_RE: {str(th)[:40]!r}")
@@ -13150,11 +14446,13 @@ def cmd_rebuild(a):
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
-def find_projects(root):
+def find_projects(root, deadline=None):
     root = Path(root).expanduser().resolve()
     hits = set()
     for pat in (".teamwork/state.json", "*/.teamwork/state.json", "*/*/.teamwork/state.json"):
-        hits |= {q.parent.parent for q in root.glob(pat)}
+        for match in root.glob(pat):
+            if deadline is not None and time.monotonic() >= deadline: return sorted(hits)
+            hits.add(match.parent.parent)
     return sorted(hits)
 
 
@@ -14855,6 +16153,13 @@ def main():
     x.add_argument("--text", "--note", dest="text"); x.add_argument("--json", action="store_true"); x.add_argument("--all", action="store_true")
     x.add_argument("--sessions"); x.add_argument("--events", action="append", help="events JSON file; pair with --session")
     x.add_argument("--event-session", dest="sessions_for_events", action="append", help=argparse.SUPPRESS)
+    x.add_argument("--space-auto", action="store_true", help="sweep: apply the regenerable cleanup tier")
+    x.add_argument("--space-apply", action="store_true", help="sweep: apply the saved pending cleanup list")
+    x.add_argument("--space-fingerprint", help="sweep: fingerprint printed with the pending list")
+    x.add_argument("--sim-udid", help="sweep: approve exactly one simulator action")
+    x.add_argument("--sim-action", choices=["shutdown","erase","delete"], help="sweep: simulator action to approve")
+    x.add_argument("--sim-fingerprint", help="sweep: fingerprint printed for this simulator action")
+    x.add_argument("--apply", action="store_true", help="sweep: apply cleanup; default is preview")
     x.set_defaults(f=cmd_notice)
     x = s.add_parser("nudge", help="record one rate-limited thread nudge")
     x.add_argument("thread"); x.add_argument("--text"); x.set_defaults(f=cmd_nudge)

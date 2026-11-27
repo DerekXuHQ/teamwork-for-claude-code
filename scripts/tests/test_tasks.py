@@ -1633,6 +1633,14 @@ class T70PrimaryOutcome(unittest.TestCase):
             (root / "PRIMARY-TRANSCRIPT.txt").write_text("\n\n".join(transcript) + "\n", encoding="utf-8")
 
 class T70Acceptance(TwCase):
+    def setUp(self):
+        super().setUp()
+        fixture=self.dir/"sweep-health.json"
+        fixture.write_text(json.dumps({"load":[0,0,0],"cpu_count":8,"process_count":0,"pipe_bytes":65536,
+                                       "simulator_count":0,"disk_free":50*1024**3,"disk_total":100*1024**3,
+                                       "disk_sizes":{},"processes":[]}),encoding="utf-8")
+        self.env["TEAMWORK_HEALTH_FIXTURE"]=str(fixture)
+
     def _changed_result(self):
         self.tw("thread", "add", "ui")
         self.tw("plan", "approve", "--user-said", "approved")
@@ -1732,6 +1740,7 @@ class T70Acceptance(TwCase):
         self.assertIn("Same-second feature",next_beta.stdout)
 
     def test_sweep_real_list_sessions_and_list_events_shapes(self):
+        isolated_home=self.dir/"isolated-home"; isolated_home.mkdir(); self.env["HOME"]=str(isolated_home)
         self.tw("lead", "--session", "lead-demo")
         self.tw("thread", "add", "docs", "--session", "session-docs")
         row={"id":"session-docs","title":"[DM] docs · report","status":"idle","status_bucket":"blocked",
@@ -2252,5 +2261,816 @@ class ThreadProtocolLessons(TwCase):
         self.assertNotIn("{{", text)
 
 
+class T82SpaceManagement(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.home = self.dir / "fake-home"
+        self.home.mkdir()
+        self.env["HOME"] = str(self.home)
+        self.env["CLAUDE_CONFIG_DIR"] = str(self.home / ".claude")
+        self.env.pop("TEAMWORK_DIR", None)
+        env_patcher = mock.patch.dict(os.environ, {"HOME": str(self.home), "CLAUDE_CONFIG_DIR": str(self.home / ".claude")})
+        env_patcher.start(); self.addCleanup(env_patcher.stop)
+        self.project = self.home / "work" / "sample-project"
+        (self.project / ".teamwork" / "private" / "thread-sky" / "tmp").mkdir(parents=True)
+        (self.project / ".teamwork" / "state.json").write_text(json.dumps({"project":"sample-project","threads":{},"tasks":{}}))
+        state = self.state()
+        state["prefs"].update(disk_private_tmp_gb=5, disk_growth_gb_per_hour=2, disk_scratch_days=7,
+                               disk_keep_snapshots=3, disk_low_pct=10, disk_low_gb=30)
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    def test_private_tmp_size_and_growth_alarm_names_thread(self):
+        import tw
+        tmp = self.project / ".teamwork" / "private" / "thread-sky" / "tmp"
+        huge = tmp / "nested-copy"
+        huge.mkdir()
+        (huge / "sparse.bin").open("wb").truncate(5 * 1024**3)
+        state = self.state()
+        stamp = (dt.datetime.fromisoformat(tw.now()) - dt.timedelta(hours=1)).isoformat()
+        state["disk_space"] = {"at": stamp, "sizes": {str(tmp): 0}, "samples":[{"at":stamp,"sizes":{str(tmp):0}}]}
+        state["prefs"]["language"] = "zh"
+        state["prefs"].update(disk_private_tmp_gb=4, disk_growth_gb_per_hour=2)
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        def completed(paths, cache, budget_s, seed_paths=()):
+            cache[str(tmp)]={"bytes":5*1024**3,"complete":True,"measured_at":tw.now(),"updated_at":tw.now(),"device":tmp.stat().st_dev,"stack":[]}
+        state["disk_space"]["measure_cache"]={}
+        with mock.patch.object(tw,"_disk_refresh",side_effect=completed), \
+             mock.patch.object(tw,"_disk_rank",return_value=([],False)):
+            report = tw._disk_scan(self.dir / ".teamwork", state)
+        self.assertTrue(any("thread-sky" in x and "紧急" in x for x in report["alarms"]))
+        self.assertTrue(any("thread-sky" in p and n >= 5 * 1024**3 for n, p in report["growth"]))
+
+    def test_auto_cleanup_preserves_current_snapshot_and_evidence(self):
+        import tw
+        cache = self.home / ".npm" / "_cacache"
+        cache.mkdir(parents=True); (cache / "cache-data").write_bytes(b"cache")
+        (self.home / "tmp").mkdir()
+        proof = self.project / ".teamwork" / "private" / "thread-sky" / "tmp" / "evidence.txt"
+        proof.write_text("ledger evidence"); os.utime(proof,(time.time()-10*86400,time.time()-10*86400))
+        state = self.state(); state["evidence"] = str(proof)
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        config = self.home / ".claude"; base = config / "teamwork-releases"; base.mkdir(parents=True)
+        names = [f"r2026010{i}-abcdef{i}" for i in range(1, 6)]
+        for name in names:
+            (base / name).mkdir(); (base / name / "SKILL.md").write_text("x")
+        (base / "index.json").write_text(json.dumps({"releases":[{"name":n,"at":n} for n in names],
+            "current":names[0],"previous":names[1],"history":[names[0],names[1]]}), encoding="utf-8")
+        report = {"pct":0,"free":0,"projects":[str(self.project)]}
+        with mock.patch.object(tw,"_disk_in_use",return_value=False), mock.patch.object(tw,"_disk_open_paths",return_value=set()), mock.patch.object(tw.tempfile,"tempdir",str(self.home / "tmp")):
+            rows = tw._disk_candidates(self.dir / ".teamwork", report)
+            self.assertIn(str(cache), [r["path"] for r in rows])
+            self.assertNotIn(str(proof), [r["path"] for r in rows])
+            self.assertNotIn(str(base / names[0]), [r["path"] for r in rows])
+            before = {r["path"] for r in rows}
+            event = tw._disk_apply(self.dir / ".teamwork", state, rows, [self.home, self.dir, self.home / "tmp"])
+        self.assertFalse(cache.exists())
+        self.assertTrue(proof.exists())
+        self.assertTrue((base / names[0]).exists())
+        self.assertGreaterEqual(sum(1 for n in names if (base / n).exists()), 3)
+        logged = json.loads((self.dir / ".teamwork" / "log.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((event["before_free"], event["after_free"]), (logged["before_free"], logged["after_free"]))
+        self.assertEqual(set(event["items"]), before)
+
+    def test_pending_preview_fingerprint_rejects_changed_plan_and_zh_sweep(self):
+        import tw
+        backup = self.home / "Backups"; backup.mkdir(); (backup / "old.zip").write_bytes(b"backup")
+        state = self.state(); state["prefs"]["language"] = "zh"
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        with mock.patch.object(tw,"_disk_in_use",return_value=False):
+            pending = tw._disk_candidates(self.dir / ".teamwork", {}, pending=True)
+        self.assertIn(str(backup), [x["path"] for x in pending])
+        self.assertTrue(backup.exists())
+        state["disk_space"] = {"pending_plan":{"fingerprint":tw._disk_fingerprint(pending),"items":pending}}
+        (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        from types import SimpleNamespace
+        args = SimpleNamespace(space_apply=True, space_fingerprint=state["disk_space"]["pending_plan"]["fingerprint"], apply=True)
+        (backup / "old.zip").write_bytes(b"backup changed")
+        with mock.patch.object(tw,"_disk_in_use",return_value=False):
+            with self.assertRaisesRegex(ValueError,"清单内容已变化"):
+                tw._disk_command(args,self.dir / ".teamwork",state)
+        self.assertTrue(backup.exists())
+        out = self.tw("notice","sweep").stdout
+        self.assertIn("磁盘和内存巡检", out)
+        self.assertIn("待批清理清单", out)
+
+    def test_pending_preview_skips_projects_with_unmerged_worktrees(self):
+        import tw
+        with mock.patch.object(tw,"_disk_projects",return_value=[self.project]), \
+             mock.patch.object(tw,"_disk_has_unmerged_worktree",return_value=True) as has_unmerged:
+            rows=tw._disk_candidates(self.dir/".teamwork",{"projects":[str(self.project)],"health":{"simulator_devices":[]},"measure_cache":{}},pending=True,deadline=time.monotonic()+3,measure=False)
+        self.assertNotIn(str(self.project/".teamwork/private/thread-sky/tmp"),[row["path"] for row in rows])
+        has_unmerged.assert_called_once_with(self.project,mock.ANY)
+
+    def test_apply_skips_open_descendant_and_rejects_lsof_failure(self):
+        import tw
+        target=self.home/"Backups"; target.mkdir(); child=target/"held.bin"; child.write_text("held")
+        rows=[{"path":str(target),"category":"backup","bytes":10,"eligible":True}]
+        fixture=self.dir/"open-paths.json"; fixture.write_text(json.dumps({"in_use":[str(child)]}),encoding="utf-8")
+        state=self.state(); state["prefs"]["language"]="zh"
+        usage=type("Usage",(),{"free":100,"total":200})()
+        with mock.patch.dict(os.environ,{"TEAMWORK_HEALTH_FIXTURE":str(fixture)}),mock.patch.object(tw.shutil,"disk_usage",return_value=usage):
+            event=tw._disk_apply(self.dir/".teamwork",state,rows,[self.home])
+        self.assertTrue(child.exists()); self.assertEqual(event["failed"],[{"path":str(target),"error":"在用"}])
+        with mock.patch.object(tw,"_disk_open_paths",side_effect=RuntimeError("lsof unavailable")),mock.patch.object(tw.shutil,"disk_usage",return_value=usage):
+            with self.assertRaisesRegex(ValueError,"lsof unavailable"):
+                tw._disk_apply(self.dir/".teamwork",state,rows,[self.home])
+        self.assertTrue(child.exists())
+
+    def test_apply_does_not_follow_top_level_symlink_replacement(self):
+        import tw
+        target=self.home/"Backups"; target.mkdir(); victim=self.home/"keep"; victim.mkdir(); (victim/"data").write_text("keep")
+        moved=self.home/"Backups-original"; target.rename(moved); target.symlink_to(victim,target_is_directory=True)
+        rows=[{"path":str(target),"category":"backup","bytes":1,"eligible":True}]
+        usage=type("Usage",(),{"free":100,"total":200})()
+        with mock.patch.object(tw,"_disk_open_paths",return_value=set()),mock.patch.object(tw.shutil,"disk_usage",return_value=usage):
+            with self.assertRaises(ValueError): tw._disk_apply(self.dir/".teamwork",self.state(),rows,[self.home])
+        self.assertEqual((victim/"data").read_text(),"keep"); self.assertTrue(moved.exists())
+
+    def test_disk_threshold_preferences_are_tunable(self):
+        self.tw("prefs", "--set", "disk_low_pct=8", "disk_low_gb=25", "disk_private_tmp_gb=4",
+                "disk_growth_gb_per_hour=1", "disk_scratch_days=9", "disk_keep_snapshots=4", "disk_top_n=6",
+                "disk_private_budget_s=4", "disk_scan_budget_s=45", "disk_scan_interval_hours=18",
+                "health_load1_cpu_multiple=7", "health_pipe_min_bytes=8192", "health_process_max=2800",
+                "health_disconnect_window=12")
+        prefs = self.state()["prefs"]
+        self.assertEqual([prefs[k] for k in ("disk_low_pct", "disk_low_gb", "disk_private_tmp_gb",
+            "disk_growth_gb_per_hour", "disk_scratch_days", "disk_keep_snapshots", "disk_top_n", "disk_private_budget_s", "disk_scan_budget_s", "disk_scan_interval_hours")], [8,25,4,1,9,4,6,4,45,18])
+        self.assertEqual([prefs[k] for k in ("health_load1_cpu_multiple","health_pipe_min_bytes","health_process_max","health_disconnect_window")], [7,8192,2800,12])
+        self.assertNotEqual(self.tw("prefs", "--set", "disk_low_gb=wide", ok=False).returncode, 0)
+
+    def test_private_tmp_incomplete_measurement_keeps_cached_size_without_alarm(self):
+        import tw
+        from types import SimpleNamespace
+        tmp=self.project/".teamwork"/"private"/"thread-sky"/"tmp"
+        state=self.state(); state["prefs"].update(language="zh",disk_private_tmp_gb=99,disk_low_gb=1)
+        state["disk_space"]={"sizes":{str(tmp):123456},"top":[],"samples":[],"ranked_at":tw.now(),
+            "measure_cache":{str(tmp):{"bytes":2048,"cached_bytes":123456,"cached_at":tw.now(),"complete":False,"updated_at":tw.now(),"device":tmp.stat().st_dev,"stack":[]}}}
+        health={"alarms":[],"simulators":[],"simulator_devices":[],"simulator_count":0,"thresholds":{"load1":1,"pipe_bytes":1}}
+        with mock.patch.object(tw,"_disk_projects",return_value=[self.project]), \
+             mock.patch.object(tw.shutil,"disk_usage",return_value=SimpleNamespace(free=50*1024**3,total=100*1024**3)), \
+             mock.patch.object(tw,"_disk_refresh"), \
+             mock.patch.object(tw,"_disk_rank",return_value=([],False)), \
+             mock.patch.object(tw.subprocess,"run",return_value=SimpleNamespace(stdout="",returncode=0)):
+            report=tw._disk_scan(self.dir/".teamwork",state,health)
+        self.assertEqual(report["sizes"][str(tmp)],123456)
+        self.assertFalse(report["measurements"][str(tmp)])
+        self.assertFalse(any("thread-sky" in x for x in report["alarms"]))
+
+    def test_full_disk_ranking_runs_each_budgeted_inspection(self):
+        import tw
+        from types import SimpleNamespace
+        health={"alarms":[],"simulators":[],"simulator_devices":[],"simulator_count":0,"thresholds":{"load1":1,"pipe_bytes":1}}
+        recent=tw.now()
+        def scan(free, ranked_at):
+            state=self.state(); state["prefs"].update(disk_low_gb=30,disk_low_pct=10)
+            state["disk_space"]={"sizes":{},"top":[[10,"/cached"]],"rank_sizes":{"/cached":10},"ranked_at":ranked_at,"samples":[]}
+            with mock.patch.object(tw,"_disk_projects",return_value=[]), \
+                 mock.patch.object(tw.shutil,"disk_usage",return_value=SimpleNamespace(free=free,total=100*1024**3)), \
+                 mock.patch.object(tw,"_disk_rank",return_value=([(20,"/ranked")],False)) as rank, \
+                 mock.patch.object(tw.subprocess,"run",return_value=SimpleNamespace(stdout="",returncode=0)):
+                result=tw._disk_scan(self.dir/".teamwork",state,health)
+            return rank,result
+        rank,result=scan(50*1024**3,recent)
+        rank.assert_called_once(); self.assertEqual(result["top"],[(20,"/ranked")])
+        stale=(dt.datetime.fromisoformat(recent)-dt.timedelta(hours=25)).isoformat()
+        rank,result=scan(50*1024**3,stale)
+        rank.assert_called_once(); self.assertEqual(result["top"],[(20,"/ranked")])
+        rank,result=scan(5*1024**3,recent)
+        rank.assert_called_once()
+
+    def test_full_disk_ranking_seeds_known_large_directory(self):
+        import tw
+        home=self.home/"rank-home"; backup=home/".dev-scratch"/"backups"; backup.mkdir(parents=True)
+        rows,partial=tw._disk_rank(home,{},10,1)
+        self.assertIn(str(backup),[path for _size,path in rows])
+        self.assertFalse(partial)
+
+    def test_rank_timeout_keeps_cached_largest_and_respects_allocated_budget(self):
+        import tw
+        home=self.home/"rank-priority"; large=home/".dev-scratch"/"backups"
+        large.mkdir(parents=True); (home/".a-small").mkdir(); (home/".b-small").mkdir()
+        calls=[]
+        cache={}
+        for _ in range(20): tw._disk_rank(home,cache,10,.002)
+        self.assertTrue(any(cache.get(str(path),{}).get("complete") for path in (large,home/".a-small",home/".b-small")))
+
+    def test_pending_preview_covers_large_categories_with_fingerprints(self):
+        import tw
+        scratch=self.home/".dev-scratch"; backup=scratch/"backups"; backup.mkdir(parents=True)
+        caches=self.home/"Library"/"Caches"/"AppCache"; caches.mkdir(parents=True)
+        support=self.home/"Library/Developer/Xcode/iOS DeviceSupport"; support.mkdir(parents=True)
+        simulator=self.home/"Library/Developer/CoreSimulator/Devices"/"SIM-1"; simulator.mkdir(parents=True)
+        other=self.project/".teamwork/private/thread-sky/tmp/old-copy"; other.mkdir()
+        health={"simulator_devices":[{"udid":"SIM-1","name":"iPhone","state":"Shutdown"}]}
+        report={"health":health}
+        with mock.patch.object(tw,"_disk_in_use",return_value=True), \
+             mock.patch.object(tw,"_disk_projects",return_value=[self.project]), \
+             mock.patch.object(tw,"_disk_refresh",side_effect=lambda paths,cache,budget_s,seed_paths=():[cache.update({str(path):{"bytes":4096,"complete":True,"measured_at":tw.now(),"updated_at":tw.now(),"device":Path(path).stat().st_dev,"stack":[]}}) for path in paths]):
+            rows=tw._disk_candidates(self.dir/".teamwork",report,pending=True)
+        by_category={}
+        for row in rows: by_category.setdefault(row["category"],[]).append(row)
+        for category in ("backup","application cache","other project tmp","iOS DeviceSupport","simulator data"):
+            self.assertTrue(by_category.get(category),category)
+        self.assertTrue(all(row.get("path") and row.get("bytes",0)>0 and row.get("signature") for row in rows))
+        self.assertTrue(all(row["in_use"] is None for row in rows))
+
+    def test_disk_summary_sections_are_printed_once(self):
+        import tw
+        from types import SimpleNamespace
+        fixture=self.dir/"disk-summary.json"
+        fixture.write_text(json.dumps({"load":[0,0,0],"cpu_count":2,"process_count":1,"pipe_bytes":65536,
+            "simulator_count":1,"disk_free":1,"disk_total":100,"disk_sizes":{},
+            "simulator_devices":[{"udid":"SIM-1","name":"iPhone","state":"Booted"}],"processes":[],
+            "pending_candidates":[],"auto_candidates":[]}),encoding="utf-8")
+        state=self.state(); state["prefs"].update(language="en",disk_scan_budget_s=1)
+        args=SimpleNamespace(space_auto=False,space_apply=False,space_fingerprint=None,apply=False,_health_report=None)
+        output=io.StringIO()
+        with mock.patch.dict(os.environ,{"HOME":str(self.home),"TEAMWORK_HEALTH_FIXTURE":str(fixture)}), \
+             mock.patch.object(tw,"_disk_rank",return_value=([],False)), \
+             mock.patch.object(tw,"_save_locked"), mock.patch("sys.stdout",output):
+            tw._disk_command(args,self.dir/".teamwork",state)
+        rendered=output.getvalue()
+        for label in ("Largest directories:","Booted simulators:","Simulator options (shutdown / erase / delete):"):
+            self.assertEqual(rendered.count(label),1,label)
+
+    def test_health_thresholds_and_orphans_preview_apply_pid_reuse(self):
+        import tw
+        from types import SimpleNamespace
+        fixture=self.dir/"health.json"
+        uid=os.getuid()
+        hours_ago=lambda h:(dt.datetime.now().astimezone()-dt.timedelta(hours=h)).isoformat()
+        rows=[{"pid":701,"ppid":1,"uid":uid,"cmdline":"python test_tw.py T82","start_time":hours_ago(5)},
+              {"pid":702,"ppid":1,"uid":uid,"cmdline":"tw-merge-abc","start_time":hours_ago(4)}]
+        fixture.write_text(json.dumps({"load":[33,20,10],"cpu_count":4,"process_count":3001,"pipe_bytes":1024,"pipe_holders":[],"simulator_count":2,"processes":rows}),encoding="utf-8")
+        self.env["TEAMWORK_HEALTH_FIXTURE"]=str(fixture)
+        with mock.patch.dict(os.environ,{"TEAMWORK_HEALTH_FIXTURE":str(fixture),"HOME":str(self.home)}):
+            state=self.state(); state["prefs"]["language"]="zh"
+            health=tw._disk_health(state)
+            self.assertEqual(health["load"],[33,20,10]); self.assertEqual(health["simulator_count"],2)
+            self.assertEqual(len(health["orphans"]),2)
+            self.assertEqual(len(health["alarms"]),4)
+            with mock.patch.object(tw.os,"kill") as kill, mock.patch.object(tw,"_save_locked"):
+                args=SimpleNamespace(space_auto=False,space_apply=False,space_fingerprint=None,apply=False)
+                tw._disk_command(args,self.dir/".teamwork",state)
+                kill.assert_not_called()
+                args.apply=True
+                tw._disk_command(args,self.dir/".teamwork",state)
+                self.assertEqual([c.args[0] for c in kill.call_args_list],[701,702])
+                kill.reset_mock()
+                fixture.write_text(json.dumps({"processes":[dict(rows[0],cmdline="different command"),rows[1]]}),encoding="utf-8")
+                killed=tw._disk_kill_orphans(rows)
+                self.assertEqual(killed,[702])
+                kill.assert_called_once_with(702,tw.signal.SIGTERM)
+
+    def test_app_server_process_metrics_pipe_alarm_and_idle_preview(self):
+        import tw
+        broker_dir=self.dir/"broker"; broker_dir.mkdir()
+        log=broker_dir/"broker.log"; log.write_text("old")
+        old=time.time()-3*3600; os.utime(log,(old,old))
+        now=dt.datetime.now().astimezone()
+        def stamp(hours): return (now-dt.timedelta(hours=hours)).isoformat()
+        rows=[{"pid":500,"ppid":1,"uid":os.getuid(),"cmdline":f"node {broker_dir}/app-server-broker.mjs --cwd /work/tree --pid-file {broker_dir}/broker.pid","start_time":stamp(8)},
+              {"pid":501,"ppid":500,"uid":os.getuid(),"cmdline":"codex app-server","start_time":stamp(5)},
+              {"pid":502,"ppid":501,"uid":os.getuid(),"cmdline":"node_repl","start_time":stamp(4)},
+              {"pid":503,"ppid":501,"uid":os.getuid(),"cmdline":"node_repl","start_time":stamp(2)}]
+        (broker_dir/"jobs.json").write_text('{"jobs":[{"status":"idle"}]}')
+        fixture=self.dir/"app-health.json"
+        fixture.write_text(json.dumps({"load":[1,0,0],"cpu_count":4,"process_count":4,"pipe_bytes":512,
+            "processes":rows,"pipe_holders":[{"pid":501,"name":"codex","pipes":20}]}))
+        with mock.patch.dict(os.environ,{"TEAMWORK_HEALTH_FIXTURE":str(fixture)}):
+            state=self.state(); health=tw._disk_health(state)
+        self.assertEqual(len(health["app_servers"]),1)
+        server=health["app_servers"][0]
+        self.assertEqual((server["node_repl_count"],server["worktree"],server["broker_pid"]),(2,"/work/tree",500))
+        self.assertGreater(server["node_repl_longest_s"],server["node_repl_median_s"])
+        self.assertTrue(server["idle"])
+        self.assertIn("codex pid=501 pipes=20",health["alarms"][0])
+
+    def test_idle_broker_sigterm_rechecks_command_and_start_time(self):
+        import tw
+        candidate={"broker_pid":901,"broker_cmdline":"node /x/app-server-broker.mjs --cwd /work",
+                   "broker_start_time":"start-a","idle":True}
+        reused={"pid":901,"cmdline":"node unrelated replacement","start_time":"start-b"}
+        with mock.patch.object(tw,"_disk_processes",return_value=[reused]),mock.patch.object(tw.os,"kill") as kill:
+            self.assertEqual(tw._disk_kill_idle_brokers([candidate]),[])
+            kill.assert_not_called()
+        live={"pid":901,"cmdline":candidate["broker_cmdline"],"start_time":"start-a"}
+        with mock.patch.object(tw,"_disk_processes",return_value=[live]),mock.patch.object(tw.os,"kill") as kill:
+            self.assertEqual(tw._disk_kill_idle_brokers([candidate]),[901])
+            kill.assert_called_once_with(901,tw.signal.SIGTERM)
+
+    def test_pending_inventory_keeps_unmeasured_candidate_with_explicit_size(self):
+        import tw
+        backup=self.home/".dev-scratch"/"backups"; backup.mkdir(parents=True)
+        report={"health":{"simulator_devices":[]},"projects":[],"measure_cache":{}}
+        with mock.patch.object(tw,"_disk_in_use",return_value=False),mock.patch.object(tw,"_disk_refresh"):
+            rows=tw._disk_candidates(self.dir/".teamwork",report,pending=True,deadline=time.monotonic()+2)
+        row=next(item for item in rows if item["path"]==str(backup))
+        self.assertIsNone(row["bytes"])
+        self.assertEqual(row["size_display"],"未测")
+        self.assertFalse(row["eligible"])
+
+    def test_disconnect_events_deduplicate_newer_time_and_render_zh(self):
+        import tw
+        self.tw("lead","--session","lead-demo")
+        self.tw("thread","add","worker","--session","session-worker")
+        state=self.state(); state["prefs"]["language"]="zh"
+        (self.dir/".teamwork"/"state.json").write_text(json.dumps(state),encoding="utf-8")
+        fixture=self.dir/"health.json"; fixture.write_text(json.dumps({"load":[2,1,1],"cpu_count":8,"process_count":50,"pipe_bytes":65536,"simulator_count":1,"disk_free":50*1024**3,"disk_total":100*1024**3,"disk_sizes":{},"processes":[]}),encoding="utf-8")
+        self.env["TEAMWORK_HEALTH_FIXTURE"]=str(fixture)
+        sessions=self.dir/"sessions.json"
+        row={"id":"session-worker","thread":"worker","status":"running","external_metadata":{"last_init_error":{"error_kind":"computer_unreachable","at":"2026-11-27T10:00:00Z"}}}
+        sessions.write_text(json.dumps({"data":[row]}),encoding="utf-8")
+        out=self.tw("notice","sweep","--sessions",str(sessions)).stdout
+        self.assertIn("最近 1 次断连",out)
+        state=self.state(); self.assertEqual(len(state["computer_unreachable_recent"]),1)
+        events=[json.loads(x) for x in (self.dir/".teamwork"/"log.jsonl").read_text().splitlines()]
+        self.assertEqual(sum(x.get("ev")=="computer-unreachable" for x in events),1)
+        self.tw("notice","sweep","--sessions",str(sessions))
+        self.assertEqual(len(self.state()["computer_unreachable_recent"]),1)
+        row["external_metadata"]["last_init_error"]["at"]="2026-11-27T10:01:00Z"
+        sessions.write_text(json.dumps({"data":[row]}),encoding="utf-8")
+        self.tw("notice","sweep","--sessions",str(sessions))
+        self.assertEqual(len(self.state()["computer_unreachable_recent"]),2)
+
+    def test_simulator_per_device_action_is_fingerprinted_and_last_used_marked(self):
+        import tw
+        from types import SimpleNamespace
+        device={"udid":"UDID-1","name":"iPhone","runtime":"runtime.iOS","state":"Booted","bytes":1024,
+                "last_used":"2026-11-27T10:00+00:00","last_used_estimated":True,"actions":["shutdown","erase","delete"]}
+        fingerprint=tw._disk_sim_fingerprint(device,"shutdown")
+        args=SimpleNamespace(sim_udid="UDID-1",sim_action="shutdown",sim_fingerprint=fingerprint,apply=True)
+        with mock.patch.object(tw,"_disk_scan",return_value={"simulator_inventory":[device]}), \
+             mock.patch.object(tw.subprocess,"run",return_value=SimpleNamespace(returncode=0,stdout="",stderr="")) as run:
+            self.assertTrue(tw._disk_sim_action(args,self.dir/".teamwork",self.state()))
+            run.assert_called_once_with(["xcrun","simctl","shutdown","UDID-1"],capture_output=True,text=True,timeout=120)
+        with mock.patch.object(tw,"_disk_scan",return_value={"simulator_inventory":[dict(device,state="Shutdown")]}):
+            with self.assertRaisesRegex(ValueError,"Pending cleanup list changed"):
+                tw._disk_sim_action(args,self.dir/".teamwork",self.state())
+        fixture=self.dir/"sim-health.json"
+        exact=dict(device,lastBootedAt="2026-11-01T12:30:00Z")
+        fixture.write_text(json.dumps({"load":[0,0,0],"cpu_count":8,"process_count":0,"pipe_bytes":65536,
+            "simulator_count":1,"disk_free":50*1024**3,"disk_total":100*1024**3,"disk_sizes":{},
+            "simulator_devices":[exact],"processes":[]}),encoding="utf-8")
+        with mock.patch.dict(os.environ,{"HOME":str(self.home),"TEAMWORK_HEALTH_FIXTURE":str(fixture)}):
+            report=tw._disk_scan(self.dir/".teamwork",self.state())
+            self.assertFalse(report["simulator_inventory"][0]["last_used_estimated"])
+            parsed=dt.datetime.fromisoformat(report["simulator_inventory"][0]["last_used"])
+            self.assertEqual(parsed.astimezone(dt.timezone.utc).strftime("%H:%M"),"12:30")
+            folder=self.home/"Library/Developer/CoreSimulator/Devices"/"UDID-1"; folder.mkdir(parents=True)
+            (folder/"device-data.bin").write_bytes(b"simulator data"*64)
+            os.utime(folder,(time.time()-3600,time.time()-3600))
+            fixture.write_text(json.dumps({"load":[0,0,0],"cpu_count":8,"process_count":0,"pipe_bytes":65536,
+                "simulator_count":0,"disk_free":50*1024**3,"disk_total":100*1024**3,"disk_sizes":{},
+                "simulator_devices":[dict(device,udid="UDID-1")],"processes":[]}),encoding="utf-8")
+            report=tw._disk_scan(self.dir/".teamwork",self.state())
+            self.assertTrue(report["simulator_inventory"][0]["last_used_estimated"])
+            self.assertGreater(report["simulator_inventory"][0]["bytes"],0)
+            report=tw._disk_scan(self.dir/".teamwork",self.state(),include_sim_details=True)
+            self.assertGreater(report["simulator_inventory"][0]["bytes"],0)
+
+
+class T82DiskMeasurement(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.home = self.dir / "measured home"
+        self.home.mkdir()
+        self.env["HOME"] = str(self.home)
+        self.env.pop("TEAMWORK_HEALTH_FIXTURE", None)
+        self._home_patch = mock.patch.dict(os.environ, {"HOME": str(self.home)}, clear=False)
+        self._home_patch.start(); self.addCleanup(self._home_patch.stop)
+
+    def test_r7_cached_measurements_render_ranking_and_both_previews(self):
+        import tw
+        from types import SimpleNamespace
+        fixture=json.loads((Path(__file__).parents[1]/"fixtures"/"t82-r7-state.json").read_text(encoding="utf-8"))
+        fake_prefix="/tmp/t82-r7-home"
+        cache={path.replace(fake_prefix,str(self.home),1):row for path,row in fixture["disk_space"]["measure_cache"].items()}
+        for path in cache: Path(path).mkdir(parents=True,exist_ok=True)
+        (self.home/".npm"/"_cacache").mkdir(parents=True,exist_ok=True)
+        state=self.state(); state["prefs"].update(language="en",disk_private_budget_s=0,disk_scan_budget_s=0,disk_top_n=20)
+        state["disk_space"]={"measure_cache":cache,"simulator_inventory":fixture["disk_space"].get("simulator_inventory",[])}
+        devices=[{"udid":Path(path).name,"name":"fixture simulator","state":"Shutdown"}
+                 for path in cache if "/CoreSimulator/Devices/" in path and Path(path).parent.name=="Devices"]
+        health_fixture=self.dir/"r7-health.json"
+        health_fixture.write_text(json.dumps({"load":[0,0,0],"cpu_count":2,"process_count":1,"pipe_bytes":65536,
+            "disk_free":1,"disk_total":100,"simulator_devices":devices,"pipe_holders":[]}),encoding="utf-8")
+        args=SimpleNamespace(space_auto=False,space_apply=False,space_fingerprint=None,apply=False,_health_report=None)
+        output=io.StringIO()
+        with mock.patch.dict(os.environ,{"HOME":str(self.home),"TEAMWORK_HEALTH_FIXTURE":str(health_fixture)}), \
+             mock.patch.object(tw,"_disk_projects",return_value=[]), mock.patch.object(tw,"_save_locked"), \
+             mock.patch("sys.stdout",output):
+            tw._disk_command(args,self.dir/".teamwork",state)
+        rendered=output.getvalue()
+        largest=rendered.split("Largest directories:",1)[1].split("\n",1)[0]
+        for name in ("backups","Caches","Devices",".codex"):
+            self.assertIn(name,largest)
+        self.assertIn("DerivedData",rendered.split("Auto cleanup preview",1)[1].split("\n",1)[0])
+        self.assertIn(".npm",rendered.split("Auto cleanup preview",1)[1].split("\n",1)[0])
+        self.assertIn("≥ ",largest)
+        pending=rendered.split("Pending approval list",1)[1].split("\n",1)[0]
+        for name in ("backups","5926FAE6","Caches","iOS DeviceSupport"):
+            self.assertIn(name,pending)
+        self.assertNotIn("Devices/5926FAE6",largest)
+
+    def test_lsof_has_independent_budget_and_reports_timeout_or_parse_failure(self):
+        import tw
+        from types import SimpleNamespace
+        with mock.patch.object(tw.shutil,"which",return_value="/usr/sbin/lsof"), \
+             mock.patch.object(tw.subprocess,"run",side_effect=subprocess.TimeoutExpired("lsof",3)) as run:
+            holders,reason=tw._disk_pipe_holders(deadline=time.monotonic()-10)
+        self.assertEqual(holders,[])
+        self.assertIn("timed out",reason)
+        self.assertEqual(run.call_args.kwargs["timeout"],3.0)
+        with mock.patch.object(tw.shutil,"which",return_value="/usr/sbin/lsof"), \
+             mock.patch.object(tw.subprocess,"run",return_value=SimpleNamespace(returncode=0,stdout="garbage\n",stderr="")):
+            holders,reason=tw._disk_pipe_holders()
+        self.assertEqual(holders,[])
+        self.assertIn("parse failed",reason)
+        fixture=self.dir/"low-pipe-health.json"
+        fixture.write_text(json.dumps({"load":[0,0,0],"cpu_count":2,"process_count":1,"pipe_bytes":1,
+            "disk_free":1,"disk_total":100,"processes":[],"simulator_devices":[]}),encoding="utf-8")
+        state=self.state(); state["prefs"]["language"]="en"
+        with mock.patch.dict(os.environ,{"TEAMWORK_HEALTH_FIXTURE":str(fixture)}), \
+             mock.patch.object(tw,"_disk_pipe_holders",return_value=([],"timed out after 3.0 seconds")):
+            health=tw._disk_health(state)
+        alarm=next(line for line in health["alarms"] if "holders:" in line)
+        self.assertIn("timed out",alarm)
+        self.assertNotIn("holders: unknown",alarm)
+
+    def test_internal_blocks_match_du_sk(self):
+        import tw
+        root = self.home / "tree with spaces"; root.mkdir()
+        for index in range(8):
+            folder = root / f"dir-{index}"; folder.mkdir()
+            (folder / "payload").write_bytes(os.urandom(13000 + index * 1700))
+        cache = {}
+        tw._disk_refresh([root], cache, 5)
+        output = subprocess.run(["du", "-sk", str(root)], capture_output=True, text=True, check=True)
+        expected = int(output.stdout.split(None, 1)[0]) * 1024
+        actual = cache[str(root)]["bytes"]
+        self.assertTrue(cache[str(root)]["complete"])
+        self.assertLessEqual(abs(actual - expected) / max(1, expected), .01)
+
+    def test_signature_chain_is_stable_across_fresh_scans(self):
+        import tw
+        root=self.home/"stable-signature"; root.mkdir()
+        for name in ("z-last","a-first","m-middle"):
+            folder=root/name; folder.mkdir(); (folder/"data").write_bytes(name.encode())
+        signatures=[]
+        for _ in range(3):
+            cache={}; tw._disk_refresh([root],cache,3)
+            self.assertTrue(cache[str(root)]["complete"])
+            signatures.append(cache[str(root)]["signature_chain"])
+        self.assertEqual(signatures,[signatures[0]]*3)
+
+    def test_tiny_budget_rounds_eventually_complete_every_path(self):
+        import tw
+        roots = []
+        for index in range(5):
+            root = self.home / f"large-{index}"; root.mkdir()
+            for branch in range(3):
+                child = root / f"branch-{branch}"; child.mkdir()
+                for leaf in range(5): (child / f"file-{leaf}").write_bytes(b"x" * 2048)
+            roots.append(root)
+        cache = {}
+        started = time.monotonic()
+        for _ in range(1000):
+            tw._disk_refresh(roots, cache, .0002)
+            if all(cache.get(str(root), {}).get("complete") for root in roots): break
+        self.assertTrue(all(cache.get(str(root), {}).get("complete") for root in roots))
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_unmeasured_private_tmp_does_not_alarm(self):
+        import tw
+        from types import SimpleNamespace
+        project = self.home / "project"; tmp = project / ".teamwork/private/sky/tmp"; tmp.mkdir(parents=True)
+        state = self.state(); state["prefs"].update(disk_private_budget_s=1, disk_scan_budget_s=1,
+            disk_private_tmp_gb=0, disk_low_gb=1)
+        health = {"alarms": [], "simulators": [], "simulator_devices": [], "simulator_count": 0,
+                  "thresholds": {"load1": 1, "pipe_bytes": 1}}
+        usage = SimpleNamespace(free=50 * 1024**3, total=100 * 1024**3)
+        with mock.patch.object(tw, "_disk_projects", return_value=[project]), \
+             mock.patch.object(tw, "_disk_refresh"), \
+             mock.patch.object(tw, "_disk_rank", return_value=([], False)), \
+             mock.patch.object(tw.shutil, "disk_usage", return_value=usage):
+            report = tw._disk_scan(self.dir / ".teamwork", state, health)
+        self.assertIsNone(report["sizes"][str(tmp)])
+        self.assertFalse(report["measurements"][str(tmp)])
+        self.assertFalse(any("sky" in alarm for alarm in report["alarms"]))
+
+    def test_partial_scan_resumes_from_saved_stack(self):
+        import tw
+        root = self.home / "resumable"; root.mkdir()
+        for branch in range(12):
+            child = root / f"branch-{branch}"; child.mkdir()
+            (child / "payload").write_bytes(os.urandom(8192))
+        cache = {}
+        tw._disk_refresh([root], cache, .0001)
+        self.assertFalse(cache[str(root)]["complete"])
+        initial_bytes=cache[str(root)]["bytes"]
+        cache=json.loads(json.dumps(cache))
+        for _ in range(100):
+            if cache[str(root)]["complete"]: break
+            tw._disk_refresh([root], cache, .001)
+        row = cache[str(root)]
+        self.assertTrue(row["complete"])
+        self.assertGreater(row["bytes"], initial_bytes)
+        self.assertIsNotNone(row["measured_at"])
+
+    def test_symlinks_and_other_devices_are_excluded(self):
+        import tw
+        from types import SimpleNamespace
+        root = self.home / "device-boundary"; root.mkdir()
+        regular = root / "regular"; regular.write_bytes(b"r" * 20000)
+        linked = root / "linked"; linked.write_bytes(b"s" * 20000)
+        link = root / "symbolic"; link.symlink_to(linked)
+        foreign = root / "foreign"; foreign.mkdir(); (foreign / "payload").write_bytes(b"f" * 20000)
+        original_lstat = Path.lstat
+        def adjusted(path, *args, **kwargs):
+            info = original_lstat(path, *args, **kwargs)
+            if Path(path) == foreign:
+                return SimpleNamespace(**{name: getattr(info, name) for name in dir(info) if name.startswith("st_")} | {"st_dev": info.st_dev + 1})
+            return info
+        with mock.patch.object(Path, "lstat", adjusted):
+            cache = {}; tw._disk_refresh([root], cache, 5)
+        expected = tw._disk_blocks(original_lstat(root)) + tw._disk_blocks(original_lstat(regular)) + tw._disk_blocks(original_lstat(linked))
+        self.assertTrue(cache[str(root)]["complete"])
+        self.assertEqual(cache[str(root)]["bytes"], expected)
+
+    def test_candidate_rows_and_rendered_sections_are_not_duplicated(self):
+        import tw
+        backup = self.home / "Backups"; backup.mkdir(); (backup / "payload").write_bytes(b"x" * 4096)
+        report = {"health": {"simulator_devices": []}, "projects": [], "measure_cache": {}}
+        with mock.patch.object(tw, "_disk_in_use", return_value=False):
+            rows = tw._disk_candidates(self.dir / ".teamwork", report, pending=True,
+                                       deadline=time.monotonic() + 2)
+        paths = [row["path"] for row in rows]
+        self.assertEqual(len(paths), len(set(paths)))
+
+    def test_first_layer_seed_immediately_supplies_a_ranking_value(self):
+        import tw
+        home=self.home; backup=home/".dev-scratch/backups"; backup.mkdir(parents=True)
+        payload=backup/"first-layer.bin"; payload.write_bytes(b"seed data"*1024)
+        cache={}
+        rows,_partial=tw._disk_rank(home,cache,10,.02)
+        self.assertIn(str(backup),[path for _size,path in rows])
+        self.assertGreaterEqual(cache[str(backup)]["bytes"],tw._disk_blocks(backup.lstat()))
+
+    def test_scan_deadline_bounds_a_many_file_tree_and_repeated_rounds_finish(self):
+        import tw
+        from types import SimpleNamespace
+        project=self.home/"project"; root=project/"large-tree"; root.mkdir(parents=True)
+        for branch in range(30):
+            child=root/f"branch-{branch}"; child.mkdir()
+            for leaf in range(200): (child/f"file-{leaf}").write_bytes(b"x")
+        state=self.state(); state["prefs"].update(disk_private_budget_s=0,disk_scan_budget_s=.5)
+        health={"alarms":[],"simulators":[],"simulator_devices":[],"simulator_count":0,
+                "thresholds":{"load1":1,"pipe_bytes":1}}
+        cache={}
+        for round_index in range(100):
+            state["disk_space"]={"measure_cache":cache}
+            started=time.monotonic()
+            with mock.patch.object(tw,"_disk_projects",return_value=[project]):
+                report=tw._disk_scan(self.dir/".teamwork",state,health)
+            elapsed=time.monotonic()-started
+            self.assertLess(elapsed,1.5)
+            cache=report["measure_cache"]
+            if cache.get(str(project),{}).get("complete"): break
+        self.assertTrue(cache.get(str(project),{}).get("complete"))
+        self.assertTrue(cache.get(str(project),{}).get("bytes",0)>0)
+
+    def test_root_is_never_added_to_rank_candidates(self):
+        import tw
+        home=self.home; cache={}; budget={"rank_measured":[],"rank_unmeasured":[]}
+        rows,_partial=tw._disk_rank(home,cache,20,.01,known_paths=[Path("/")],du_budget=budget)
+        self.assertNotIn("/",[path for _size,path in rows])
+        self.assertNotIn("/",budget["rank_unmeasured"])
+        projects=tw._disk_projects(home,Path("/.teamwork"))
+        self.assertNotIn(Path("/"),projects)
+
+    def test_auto_preview_contains_only_regenerable_categories(self):
+        import tw
+        npm=self.home/".npm"/"_cacache"; npm.mkdir(parents=True)
+        derived=self.home/"Library/Developer/Xcode/DerivedData"; derived.mkdir(parents=True)
+        backup=self.home/".dev-scratch/backups"; backup.mkdir(parents=True)
+        report={"pct":1,"free":0,"projects":[],"health":{"simulator_devices":[]},"measure_cache":{}}
+        with mock.patch.object(tw,"_disk_in_use",return_value=False), mock.patch.object(tw,"_disk_refresh"):
+            auto=tw._disk_candidates(self.dir/".teamwork",report,deadline=time.monotonic()+2)
+            pending=tw._disk_candidates(self.dir/".teamwork",report,pending=True,deadline=time.monotonic()+2)
+        auto_paths={row["path"] for row in auto}; pending_paths={row["path"] for row in pending}
+        self.assertIn(str(self.home/".npm"/"_cacache"),auto_paths); self.assertIn(str(derived),auto_paths)
+        self.assertIn(str(backup),pending_paths)
+        self.assertNotIn(str(backup),auto_paths)
+        self.assertNotIn(str(derived),pending_paths)
+        self.assertTrue(all(row["size_display"]=="未测" for row in auto if row["path"] in (str(self.home/".npm"/"_cacache"),str(derived))))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+class T82R9CandidatePaths(TwCase):
+    def setUp(self):
+        super().setUp()
+        import tw
+        self.twmod = tw
+        self.home = self.dir / "fake-home"
+        self.home.mkdir()
+        self.project = self.home / "project"
+        self.project.mkdir()
+        (self.project / ".teamwork" / "private" / "thread" / "tmp").mkdir(parents=True)
+        self.state_path = self.dir / ".teamwork" / "state.json"
+        patch = mock.patch.dict(os.environ, {"HOME": str(self.home), "CLAUDE_CONFIG_DIR": str(self.home / ".claude")})
+        patch.start(); self.addCleanup(patch.stop)
+
+    def save(self, state):
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    def test_apply_notes_local_snapshots_when_free_space_does_not_rise(self):
+        tw = self.twmod
+        from types import SimpleNamespace
+        cache = self.home / "Library" / "Caches" / "Homebrew"; cache.mkdir(parents=True)
+        (cache / "bottle.tar").write_bytes(b"x" * 10)
+        rows = [{"path": str(cache), "category": "Homebrew cache", "bytes": 512 * 1024**2, "eligible": True},
+                {"path": str(self.home / "unmeasured"), "category": "npm cache", "bytes": None, "eligible": False}]
+        usage = SimpleNamespace(total=100, used=50, free=10 * 1024**3)
+        snaps = SimpleNamespace(returncode=0, stdout="Snapshots for disk /:\ncom.apple.TimeMachine.2026-11-27-053029.local\n", stderr="")
+        state = self.state(); state["prefs"]["language"] = "zh"
+        out = io.StringIO()
+        with mock.patch.object(tw, "_disk_in_use", return_value=False), mock.patch.object(tw, "_disk_open_paths",return_value=set()), mock.patch.object(tw.shutil, "disk_usage", return_value=usage), \
+             mock.patch.object(tw.shutil, "which", return_value="/usr/bin/tmutil"), \
+             mock.patch.object(tw.subprocess, "run", return_value=snaps) as run, mock.patch("sys.stdout", out):
+            event = tw._disk_apply(self.dir / ".teamwork", state, rows, [self.home])
+        self.assertFalse(cache.exists())
+        self.assertEqual(event["items"], [str(cache)])
+        self.assertEqual(event["held_by_local_snapshots"], ["com.apple.TimeMachine.2026-11-27-053029.local"])
+        run.assert_called_once_with(["tmutil", "listlocalsnapshots", "/"], capture_output=True, text=True, timeout=5)
+        self.assertIn("Time Machine 本地快照", out.getvalue())
+
+    def test_pending_lists_only_stale_scratch_skips_harness_tmp_and_caps_length(self):
+        tw = self.twmod
+        scratch = self.home / ".dev-scratch" / "tmp"; scratch.mkdir(parents=True)
+        old = time.time() - 30 * 86400
+        for name in ["claude-501", "fresh-copy", *[f"old-{i:02d}" for i in range(40)]]:
+            (scratch / name).mkdir()
+            if name != "fresh-copy": os.utime(scratch / name, (old, old))
+        cache = {str(scratch / f"old-{i:02d}"): {"bytes": 1000 + i, "complete": True, "measured_at": tw.now()} for i in range(40)}
+        report = {"pct": 1, "free": 0, "projects": [], "health": {"simulator_devices": []}, "measure_cache": cache}
+        pending = tw._disk_candidates(self.dir / ".teamwork", report, True, deadline=time.monotonic() + 3, measure=False)
+        paths = [row["path"] for row in pending]
+        self.assertNotIn(str(scratch / "claude-501"), paths)
+        self.assertNotIn(str(scratch / "fresh-copy"), paths)
+        self.assertNotIn(str(scratch), paths)
+        self.assertEqual(len(pending), 30)
+        self.assertEqual(paths[0], str(scratch / "old-39"))
+        self.assertEqual(report["pending_omitted"], 10)
+
+    def test_expired_ranking_deadline_still_lists_cached_auto_and_pending(self):
+        tw = self.twmod
+        npm = self.home / ".npm" / "_cacache"; npm.mkdir(parents=True)
+        backup = self.home / "Backups"; backup.mkdir()
+        cache = {str(npm): {"bytes": 2048, "complete": True, "measured_at": tw.now()},
+                 str(backup): {"bytes": 4096, "complete": True, "measured_at": tw.now()}}
+        report = {"pct": 1, "free": 0, "projects": [], "health": {"simulator_devices": []}, "measure_cache": cache, "_scan_deadline": time.monotonic() - 10}
+        auto = tw._disk_candidates(self.dir / ".teamwork", report, deadline=time.monotonic() + 3, measure=False)
+        pending = tw._disk_candidates(self.dir / ".teamwork", report, True, deadline=time.monotonic() + 3, measure=False)
+        self.assertEqual(next(x for x in auto if x["path"] == str(npm))["bytes"], 2048)
+        self.assertEqual(next(x for x in pending if x["path"] == str(backup))["bytes"], 4096)
+
+    def test_measure_false_covers_merge_private_tmp_old_snapshot_and_space_gate(self):
+        tw = self.twmod
+        merge_root = self.home / "tw-merge-case"; merge_root.mkdir()
+        private = self.project / ".teamwork/private/thread/tmp/expired-copy"; private.mkdir()
+        old = time.time() - 10 * 86400; os.utime(private, (old, old))
+        config = self.home / ".claude"; base = config / "teamwork-releases"; base.mkdir(parents=True)
+        for name in ("r1", "r2", "r3", "r4", "r5", "r6"):
+            (base / name).mkdir()
+        (base / "index.json").write_text(json.dumps({"current": "r1", "previous": "r2", "history": ["r1", "r2"], "releases": [{"name": n, "at": n} for n in ("r1", "r2", "r3", "r4", "r5", "r6")]}))
+        report = {"pct": 1, "free": 0, "projects": [str(self.project)], "health": {"simulator_devices": []}, "measure_cache": {}}
+        with mock.patch.object(tw.tempfile, "gettempdir", return_value=str(self.home)), mock.patch.object(tw, "_disk_has_unmerged_worktree", return_value=False):
+            rows = tw._disk_candidates(self.dir / ".teamwork", report, deadline=time.monotonic() + 3, measure=False)
+            paths = {x["path"] for x in rows}
+            self.assertIn(str(merge_root), paths)
+            self.assertIn(str(private), paths)
+            self.assertIn(str(base / "r3"), paths)
+            self.assertNotIn(str(base / "r1"), paths)
+            enough = tw._disk_candidates(self.dir / ".teamwork", {**report, "pct": 50, "free": 50 * 1024**3}, deadline=time.monotonic() + 3, measure=False)
+            self.assertEqual(enough, [])
+
+    def test_private_tmp_copies_are_removed_through_clear_thread_tmp(self):
+        tw = self.twmod
+        tmp = self.project / ".teamwork/private/thread/tmp"
+        expired = tmp / "expired-copy"; expired.mkdir(); (expired / "f").write_text("x")
+        keep = tmp / "fresh-copy"; keep.mkdir()
+        other = self.project / ".teamwork/private/sky/tmp"; other.mkdir(parents=True); (other / "a").write_text("x")
+        rows = [{"path": str(expired), "category": "private tmp old copy", "bytes": 1, "eligible": True},
+                {"path": str(other), "category": "other project tmp", "bytes": 1, "eligible": True}]
+        real = tw.clear_thread_tmp
+        with mock.patch.object(tw, "_disk_open_paths", return_value=set()), \
+             mock.patch.object(tw, "clear_thread_tmp", side_effect=real) as clear:
+            event = tw._disk_apply(self.dir / ".teamwork", self.state(), rows, [self.home])
+        self.assertEqual(sorted(c.args[1:] for c in clear.call_args_list), [("sky", ()), ("thread", ("expired-copy",))])
+        self.assertFalse(expired.exists()); self.assertTrue(keep.exists())
+        self.assertTrue(other.is_dir()); self.assertEqual(list(other.iterdir()), [])
+        self.assertEqual(sorted(event["items"]), sorted([str(expired), str(other)]))
+
+    def test_pending_fingerprint_stays_stable_then_apply_removes_only_planned_item(self):
+        tw = self.twmod
+        backup = self.home / "Backups"; backup.mkdir(); (backup / "payload").write_bytes(b"backup")
+        other = self.home / "other"; other.mkdir(); (other / "keep").write_text("keep")
+        cache = {}; tw._disk_refresh([backup],cache,3)
+        self.assertTrue(cache[str(backup)]["complete"])
+        report = {"measure_cache": cache, "health": {"simulator_devices": []}, "projects": []}
+        pending = tw._disk_candidates(self.dir / ".teamwork", report, True, deadline=time.monotonic() + 3, measure=False)
+        fp = tw._disk_fingerprint(pending)
+        time.sleep(2)
+        again = tw._disk_candidates(self.dir / ".teamwork", report, True, deadline=time.monotonic() + 3, measure=False)
+        self.assertEqual(tw._disk_fingerprint(again), fp)
+        state = self.state(); state["disk_space"] = {**report, "pending_plan": {"fingerprint": fp, "items": pending}}
+        self.save(state)
+        from types import SimpleNamespace
+        args = SimpleNamespace(space_apply=True, space_fingerprint=fp, apply=True)
+        with mock.patch.object(tw, "_disk_in_use", return_value=False), mock.patch.object(tw,"_disk_open_paths",return_value=set()), mock.patch.object(tw, "_save_locked"), mock.patch.object(tw, "log"):
+            tw._disk_command(args, self.dir / ".teamwork", state)
+        self.assertFalse(backup.exists()); self.assertTrue(other.exists())
+
+    def test_pending_fingerprint_rejects_new_entry_or_changed_directory_mtime(self):
+        tw = self.twmod
+        backup = self.home / "Backups"; backup.mkdir()
+        report = {"measure_cache": {str(backup): {"bytes": 0, "complete": True}}, "health": {"simulator_devices": []}, "projects": []}
+        pending = tw._disk_candidates(self.dir / ".teamwork", report, True, deadline=time.monotonic() + 3, measure=False)
+        fp = tw._disk_fingerprint(pending)
+        (backup / "new-entry").write_text("changed")
+        changed = tw._disk_candidates(self.dir / ".teamwork", report, True, deadline=time.monotonic() + 3, measure=False)
+        self.assertNotEqual(tw._disk_fingerprint(changed), fp)
+        state = self.state(); state["disk_space"] = {**report, "pending_plan": {"fingerprint": fp, "items": pending}}; self.save(state)
+        from types import SimpleNamespace
+        args = SimpleNamespace(space_apply=True, space_fingerprint=fp, apply=True)
+        with self.assertRaisesRegex(ValueError, "Pending cleanup list changed"):
+            tw._disk_command(args, self.dir / ".teamwork", state)
+
+    def test_deep_content_change_after_listing_rejects_apply(self):
+        tw=self.twmod
+        backup=self.home/"Backups"; backup.mkdir(); nested=backup/"deep"; nested.mkdir(); leaf=nested/"payload"; leaf.write_bytes(b"before")
+        cache={}; tw._disk_refresh([backup],cache,3)
+        self.assertTrue(cache[str(backup)]["complete"])
+        report={"measure_cache":cache,"health":{"simulator_devices":[]},"projects":[]}
+        pending=tw._disk_candidates(self.state_path.parent,report,True,deadline=time.monotonic()+3,measure=False)
+        fp=tw._disk_fingerprint(pending)
+        state=self.state(); state["prefs"]["disk_scan_budget_s"]=3
+        state["disk_space"]={**report,"pending_plan":{"fingerprint":fp,"items":pending}}
+        self.save(state)
+        root_mtime=backup.stat().st_mtime_ns
+        leaf.write_bytes(b"changed deeply")
+        os.utime(backup,ns=(root_mtime,root_mtime))
+        from types import SimpleNamespace
+        args=SimpleNamespace(space_apply=True,space_fingerprint=fp,apply=True)
+        with mock.patch.object(tw,"_disk_open_paths",return_value=set()),mock.patch.object(tw,"_save_locked"):
+            with self.assertRaisesRegex(ValueError,"Pending cleanup list changed"):
+                tw._disk_command(args,self.state_path.parent,state)
+        self.assertTrue(leaf.exists())
+
+    def test_git_worktree_query_failure_is_unknown_but_non_git_is_clear(self):
+        tw=self.twmod
+        repo=self.home/"repo"; repo.mkdir(); (repo/".git").mkdir()
+        failed=type("Result",(),{"returncode":2,"stdout":"","stderr":"error"})()
+        with mock.patch.object(tw.subprocess,"run",return_value=failed):
+            self.assertTrue(tw._disk_has_unmerged_worktree(repo))
+        plain=self.home/"plain"; plain.mkdir()
+        with mock.patch.object(tw.subprocess,"run") as run:
+            self.assertFalse(tw._disk_has_unmerged_worktree(plain))
+        run.assert_not_called()
+
+    def test_orphan_requires_threshold_age_and_no_live_child(self):
+        tw = self.twmod
+        old = (dt.datetime.now().astimezone() - dt.timedelta(minutes=130)).strftime("%a %b %d %H:%M:%S %Y")
+        recent = (dt.datetime.now().astimezone() - dt.timedelta(minutes=5)).strftime("%a %b %d %H:%M:%S %Y")
+        rows = [{"pid": 810, "ppid": 1, "uid": os.getuid(), "cmdline": "python tw.py notice sweep --apply", "start_time": recent},
+                {"pid": 811, "ppid": 1, "uid": os.getuid(), "cmdline": "python tw.py merge --apply", "start_time": old},
+                {"pid": 812, "ppid": 811, "uid": os.getuid(), "cmdline": "python test_tw.py", "start_time": recent},
+                {"pid": 813, "ppid": 1, "uid": os.getuid(), "cmdline": "python test_tw.py", "start_time": old}]
+        fixture = self.dir / "health.json"
+        fixture.write_text(json.dumps({"load": [0, 0, 0], "cpu_count": 2, "process_count": 4, "pipe_bytes": 65536, "processes": rows, "simulator_devices": []}))
+        state = self.state(); state["prefs"]["check_timeout_minutes"] = 60
+        with mock.patch.dict(os.environ, {"TEAMWORK_HEALTH_FIXTURE": str(fixture)}):
+            health = tw._disk_health(state)
+        self.assertEqual([x["pid"] for x in health["orphans"]], [813])
+
+    def test_zh_guard_incomplete_reason_is_chinese(self):
+        tw = self.twmod
+        backup = self.home / "Backups"; backup.mkdir()
+        state = self.state(); state["prefs"]["language"] = "zh"; self.save(state)
+        def partial_guard(d, deadline=None, status=None):
+            status["complete"] = False
+            return set(), []
+        with mock.patch.object(tw, "_disk_guards", side_effect=partial_guard):
+            rows = tw._disk_candidates(self.dir / ".teamwork", {"measure_cache": {}, "health": {"simulator_devices": []}, "projects": []}, True, deadline=time.monotonic() + 3, measure=False)
+        item = next(x for x in rows if x["path"] == str(backup))
+        self.assertFalse(item["eligible"])
+        self.assertIn("保护路径", item["ineligible_reason"])
+
+    def test_new_preview_and_orphan_preferences_are_tunable(self):
+        self.tw("prefs", "--set", "disk_preview_budget_s=4", "health_orphan_min_minutes=90")
+        prefs = self.state()["prefs"]
+        self.assertEqual(prefs["disk_preview_budget_s"], 4)
+        self.assertEqual(prefs["health_orphan_min_minutes"], 90)

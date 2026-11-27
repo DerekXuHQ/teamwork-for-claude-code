@@ -1,0 +1,92 @@
+{
+  "source": "sanitized r7-state.json disk_space.measure_cache subset",
+  "disk_space": {
+    "measure_cache": {
+      "/tmp/t82-r7-home/Library/Developer/CoreSimulator/Devices/5926FAE6-64BE-42D7-95E6-2841C8569AA7": {
+        "bytes": 8625143808,
+        "cached_bytes": 8625143808,
+        "complete": true,
+        "measured_at": "2026-11-27T04:59:36.714190-05:00",
+        "cached_at": "2026-11-27T04:59:36.714190-05:00",
+        "updated_at": "2026-11-27T04:59:36.714190-05:00"
+      },
+      "/tmp/t82-r7-home/Library/Developer/CoreSimulator/Devices/92818DEC-4E0B-4008-9009-5DCE416F041E": {
+        "bytes": 14933372928,
+        "cached_bytes": 14933372928,
+        "complete": true,
+        "measured_at": "2026-11-27T04:59:38.816944-05:00",
+        "cached_at": "2026-11-27T04:59:38.816944-05:00",
+        "updated_at": "2026-11-27T04:59:38.816944-05:00"
+      },
+      "/tmp/t82-r7-home/Library/Developer/CoreSimulator/Devices/B4369A22-B092-4DBC-8883-651C54B4AC06": {
+        "bytes": 8202264576,
+        "cached_bytes": 8202264576,
+        "complete": true,
+        "measured_at": "2026-11-27T04:59:37.506880-05:00",
+        "cached_at": "2026-11-27T04:59:37.506880-05:00",
+        "updated_at": "2026-11-27T04:59:37.506880-05:00"
+      },
+      "/tmp/t82-r7-home/Library/Developer/CoreSimulator/Devices/2B8BD13C-31E4-4CC7-9FD4-CDD60978D2E4": {
+        "bytes": 7518314496,
+        "cached_bytes": 7518314496,
+        "complete": true,
+        "measured_at": "2026-11-27T04:59:37.942355-05:00",
+        "cached_at": "2026-11-27T04:59:37.942355-05:00",
+        "updated_at": "2026-11-27T04:59:37.942355-05:00"
+      },
+      "/tmp/t82-r7-home/.dev-scratch/backups": {
+        "bytes": 28906045440,
+        "complete": false,
+        "measured_at": null,
+        "updated_at": "2026-11-27T05:00:46.260440-05:00"
+      },
+      "/tmp/t82-r7-home/Library/Caches": {
+        "bytes": 14547582976,
+        "complete": false,
+        "measured_at": null,
+        "updated_at": "2026-11-27T05:00:46.260461-05:00"
+      },
+      "/tmp/t82-r7-home/Library/Developer/CoreSimulator/Devices": {
+        "bytes": 39280148480,
+        "cached_bytes": 39280148480,
+        "complete": true,
+        "measured_at": "2026-11-27T05:00:15.599217-05:00",
+        "cached_at": "2026-11-27T05:00:15.599217-05:00",
+        "updated_at": "2026-11-27T05:00:15.599217-05:00"
+      },
+      "/tmp/t82-r7-home/Library/Developer/Xcode/DerivedData": {
+        "bytes": 3064147968,
+        "cached_bytes": 3064147968,
+        "complete": true,
+        "measured_at": "2026-11-27T04:59:31.798030-05:00",
+        "cached_at": "2026-11-27T04:59:31.798030-05:00",
+        "updated_at": "2026-11-27T04:59:31.798030-05:00"
+      },
+      "/tmp/t82-r7-home/Library/Developer/Xcode/iOS DeviceSupport": {
+        "bytes": 7299047424,
+        "cached_bytes": 7299047424,
+        "complete": true,
+        "measured_at": "2026-11-27T04:59:13.621826-05:00",
+        "cached_at": "2026-11-27T04:59:13.621826-05:00",
+        "updated_at": "2026-11-27T04:59:13.621826-05:00"
+      },
+      "/tmp/t82-r7-home/.npm": {
+        "bytes": 2162393088,
+        "cached_bytes": 2162393088,
+        "complete": true,
+        "measured_at": "2026-11-27T04:59:41.128115-05:00",
+        "cached_at": "2026-11-27T04:59:41.128115-05:00",
+        "updated_at": "2026-11-27T04:59:41.128115-05:00"
+      },
+      "/tmp/t82-r7-home/.codex": {
+        "bytes": 17706844160,
+        "cached_bytes": 17706844160,
+        "complete": true,
+        "measured_at": "2026-11-27T04:59:28.119926-05:00",
+        "cached_at": "2026-11-27T04:59:28.119926-05:00",
+        "updated_at": "2026-11-27T04:59:28.119926-05:00"
+      }
+    },
+    "simulator_inventory": []
+  }
+}

@@ -130,7 +130,7 @@ def _desktop(config_dirs, now):
         org = account.get("organizationUuid") if isinstance(account, dict) else None
         rows = [(epoch(x.get("t")), num((x.get("u") or {}).get("sd"))) for x in samples
                 if isinstance(x, dict) and org and x.get("org") == org and isinstance(x.get("u"), dict)]
-        rows = [r for r in rows if r[0] and r[1] is not None and r[1] <= 150 and r[0] <= now + 60]  # sd: whole percents
+        rows = [(min(t, now), v) for t, v in rows if t and v is not None and v <= 150 and t <= now + 60]  # sd: whole percents
         if rows:
             seen, pct = max(rows)
             age = (now - seen) / 3600
@@ -229,9 +229,9 @@ def _claude_events(config_dirs, now):
         if timed:  # the latest window (resets within 3 hours count as one), then the highest: usage only grows
             last = max(r["resets_at"] for r in timed)
             pick = max((r for r in timed if last - r["resets_at"] < 10800), key=lambda r: r["pct"])
-        for r in live:  # a reading with no reset time (desktop samples) wins when it was taken later
+        for r in live:  # a reading with no reset time (desktop samples) is a newer percentage for the current window:
             if num(r.get("resets_at")) is None and (pick is None or (r.get("seen_at") or 0) > (pick.get("seen_at") or 0)):
-                pick = r
+                pick = dict(r, resets_at=pick["resets_at"]) if pick else r  # it keeps that window's reset time
         if pick is None:  # nothing live: the newest reading, shown but not used for the tier
             pick = max(rows, key=lambda r: r.get("seen_at") or 0)
         model = (out.get(key) or {}).get("model")
@@ -246,7 +246,7 @@ def _claude_events(config_dirs, now):
             out[key] = cache[key]
     if out.get("scoped") and cache.get("scoped_model"):
         out["scoped"]["model"] = cache["scoped_model"]
-    if "total" in out and "scoped" not in out and out["total"].get("src") != "desktop":  # local sessions log no events
+    if "total" in out and "scoped" not in out and "seven_day" in best:  # only events can say Fable went unused
         out["scoped"] = {"pct": 0.0, "resets_at": out["total"]["resets_at"], "seen_at": None,
                          "src": "inferred", "model": cache.get("scoped_model") or "Fable"}
         out.setdefault("notes", []).append("scoped not seen this window: inferred 0%")

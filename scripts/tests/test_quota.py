@@ -343,6 +343,21 @@ class QuotaTrigger(TwCase):
             self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["src"]), (92, "desktop"))
             self.assertEqual(quota.tier(r, {}, now)[0], "lead-only")
 
+    def test_newer_desktop_sample_keeps_the_window_reset_and_fable_inference(self):
+        """A desktop sample has no reset time: it updates the percentage only, so pre-reset-burn and the inferred 0% stay."""
+        cfg = self.dir / "acct-b"; cfg.mkdir(); now = 2_000_000_000
+        (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-b"}}))
+        (cfg / "bridge-transcript-cse_x.jsonl").write_text(json.dumps({"timestamp": now - 600,
+            "rate_limit_info": {"unifiedWindows": {"seven_day": {"utilization": 0.40, "resetsAt": now + 20 * 3600}}}}) + "\n")
+        samples = self.dir / "samples.json"
+        samples.write_text(json.dumps({"samples": [{"t": (now - 60) * 1000, "org": "org-b", "u": {"sd": 41}}]}))
+        with mock.patch.dict(os.environ, {"TW_DESKTOP_USAGE": str(samples)}):
+            r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)
+        total = r["claude"]["total"]
+        self.assertEqual((total["pct"], total["src"], total["resets_at"]), (41, "desktop", now + 20 * 3600))
+        self.assertEqual(r["claude"]["scoped"]["src"], "inferred")
+        self.assertEqual(quota.tier(r, {}, now)[0], "pre-reset-burn")
+
     def test_same_window_across_a_three_hour_boundary(self):
         """Resets less than 3 hours apart are one window, wherever they fall: the higher reading wins."""
         cfg = self.dir / "acct-b"; cfg.mkdir()

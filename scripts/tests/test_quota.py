@@ -358,6 +358,28 @@ class QuotaTrigger(TwCase):
         self.assertEqual(r["claude"]["scoped"]["src"], "inferred")
         self.assertEqual(quota.tier(r, {}, now)[0], "pre-reset-burn")
 
+    def test_tier_does_not_flip_as_timed_readings_age_behind_a_fresh_sample(self):
+        """Round 5: a stale cache or event still names the window (and its Fable) while the desktop gives the newer total."""
+        cfg = self.dir / "acct-c"; cfg.mkdir(); now = 2_000_000_000
+        samples = self.dir / "samples.json"
+        samples.write_text(json.dumps({"samples": [{"t": (now - 3600) * 1000, "org": "org-c", "u": {"sd": 41}}]}))
+        with mock.patch.dict(os.environ, {"TW_DESKTOP_USAGE": str(samples)}):
+            for age in (5, 7):
+                (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-c"},
+                    "cachedUsageUtilization": {"fetchedAtMs": (now - age * 3600) * 1000,
+                        "utilization": {"seven_day": {"utilization": 40, "resets_at": now + 20 * 3600},
+                            "limits": [{"kind": "weekly_scoped", "percent": 10, "resets_at": now + 20 * 3600,
+                                        "scope": {"model": {"display_name": "Fable"}}}]}}}))
+                r = quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now)
+                self.assertEqual((r["claude"]["total"]["pct"], r["claude"]["total"]["resets_at"]), (41, now + 20 * 3600))
+                self.assertEqual(quota.tier(r, {}, now)[0], "pre-reset-burn", age)
+            (cfg / ".claude.json").write_text(json.dumps({"oauthAccount": {"organizationUuid": "org-c"}}))
+            for age in (23, 25):
+                (cfg / "bridge-transcript-cse_x.jsonl").write_text(json.dumps({"timestamp": now - age * 3600,
+                    "rate_limit_info": {"unifiedWindows": {"seven_day": {"utilization": 0.40, "resetsAt": now + 20 * 3600}}}}) + "\n")
+                self.assertEqual(quota.tier(quota.read_quota([str(cfg)], str(self.dir / "no-codex"), now), {}, now)[0],
+                                 "pre-reset-burn", age)
+
     def test_same_window_across_a_three_hour_boundary(self):
         """Resets less than 3 hours apart are one window, wherever they fall: the higher reading wins."""
         cfg = self.dir / "acct-b"; cfg.mkdir()

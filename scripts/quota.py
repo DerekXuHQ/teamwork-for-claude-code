@@ -225,13 +225,14 @@ def _claude_events(config_dirs, now):
             continue
         live = [r for r in rows if not r.get("stale")]
         timed = [r for r in live if num(r.get("resets_at")) is not None]
+        window = max((r["resets_at"] for r in rows if num(r.get("resets_at")) is not None), default=None)  # stale ones still name it
         pick = None
         if timed:  # the latest window (resets within 3 hours count as one), then the highest: usage only grows
             last = max(r["resets_at"] for r in timed)
             pick = max((r for r in timed if last - r["resets_at"] < 10800), key=lambda r: r["pct"])
         for r in live:  # a reading with no reset time (desktop samples) is a newer percentage for the current window:
             if num(r.get("resets_at")) is None and (pick is None or (r.get("seen_at") or 0) > (pick.get("seen_at") or 0)):
-                pick = dict(r, resets_at=pick["resets_at"]) if pick else r  # it keeps that window's reset time
+                pick = dict(r, resets_at=pick["resets_at"] if pick else window)  # it keeps that window's reset time
         if pick is None:  # nothing live: the newest reading, shown but not used for the tier
             pick = max(rows, key=lambda r: r.get("seen_at") or 0)
         model = (out.get(key) or {}).get("model")
@@ -318,7 +319,8 @@ def tier(result, prefs=None, now=None):
         return "lead-only", flags
     if total_pct >= threshold("quota_burn_at"):
         return ("save" if done else "burn-fable"), flags
-    if now is not None and num(total.get("resets_at")) is not None and scoped_pct is not None:
-        if (total["resets_at"] - now) / 3600 <= threshold("quota_pre_reset_hours") and scoped_pct < threshold("quota_pre_reset_fable_max"):
+    fable = scoped.get("pct")  # a stale Fable reading of an unexpired window still counts here, so the tier does not flip as it ages
+    if now is not None and num(total.get("resets_at")) is not None and num(fable) is not None:
+        if (total["resets_at"] - now) / 3600 <= threshold("quota_pre_reset_hours") and fable < threshold("quota_pre_reset_fable_max"):
             return "pre-reset-burn", flags
     return "normal", flags

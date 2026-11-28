@@ -1004,8 +1004,22 @@ class T71GuardAndSuccession(TwCase):
         linkedproj = self.dir.parent / f"{self.dir.name}-linkedproj"; linkedproj.mkdir()
         elsewhere = self.dir.parent / f"{self.dir.name}-elsewhere"; (elsewhere / "private" / "api" / "tmp" / "victim").mkdir(parents=True)
         (linkedproj / ".teamwork").symlink_to(elsewhere, target_is_directory=True)
-        with self.assertRaises(SystemExit): tw.clear_thread_tmp(linkedproj, "api")  # .teamwork itself is a link
+        with self.assertRaises(SystemExit): __import__("tw").clear_thread_tmp(linkedproj, "api")
         self.assertTrue((elsewhere / "private" / "api" / "tmp" / "victim").is_dir())
+
+    def test_clear_tmp_keeps_evidence_referenced_files(self):
+        self.tw("thread", "add", "api")
+        tmp = self.dir / ".teamwork" / "private" / "api" / "tmp"
+        tmp.mkdir(parents=True)
+        proof = tmp / "proof.txt"; proof.write_text("proof", encoding="utf-8")
+        extra = tmp / "extra.txt"; extra.write_text("extra", encoding="utf-8")
+        state_path = self.dir / ".teamwork" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["tasks"]["T1"] = {"primary_check": {"evidence": str(proof)}}
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        result = json.loads(self.tw("worktree", "api", "--clear-tmp").stdout)
+        self.assertTrue(proof.is_file()); self.assertFalse(extra.exists())
+        self.assertIn("proof.txt", result["kept (referenced as evidence)"])
 
     def test_bash_guard_still_asks_for_rm_r_in_own_tmp(self):
         # the guard no longer parses shell to allow deletes: rm -r / find -delete always ask (use --clear-tmp instead)
@@ -1023,7 +1037,7 @@ class T71GuardAndSuccession(TwCase):
         spec=importlib.util.spec_from_file_location("t71_fixture_signatures",generator)
         mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
         self.assertEqual(set(mod.SAMPLES),{
-            "bridge-transcript-cse_fixture-remote-session.jsonl","t71_real_candidate.jsonl",
+            "old-snap-log.jsonl","bridge-transcript-cse_fixture-remote-session.jsonl","t71_real_candidate.jsonl",
             "t71_real_tool_results.jsonl","t71_old_thread.jsonl","t79_hook_start_session.jsonl",
             "t79_hook_create_session.jsonl","t79_nested_desktop_sessions.jsonl","t80_compaction.jsonl"})
         for name in mod.SAMPLES:

@@ -155,7 +155,7 @@ class Requests(TwCase):
         self.tw("task", "set", "T3", "--status", "review")  # unrelated move; the scan delivers R1
         self.assertEqual(self.req("R1")["status"], "delivered")
         ev = [json.loads(x) for x in (self.dir / ".teamwork" / "log.jsonl").read_text().splitlines()][-1]
-        self.assertEqual(ev["snap_reqs"]["R1"]["status"], "delivered")
+        self.assertEqual(ev["delta"]["requests"]["R1"]["status"], "delivered")
         self.assertNotIn("_moved_reqs", self.state())
 
     def test_declined_closes_from_any_state(self):
@@ -748,6 +748,22 @@ class T83ExistingMaterials(TwCase):
 
 
 class T83ReadyAck(TwCase):
+    def test_ready_saves_once(self):
+        path = self.dir / ".teamwork" / "state.json"
+        idle = path.read_text(encoding="utf-8")
+        self.tw("ready")  # nothing to record: no save at all
+        self.assertEqual(path.read_text(encoding="utf-8"), idle)
+        st = json.loads(idle)  # two steps that each saved before S2: a pending hint and a due default
+        st["screen_pending_hints"] = [{"line": "hint"}]
+        st["questions"] = [{"from": "w", "text": "pick a colour", "answered": False,
+                            "default_action": "use blue", "t": "2020-01-01T00:00:00Z"}]
+        path.write_text(json.dumps(st), encoding="utf-8")
+        self.tw("ready")
+        after = self.state()
+        self.assertEqual(after["rev"], st["rev"] + 1)
+        self.assertTrue(after["questions"][0].get("defaulted"))
+        self.assertNotIn("screen_pending_hints", after)
+
     def test_ready_reports_worker_without_existing_ack(self):
         self.tw("thread", "add", "worker", "--session", "worker-session", "--status", "working")
         result = json.loads(self.tw("ready").stdout)

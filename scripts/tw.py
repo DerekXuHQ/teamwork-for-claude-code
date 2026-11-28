@@ -84,9 +84,8 @@ TASK_STATUSES = [
 ]
 CONTEXT_LIMIT = 9000  # SessionStart additionalContext is capped at 10k chars
 NAME_RE = r"[a-z0-9][a-z0-9-]{0,23}"
-# Commands that write project files without going through save(). All other
-# commands may run; save() remains the gate for ledger changes.
-WRITE_LOCK_DIRECT_WRITERS = {"memory", "log", "worktree", "init"}
+DELTA_COLLECTIONS = {"threads", "tasks", "requests", "areas", "features", "screens", "handovers",
+                     "signals", "observations", "models", "docs", "archive", "archive_packs", "compactions"}
 
 
 def now():
@@ -1782,12 +1781,14 @@ def log(d, event):
         os.fsync(f.fileno())
 
 
-def _with_save_lock(d, fn):
-    save_lock_path = d / ".save.lock"
+@contextlib.contextmanager
+def ledger_lock(d, name=".save.lock"):
+    save_lock_path = d / name
     if fcntl:
         with open(save_lock_path, "a+") as save_lock:
             fcntl.flock(save_lock.fileno(), fcntl.LOCK_EX)
-            return fn()
+            yield
+        return
     deadline = time.monotonic() + 30
     while True:
         try:
@@ -1795,26 +1796,100 @@ def _with_save_lock(d, fn):
             break
         except FileExistsError:
             if time.monotonic() >= deadline:
-                raise RuntimeError("timed out acquiring .teamwork/.save.lock")
+                raise RuntimeError(f"timed out acquiring .teamwork/{name}")
             time.sleep(.05)
     try:
-        return fn()
+        yield
     finally:
         os.close(save_lock_fd)
         save_lock_path.unlink(missing_ok=True)
 
 
-def save(d, st, event=None):
+_SKIP_SAVE = object()
+_READY_SAVE_BATCH = None
+
+
+def update(d, fn, event=None, initial=None):
     try:
-        return _with_save_lock(d, lambda: _save_locked(d, st, event))
+        with ledger_lock(d):
+            st = load(d) if (d / "state.json").exists() else copy.deepcopy(initial or {})
+            result = fn(st)
+            if result is _SKIP_SAVE: return None
+            _save_locked(d, st, event)
+            return result
     except RuntimeError as e:
-        if str(e) == "timed out acquiring .teamwork/.save.lock":
+        if str(e).startswith("timed out acquiring .teamwork/"):
             sys.exit(str(e))
         raise
 
 
+def save(d, st, event=None):
+    """Compatibility wrapper: preserve a caller's in-memory state under the shared lock."""
+    if _READY_SAVE_BATCH is not None and d == _READY_SAVE_BATCH["dir"]:
+        _READY_SAVE_BATCH["state"] = copy.deepcopy(stored(st))
+        _READY_SAVE_BATCH["events"].append(copy.deepcopy(event or {}))
+        return
+    def replace(latest):
+        latest.clear()
+        latest.update(st)
+        return latest
+    latest = update(d, replace, event, initial=st)
+    if isinstance(latest, dict):
+        st.clear(); st.update(latest)
+    return latest
+
+
+def write_locked(st, cmd=None, ev=None):
+    """Return whether writes are locked, or reject commands that write outside save()."""
+    direct_writers = {"memory", "log", "worktree", "init"}
+    lock = (st or {}).get("write_lock")
+    if not lock:
+        return False
+    event = ev or {}
+    if event.get("ev") == "session-start-version" or str(event.get("ev", "")).startswith("succ-"):
+        return False
+    if cmd is not None:
+        direct = (cmd.cmd in direct_writers or
+                  (cmd.cmd == "model-log" and not getattr(cmd, "summary", None)) or
+                  (cmd.cmd == "rebuild" and getattr(cmd, "apply", False)) or
+                  (cmd.cmd == "board" and getattr(cmd, "share", False)))
+        if direct:
+            sys.exit(lab(st, "lead_write_locked", ho=lock.get("ho")))
+    return True
+
+
+def state_delta(old, new):
+    """Describe persisted state changes as changed collection rows or whole values."""
+    old, new = stored(old), stored(new)
+    delta = {}
+    for key in old.keys() | new.keys():
+        if key.startswith("_") or key in {"rev", "updated"}:
+            continue
+        before, after = old.get(key), new.get(key)
+        if before == after:
+            continue
+        if key in DELTA_COLLECTIONS and isinstance(before, dict) and isinstance(after, dict):
+            changed = {row: value for row, value in after.items() if before.get(row) != value}
+            removed = sorted(before.keys() - after.keys())
+            if changed:
+                delta[key] = changed
+            if removed:
+                delta[f"{key}-"] = removed
+        elif key not in new:
+            delta.setdefault("-", []).append(key)
+        else:
+            delta[key] = copy.deepcopy(after)
+    return delta
+
+
+def log_delta(d, event, old, new):
+    delta = state_delta(old, new)
+    log(d, {**event, "delta": delta})
+    return delta
+
+
 def _patch_state(d, path_keys, update_fn, event=None):
-    """Apply one narrowly scoped update to the newest ledger while holding its save lock."""
+    """Apply one narrowly scoped update to the newest ledger."""
     keys = tuple(path_keys) if isinstance(path_keys, (list, tuple)) else (path_keys,)
     def apply(latest):
         node=latest
@@ -1822,31 +1897,24 @@ def _patch_state(d, path_keys, update_fn, event=None):
         key=keys[-1]
         current=node.get(key)
         replacement=update_fn(copy.deepcopy(current),latest)
-        if replacement is None: return False
+        if replacement is None: return _SKIP_SAVE
         node[key]=replacement
         return True
     for attempt in range(3):
-        def update():
-            latest = load(d)
-            if not apply(latest): return False
-            try:
-                _save_locked(d, latest, event)
-                return True
-            except SystemExit:
-                if attempt == 2: raise
-        result = _with_save_lock(d, update)
-        if result is False: return None
-        if result is True: return True
+        try:
+            return update(d, apply, event)
+        except SystemExit as e:
+            if str(e) not in (lab(load(d), "ledger_changed"), "ledger changed") or attempt == 2: raise
     return None
 
 
 def _save_locked(d, st, event=None):
     metadata_only = (event or {}).get("ev") == "session-start-version"
-    lock = st.get("write_lock")
     disk = json.loads((d / "state.json").read_text(encoding="utf-8")) if (d / "state.json").exists() else {}
-    disk_lock = disk.get("write_lock")
-    if disk_lock and not metadata_only and not (event or {}).get("ev", "").startswith("succ-"):
-        sys.exit(lab(st, "lead_relead_locked") if disk_lock.get("relead") else lab(st, "lead_write_locked", ho=disk_lock.get("ho")))
+    for checked in (disk, st):
+        if write_locked(checked, ev=event):
+            sys.exit(lab(checked, "lead_relead_locked") if checked["write_lock"].get("relead") else
+                     lab(checked, "lead_write_locked", ho=checked["write_lock"].get("ho")))
     if disk.get("rev", 0) != st.get("_rev_loaded", 0):
         sys.exit(lab(st, "ledger_changed"))
     log_events = _read_log(d)
@@ -1855,13 +1923,9 @@ def _save_locked(d, st, event=None):
     if isinstance(log_rev, int) and not isinstance(log_rev, bool) and log_rev > state_rev:
         print(f"log.jsonl is ahead of state.json (log rev {log_rev} > state rev {state_rev}); run `TW rebuild --apply`",
               file=sys.stderr)
-    if lock and not metadata_only and not (event or {}).get("ev", "").startswith("succ-"):
-        sys.exit(lab(st, "lead_relead_locked") if lock.get("relead") else lab(st, "lead_write_locked", ho=lock.get("ho")))
     _radar_update(st)
     root_pending = st.pop("_root_pending", [])
     root_reraised = st.pop("_root_reraised", [])
-    touched = st.pop("_touched", [])
-    moved_reqs = st.pop("_moved_reqs", [])
     loaded_rev = st.pop("_rev_loaded", 0)
     prior_event = log_events[-1] if log_events else {}
     retry_rev = loaded_rev + 1
@@ -1877,12 +1941,7 @@ def _save_locked(d, st, event=None):
     tmp.write_text(json.dumps(stored(st), ensure_ascii=False, indent=2), encoding="utf-8")
     log_event = None
     if event:
-        more = {n: st["threads"][n] for n in touched if n in st["threads"] and n != event.get("thread")}
-        snap = snapshots(st, event)
-        if moved_reqs:
-            snap["snap_reqs"] = {**snap.get("snap_reqs", {}),
-                                 **{r: st["requests"][r] for r in moved_reqs if r in st.get("requests", {})}}
-        log_event = {**event, **snap, **({"snap_more_threads": more} if more else {}), "rev": st["rev"]}
+        log_event = {**event, "delta": state_delta(disk, st), "rev": st["rev"]}
         if not same_retried_event:
             log(d, log_event)
     for area in root_pending:
@@ -1901,96 +1960,6 @@ def _save_locked(d, st, event=None):
             except OSError:
                 pass
 
-
-def snapshots(st, ev):
-    """Copies of what this event changed, so `rebuild` can restore state.json from log.jsonl alone."""
-    snap = {}
-    persisted = stored(st)
-    if ev.get("ev", "").startswith(("root-", "area-")):
-        snap["snap_areas"] = persisted.get("areas", {})
-    if ev.get("ev", "").startswith("root-"):
-        snap["snap_questions"] = persisted.get("questions", [])
-    if ev.get("task") in persisted.get("tasks", {}):
-        snap["snap_task"] = persisted["tasks"][ev["task"]]
-        linked = {r: q for r, q in persisted.get("requests", {}).items() if ev["task"] in (q.get("tasks") or [])}
-        if linked:  # task done can move requests to delivered
-            snap["snap_reqs"] = linked
-    if ev.get("thread") in persisted.get("threads", {}):
-        snap["snap_thread"] = persisted["threads"][ev["thread"]]
-    if ev.get("req") in persisted.get("requests", {}):
-        snap["snap_req"] = persisted["requests"][ev["req"]]
-    if ev.get("ev") in ("req-import", "req-migrate"):
-        snap["snap_reqs"] = {r: persisted["requests"][r] for r in ev.get("ids", []) if r in persisted.get("requests", {})}
-    if ev.get("ev") in ("init", "lead", "prefs"):
-        snap["snap_meta"] = {k: persisted.get(k) for k in ("project", "goal", "created", "repo", "envs", "lead", "prefs")}
-    if ev.get("ev") in ("question", "answered", "default"):
-        snap["snap_questions"] = persisted.get("questions", [])
-    if ev.get("ev", "").startswith("plan-"):
-        snap["snap_plan_approved"] = persisted.get("plan_approved")
-        snap["snap_tasks"] = persisted.get("tasks", {})  # approve/reopen changes every task's status
-    if ev.get("ev", "").startswith("issue-"):
-        snap["snap_issues"] = persisted.get("issues", [])
-    if ev.get("ev", "").startswith("deliverable-"):
-        snap["snap_deliverables"] = persisted.get("deliverables", [])
-    if ev.get("ev") in ("default", "answered"):
-        snap["snap_decisions"] = persisted.get("decisions", [])
-    if ev.get("ev", "").startswith("feature-"):
-        snap["snap_features"] = persisted.get("features", {})
-        snap["snap_reqs"] = {**snap.get("snap_reqs", {}), **persisted.get("requests", {})}
-    if ev.get("ev") == "reconcile":
-        snap["snap_reconcile"] = persisted.get("reconcile")
-    if ev.get("ev") == "docs-set":
-        snap["snap_docs"] = persisted.get("docs", {})
-    if ev.get("ev") == "standing":
-        snap["snap_standing"] = persisted.get("standing", [])
-    if ev.get("ev") == "report-card":
-        snap["snap_last_report_at"] = persisted.get("last_report_at")
-    if ev.get("ev") == "quota-run":
-        snap["snap_quota"] = persisted.get("quota")
-        snap["snap_last_quota_at"] = persisted.get("last_quota_at")
-    if ev.get("ev") == "merge" and "grant_uses" in persisted:
-        snap["snap_grant_uses"] = persisted["grant_uses"]
-    if ev.get("ev", "").startswith("promise-"):
-        snap["snap_promises"] = persisted.get("promises", [])
-    if ev.get("ev", "").startswith("archive-"):
-        snap["snap_archive"] = persisted.get("archive", {})
-        if ev.get("ev") == "archive-verify":
-            snap.update(snap_tasks=persisted.get("tasks", {}), snap_questions=persisted.get("questions", []),
-                        snap_issues=persisted.get("issues", []), snap_notices=persisted.get("notices", []),
-                        snap_archive_packs=persisted.get("archive_packs", {}),
-                        snap_archive_handoffs=persisted.get("archive_handoffs", []))
-    if ev.get("ev", "").startswith("screen-"):
-        snap["snap_screens"] = persisted.get("screens", {})
-    if ev.get("ev", "").startswith("succ-"):
-        snap["snap_handovers"] = persisted.get("handovers", {})
-        snap["snap_write_lock"] = persisted.get("write_lock")
-        hid=ev.get("handover"); h=persisted.get("handovers",{}).get(hid,{})
-        if h.get("kind")=="lead":
-            snap["snap_meta"]={k:persisted.get(k) for k in ("project","goal","created","repo","envs","lead","prefs")}
-    if ev.get("ev", "").startswith("succ-relead"):
-        snap["snap_meta"] = {k: persisted.get(k) for k in ("project", "goal", "created", "repo", "envs", "lead", "prefs")}
-    if ev.get("ev", "").startswith("succ-relead") or ev.get("ev") == "screen-record":
-        snap["snap_lead_trials"] = persisted.get("lead_trials", [])
-        snap["snap_lead_first_message"] = persisted.get("lead_first_message")
-    if ev.get("ev") == "lead" and persisted.get("handovers"):
-        snap["snap_handovers"] = persisted.get("handovers", {})
-        snap["snap_write_lock"] = persisted.get("write_lock")
-    if ev.get("ev", "").startswith("signals"):
-        snap["snap_signals"] = persisted.get("signals", {})
-        snap["snap_observations"] = persisted.get("observations", {})
-    if ev.get("ev", "").startswith("spawn-refused"):
-        snap["snap_spawn_refusals"] = persisted.get("spawn_refusals", [])
-    if ev.get("ev", "").startswith("notice-"):
-        snap["snap_notices"] = persisted.get("notices", [])
-    if ev.get("ev") in ("merge", "qa-done"):
-        snap["snap_qa_pending"] = persisted.get("qa_pending", [])
-    if ev.get("ev", "").startswith("model-deny-"):
-        snap["snap_model_deny"] = persisted.get("model_deny", [])
-    if ev.get("ev", "").startswith("model-status-"):
-        snap["snap_models"] = persisted.get("models", {})
-    if "roster_version" in persisted:
-        snap["snap_roster_version"] = persisted["roster_version"]
-    return snap
 
 
 DOC_KINDS = ("board", "ledger", "features", "nav")
@@ -2236,8 +2205,7 @@ def task_followups(d, st, a):
                 "from_requests": reqs,  # for trace; not linked, so the original request is not held back
             }
     if a.apply and plan:
-        save(d, st, {"ev": "task-followups", "task": a.id, "added": [t for t, _ in plan],
-                     "snap_more_tasks": {t: st["tasks"][t] for t, _ in plan}})
+        save(d, st, {"ev": "task-followups", "task": a.id, "added": [t for t, _ in plan]})
     print(json.dumps({"from": a.id, "apply": bool(a.apply), "tasks": out,
                       "next": ("show them to the user with the plan; dispatch like any task" if a.apply and plan
                                else "re-run with --apply to add them" if plan else "nothing new to add")},
@@ -2752,7 +2720,6 @@ def _close_archived(st, sid, me, ts):
                 if h.get("session_id") == sid and not h.get("to"):
                     end = ts if not h.get("from") or _after(ts, h["from"]) else now()  # never before its start
                     h["to"], h["reason"] = end, f"session moved to {me}"
-                    st.setdefault("_touched", []).append(n2)  # save() logs its snapshot too (rebuild sees it)
 
 
 def _session_taken(st, sid, me, handover=None):
@@ -3029,8 +2996,7 @@ def cmd_thread(a):
             sys.exit("`thread set all --roster-sent` takes no other options; set threads one by one")
         for n in roster_stale(st):
             st["threads"][n]["roster_seen"] = st.get("roster_version", 0)
-        save(d, st, {"ev": "roster-sent", "to": "all", "version": st.get("roster_version", 0),
-                     "snap_threads": st["threads"]})
+        save(d, st, {"ev": "roster-sent", "to": "all", "version": st.get("roster_version", 0)})
         print(json.dumps({"roster_version": st.get("roster_version", 0), "not_sent": roster_stale(st)}))
         return
     t = st["threads"][name]
@@ -3713,14 +3679,16 @@ def cmd_task(a):
         area = area_of_task(st, st["tasks"][a.id])
         task_dir = d / "tasks"; task_dir.mkdir(exist_ok=True)
         (task_dir / f"{a.id}.md").write_text(f"# {a.id}\n\nGoal: {a.title or a.id}\n" + (f"Brief: {a.brief}\n" if getattr(a, "brief", None) else "") + f"Done when: {a.accept or '-'}\n" + (f"\n{lab(st, 'original_words')}: {said}\n" if said else ""), encoding="utf-8")
+        beyond_text = None
+        if getattr(a, "beyond", None):
+            beyond_text = lab(st, "beyond_task", task=a.id, text=a.beyond)
+            st["questions"].append({"from": "lead", "text": beyond_text, "kind": "beyond", "task": a.id,
+                                    "answered": False, "t": now()})
         save(d, st, {"ev": "task-add", "task": a.id, "owner": a.owner})
         if getattr(a, "work_kind", None) in ("code", "test") and not getattr(a, "primary", None):
             print(lab(st, "primary_missing_hint"), file=sys.stderr)
         if getattr(a, "primary", None) and any(w in a.primary.lower() for w in PRIMARY_INTERNAL_WORDS):
             print(lab(st, "primary_internal"), file=sys.stderr)
-        if getattr(a, "beyond", None):
-            st = load(d); st["questions"].append({"from": "lead", "text": lab(st, "beyond_task", task=a.id, text=a.beyond), "kind": "beyond", "task": a.id, "answered": False, "t": now()})
-            save(d, st, {"ev": "question", "from": "lead", "text": st["questions"][-1]["text"]})
         warn = topic_mismatch(st, a.owner, a.title)  # no --title: nothing to compare yet
         if warn:
             print(warn, file=sys.stderr)
@@ -4087,7 +4055,6 @@ def cmd_task(a):
                 "status": k["status"],
                 "owner": k["owner"],
                 **({"user_said": said} if said else {}),
-                **({"snap_more_tasks": stale} if stale else {}),
             },
         )
         if a.owner or a.title:  # after the save: warn only about what was stored
@@ -4792,7 +4759,7 @@ def urgent_unacked(st):
             and (_minutes_since(k.get("dispatched_at")) or 0) > k.get("urgent_minutes", limit)]
 
 
-def cmd_ready(a):
+def _cmd_ready(a):
     d = need(find_dir())
     st = load(d)
     pending_hints=st.pop("screen_pending_hints",[])
@@ -4801,7 +4768,7 @@ def cmd_ready(a):
     sprint = st.get("sprint") or {}
     if sprint and not sprint.get("ended_at") and _when(sprint.get("until")) and _when(sprint.get("until")) <= _when(now()):
         cmd_sprint(argparse.Namespace(action="end", since=None, json=False, until=None, goal=None, _from_ready=True))
-        st = load(d)
+        st = copy.deepcopy(_READY_SAVE_BATCH["state"])
     if apply_thread_defaults(st): save(d, st, {"ev": "thread-defaults"})
     urgent = urgent_unacked(st)
     ack_missing = []
@@ -4947,6 +4914,26 @@ def cmd_ready(a):
             }
         )
     )
+    _READY_SAVE_BATCH["state"] = copy.deepcopy(stored(st))
+
+
+def cmd_ready(a):
+    global _READY_SAVE_BATCH
+    d = need(find_dir())
+    _READY_SAVE_BATCH = {"dir": d, "state": stored(load(d)), "events": []}
+    try:
+        _cmd_ready(a)
+    except BaseException:
+        _READY_SAVE_BATCH = None
+        raise
+    batch = _READY_SAVE_BATCH
+    _READY_SAVE_BATCH = None
+    if not batch["events"] or write_locked(batch["state"]):  # ready saves only when one of its steps would have
+        return
+    event = {"ev": "ready", "ready_events": batch["events"]}
+    for old in batch["events"]:
+        event.update({k: v for k, v in old.items() if k != "ev"})
+    save(d, batch["state"], event)
 
 
 _STOP = set("a an the and or of to in on at for with from by is are be it this that these those into as via per "
@@ -5023,13 +5010,13 @@ def pace_notice(d, st):
     # Write only on a real tier change: "normal" and never-recorded are the same state.
     if (None if tier == "normal" else tier) == st.get("pace_notice_tier"): return
     if tier == "normal":
-        if st.get("write_lock"): return
+        if write_locked(st): return
         st["pace_notice_tier"] = None
         save(d, st, {"ev": "pace-tier", "tier": tier})
         return
     line = lab(st, "route_slow", pct=pct, checkin=effective_interval(st, "checkin_minutes"), quota=effective_interval(st, "quota_every_minutes"))
     print(line, file=sys.stderr)
-    if st.get("write_lock"): return  # read-only during a handover: say it, the successor records it
+    if write_locked(st): return  # read-only during a handover: say it, the successor records it
     st["pace_notice_tier"] = tier
     save(d, st, {"ev": "pace-tier", "tier": tier, "notice": line})
 
@@ -6058,7 +6045,7 @@ def cmd_board(a):
     d = need(find_dir())
     st = load(d)
     if apply_thread_defaults(st): save(d, st, {"ev": "thread-defaults"})
-    if not st.get("write_lock"):  # refresh the file view; during a lead handover the board is read-only
+    if not write_locked(st):  # refresh the file view; during a lead handover the board is read-only
         (d / "BOARD.md").write_text(render_board(st), encoding="utf-8")
     if getattr(a, "share", False):
         text = render_share(st)
@@ -8228,13 +8215,15 @@ def cmd_sweep(a):
     never lost and never refused."""
     d = need(find_dir())
     if getattr(a, "space_apply", False):
-        _with_save_lock(d, lambda: _disk_command(a, d, load(d)))
+        with ledger_lock(d):
+            _disk_command(a, d, load(d))
         return
     # The disk report reads what the sweep recorded, but callers read the sweep JSON from the last stdout line.
     held = io.StringIO()
-    with contextlib.redirect_stdout(held):
-        _with_save_lock(d, lambda: _sweep_locked(a, d, load(d)))
-    _with_save_lock(d, lambda: _disk_command(a, d, load(d)))
+    with contextlib.redirect_stdout(held), ledger_lock(d):
+        _sweep_locked(a, d, load(d))
+    with ledger_lock(d):
+        _disk_command(a, d, load(d))
     sys.stdout.write(held.getvalue())
 
 
@@ -9299,7 +9288,7 @@ def cmd_screen(a):
         except (OSError,ValueError,AttributeError): sys.exit(lab(st,"screen_unknown"))
         print(f"[screen {sidarg}]\n"+lab(st,"screen_prompt")+"\n"+"\n".join(f"{p}: {questions[p]}" for p in rec.get("items",[]) if p in questions)); return
     if a.action == "ask":
-        if st.get("write_lock"):
+        if write_locked(st):
             sys.exit(lab(st, "lead_write_locked", ho=st["write_lock"].get("ho")))
         if pref(st, 'screen_mode') == "off":
             print(lab(st, "screen_off")); return
@@ -9529,7 +9518,7 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
     if color!="red": lines.append(lab(st,"signal_relay_count",n=relay))
     if missing_time: lines.append(lab(st,"signals_time_missing"))
     if bad_lines: lines.append(lab(st,"signals_bad_lines",n=bad_lines))
-    if persist and not st.get("write_lock"):
+    if persist and not write_locked(st):
         computed=copy.deepcopy(st.get("signals",{}).get(seat,{}))
         for key in ("half_quiz","last_p7","quizzes"):
             if key in computed: result[key]=computed[key]
@@ -9599,7 +9588,7 @@ def _after_compact(d,st,seat,local_session,skip_transcript=False):
     prior=(st.get("compactions") or {}).get(seat) or {}
     count=int(prior.get("count",0))+1 if prior.get("session")==local_session else 1
     at=now()
-    if not st.get("write_lock"):
+    if not write_locked(st):
         def patch(current,latest):
             same=current and current.get("session")==local_session
             return {"session":local_session,"count":int(current.get("count",0))+1 if same else 1,
@@ -9607,10 +9596,10 @@ def _after_compact(d,st,seat,local_session,skip_transcript=False):
         _patch_state(d,("compactions",seat),patch,{"ev":"compact","seat":seat})
         st=load(d)
         count=(st.get("compactions",{}).get(seat) or {}).get("count",count)
-    if st.get("write_lock"):
+    if write_locked(st):
         quiz_text=""
     else: quiz_text=_signals_half_quiz(d,st,seat,at)
-    if not st.get("write_lock"):
+    if not write_locked(st):
         sig=st.get("signals",{}).get(seat,{})
         def save_quiz(current,latest):
             current=current or {}
@@ -9665,7 +9654,7 @@ def _compact_block(d,st,seat,count,qid,quiz_text,local_session):
     else:
         rules=Path(__file__).resolve().parents[1]/"templates"/"worker-protocol.md"
         rules_line=lab(st,"compact_thread_rules",rules=rules)
-    if st.get("write_lock"):
+    if write_locked(st):
         return _brief_card(st,seat)+"\n"+lab(st,"compact_write_locked",n=count,rules=rules_line)+"\n\n"
     quiz_body="\n".join(x for x in str(quiz_text).splitlines() if re.match(r"\s*[0-9]+\.",x)) or str(quiz_text)  # the questions only: the lead-facing heading says "send it to the seat"
     required=lab(st,"compact_mandatory",n=count,rules=rules_line,id=qid,quiz=quiz_body)
@@ -10128,7 +10117,7 @@ def cmd_quota(a):
     codex_dir = a.codex_dir or str(Path.home() / ".codex")
     current = _now_dt().timestamp()
     notes, prefs, prev, changed, state_path, project_dir, prefs_ok = [], {}, None, "no", None, None, True
-    write_locked = False
+    locked = False
     try:
         project_dir = find_dir()
         state_path = Path(project_dir) / "quota-state.json" if project_dir else None
@@ -10145,7 +10134,7 @@ def cmd_quota(a):
             try:
                 st0 = load(project_dir)
                 prefs = st0["prefs"] if isinstance(st0, dict) and isinstance(st0.get("prefs"), dict) else None
-                write_locked = bool(st0.get("write_lock"))
+                locked = write_locked(st0)
             except Exception:
                 prefs = None
             if prefs is None:  # thresholds unknown: report, but do not record a change on defaults
@@ -10177,7 +10166,7 @@ def cmd_quota(a):
     if sum(g[3] != "unknown" for g in graded) > 1:
         result["notes"].append(f"most severe of {len(dirs)} config folders: #{pick + 1} ({dirs[pick]})")
     signature = {"tier": level, "flags": sorted(x for x in flags if x != "5h-tight")}  # 5h-tight: the lead's own
-    if state_path and level != "unknown" and prefs_ok and not write_locked:
+    if state_path and level != "unknown" and prefs_ok and not locked:
         changed = "yes" if (prev is None and (level != "normal" or signature["flags"])) or (
             prev is not None and (prev["tier"], prev["flags"]) != (level, signature["flags"])) else "no"
         try:
@@ -10192,12 +10181,12 @@ def cmd_quota(a):
                 result["notes"].append(f"log not written: {exc.__class__.__name__}")
     output = {**result, "tier": level, "flags": flags, "prev": prev, "changed": changed}
     total_pct = quota_reader.num((result.get("claude", {}).get("total") or {}).get("pct"))
-    if project_dir and total_pct is not None and not write_locked:
+    if project_dir and total_pct is not None and not locked:
         try:
             log(Path(project_dir), {"ev":"quota-usage","used_pct":float(total_pct),"tier":level,"at":now()})
         except OSError as exc:
             result.setdefault("notes", []).append(f"log not written: {exc.__class__.__name__}")
-    if state_path and prefs_ok and level != "unknown" and not write_locked:
+    if state_path and prefs_ok and level != "unknown" and not locked:
         st0["quota"] = {"tier": level, "at": now()}
         st0["last_quota_at"] = st0["quota"]["at"]
         try:
@@ -10206,7 +10195,7 @@ def cmd_quota(a):
             result.setdefault("notes", []).append(f"quota run time not saved ({str(exc)})")
         except Exception as exc:
             result.setdefault("notes", []).append(f"quota run time not saved ({exc.__class__.__name__})")
-    if project_dir and level != "unknown" and not write_locked:
+    if project_dir and level != "unknown" and not locked:
         try:
             pace_st = load(Path(project_dir))
             if isinstance(pace_st, dict) and isinstance(pace_st.get("prefs", {}), dict): pace_notice(Path(project_dir), pace_st)
@@ -10552,7 +10541,7 @@ def _lead_opening_screen(d, st):
     if not found:
         if pref(st, 'screen_mode') == "off":
             return {"status": "off", "attempt": attempt}
-        if st.get("write_lock"):
+        if write_locked(st):
             return {"status": "locked", "attempt": attempt}
         screen, message = _screen_ask(d, st, "lead", sid, "strict", None)
         return {"screen": screen, "message": message, "status": "asked", "attempt": attempt}
@@ -10870,15 +10859,38 @@ def clear_thread_tmp(project, thread, names=()):
     bad = [n for n in names if not n or n in (".", "..") or "/" in n or os.sep in n]
     if bad: sys.exit(f"names inside tmp only, no paths: {', '.join(map(repr, bad))}")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    fd = os.open(Path(project).resolve(), flags)
+    project = Path(project).resolve()
+    tmp_path = project / ".teamwork" / "private" / thread / "tmp"
+    evidence = set()
+    try:
+        ledger = json.loads((project / ".teamwork" / "state.json").read_text(encoding="utf-8"))
+        def collect(value, marked=False):
+            if isinstance(value, dict):
+                for key, child in value.items(): collect(child, marked or "evidence" in str(key).lower())
+            elif isinstance(value, list):
+                for child in value: collect(child, marked)
+            elif marked and isinstance(value, str):
+                raw = Path(value).expanduser()
+                candidates = (raw, project / raw, tmp_path / raw)
+                for candidate in candidates:
+                    try:
+                        rel = candidate.resolve(strict=False).relative_to(tmp_path)
+                        if rel.parts: evidence.update(rel.parts[:i] for i in range(1, len(rel.parts) + 1))
+                    except (OSError, ValueError): pass
+        collect(ledger)
+    except (OSError, ValueError, TypeError):
+        pass
+    fd = os.open(project, flags)
     try:
         for part in (".teamwork", "private", thread, "tmp"):  # .teamwork itself may not be a link either
             try: nxt = os.open(part, flags, dir_fd=fd)
-            except FileNotFoundError: return [], 0
+            except FileNotFoundError: return [], 0, []
             except OSError: sys.exit(f"{part}: not a plain folder (a link on the way?); nothing touched")
             os.close(fd); fd = nxt
-        removed, freed = [], 0
+        removed, kept, freed = [], [], 0
         for name in (names or sorted(os.listdir(fd))):
+            if (name,) in evidence or any(path[0] == name for path in evidence):
+                kept.append(name); continue
             try: info = os.lstat(name, dir_fd=fd)
             except FileNotFoundError: continue
             if stat.S_ISDIR(info.st_mode):
@@ -10889,7 +10901,7 @@ def clear_thread_tmp(project, thread, names=()):
             else:
                 freed += info.st_size; os.unlink(name, dir_fd=fd)
             removed.append(name)
-        return removed, freed
+        return removed, freed, kept
     finally:
         os.close(fd)
 
@@ -10901,8 +10913,9 @@ def cmd_worktree(a):
     if a.thread not in st["threads"]:
         sys.exit(f"unknown thread {a.thread}")
     if a.clear_tmp is not None:
-        removed, freed = clear_thread_tmp(st.get("repo", {}).get("path") or d.parent, a.thread, a.clear_tmp)
-        print(json.dumps({"thread": a.thread, "removed": removed, "freed_bytes": freed}, ensure_ascii=False)); return
+        removed, freed, kept = clear_thread_tmp(st.get("repo", {}).get("path") or d.parent, a.thread, a.clear_tmp)
+        print(json.dumps({"thread": a.thread, "removed": removed, "freed_bytes": freed,
+                          "kept (referenced as evidence)": kept}, ensure_ascii=False)); return
     t = st["threads"][a.thread]
     if t["kind"] != "rc":
         sys.exit("cloud threads have no local worktree; they push their branch")
@@ -10984,7 +10997,6 @@ def deliver_ready(st):
             q["status"] = "delivered"
             q["updated"] = now()
             moved.append(r)
-    st.setdefault("_moved_reqs", []).extend(moved)
     return moved
 
 
@@ -11001,7 +11013,6 @@ def undeliver(st):
             q["reopened_at"] = now()
             q["reopened_task_updates"] = {t: st.get("tasks", {}).get(t, {}).get("updated", "") for t in ts}
             moved.append(r)
-    st.setdefault("_moved_reqs", []).extend(moved)
     return moved
 
 
@@ -12116,7 +12127,10 @@ def trace_data(d, st, r):
         owners = []  # every thread that ever owned it, current one last
         for e in log_all:
             if e.get("task") == tid:
-                sn = e.get("snap_task") if isinstance(e.get("snap_task"), dict) else {}
+                delta = e.get("delta") or {}
+                changes = delta.get("tasks") if isinstance(delta.get("tasks"), dict) else {}
+                sn = (changes.get(tid) if isinstance(changes.get(tid), dict) else
+                      e.get("snap_task") if isinstance(e.get("snap_task"), dict) else {})
                 o = sn.get("owner") or e.get("owner")
                 if isinstance(o, str) and o and o not in owners:
                     owners.append(o)
@@ -12418,9 +12432,7 @@ def cmd_archive(a):
                 t["last_seen"] = now()
                 bump_roster(st, seat)
             print(lab(st, "archive_failed_notice", sid=sid), file=sys.stderr)
-    save(d, st, {"ev": f"archive-{a.action}", **({"user_said": rec.get("user_said")} if a.action == "done" else {}), **({"snap_threads": st["threads"],
-         "snap_roster_version": st.get("roster_version", 0)} if a.action == "done" or
-         (a.action == "check" and a.not_archived) else {})})
+    save(d, st, {"ev": f"archive-{a.action}", **({"user_said": rec.get("user_said")} if a.action == "done" else {})})
     print(json.dumps(rec, ensure_ascii=False))
 
 
@@ -13800,7 +13812,11 @@ def rebuild_state(d, project=None, sessions=None, short=None):
         notes.append("log.jsonl has no usable events: session history will be retained from state.json")
     if not project:  # the log lost its head: take the name from any later event, so nothing before it is skipped
         project = next((n for e in events for n in [(e.get("snap_meta") or {}).get("project") if isinstance(
-            e.get("snap_meta"), dict) else None, e.get("project")] if isinstance(n, str) and n), None)
+            e.get("snap_meta"), dict) else None, (e.get("delta") or {}).get("project") if isinstance(
+            e.get("delta"), dict) else None, e.get("project")] if isinstance(n, str) and n), None)
+    if not project and events:
+        project = "unknown"
+        notes.append("project name is absent from the remaining log: using unknown")
     if events and events[0].get("ev") != "init":
         notes.append("log.jsonl does not start with init: its earliest events may be lost; check the result")
     if (d / "log.jsonl").exists():
@@ -13816,22 +13832,17 @@ def rebuild_state(d, project=None, sessions=None, short=None):
     if bad:
         notes.append(f"skipped {bad} log event(s) with unexpected content")
     if st is not None:
-        for key in ("threads", "tasks", "requests", "screens", "handovers", "signals", "models", "features"):
-            value = st.get(key)
-            if key == "models" and value is None:
-                st[key] = {}
-            elif not isinstance(value, dict):
-                notes.append(f"discarded malformed snapshot field {key}")
-                st[key] = {}
-            else:
-                invalid = [k for k, v in value.items() if not isinstance(k, str) or not isinstance(v, dict)]
-                if invalid:
-                    notes.append(f"discarded {len(invalid)} malformed {key} snapshot row(s)")
-                    st[key] = {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, dict)}
-        for key in ("lead", "repo", "prefs", "envs"):
-            if not isinstance(st.get(key), dict):
-                notes.append(f"discarded malformed snapshot field {key}")
-                st[key] = {}
+        for key, default in DEFAULT_STATE.items():
+            if isinstance(default, dict):
+                value = st.get(key)
+                if not isinstance(value, dict):
+                    notes.append(f"discarded malformed snapshot field {key}")
+                    st[key] = copy.deepcopy(default)
+                elif key in DELTA_COLLECTIONS:
+                    invalid = [k for k, v in value.items() if not isinstance(k, str) or not isinstance(v, dict)]
+                    if invalid:
+                        notes.append(f"discarded {len(invalid)} malformed {key} snapshot row(s)")
+                        st[key] = {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, dict)}
     if st is not None and not pref(st, "short_name"):
         st["prefs"]["short_name"] = short or old_short or default_short(st["project"])
         if not (short or old_short):
@@ -13842,6 +13853,10 @@ def rebuild_state(d, project=None, sessions=None, short=None):
         sm = e.get("snap_meta")
         if isinstance(sm, dict) and isinstance(sm.get("prefs"), dict) and isinstance(pref(sm, 'short_name'), str):
             seen.add(sm["prefs"]["short_name"])
+        delta = e.get("delta") if isinstance(e.get("delta"), dict) else {}
+        changed_prefs = delta.get("prefs") if isinstance(delta.get("prefs"), dict) else {}
+        if isinstance(changed_prefs.get("short_name"), str):
+            seen.add(changed_prefs["short_name"])
         for kv in (e.get("set") or []) if isinstance(e.get("set"), list) else []:
             if isinstance(kv, str) and kv.startswith("short_name="):
                 seen.add(kv.partition("=")[2])
@@ -13863,24 +13878,31 @@ def rebuild_state(d, project=None, sessions=None, short=None):
     return _finish_rebuild(d, st, project, sessions, notes, short, sorted(x for x in seen if x), leads)
 
 
+SNAP_RULES = tuple(("snap_" + key, key, "replace") for key in
+    "areas screens handovers signals observations models threads tasks features questions plan_approved roster_version issues deliverables decisions promises notices docs standing last_report_at qa_pending archive archive_handoffs archive_packs spawn_refusals model_deny reconcile grant_uses quota last_quota_at".split()) + (
+    ("snap_more_tasks", "tasks", "merge"), ("snap_more_threads", "threads", "merge"),
+    ("snap_reqs", "requests", "merge"), ("snap_task", "tasks", "replace"),
+    ("snap_req", "requests", "replace"), ("snap_thread", "threads", "replace"),
+    ("snap_write_lock", "write_lock", "delete-none"),
+    ("snap_lead_first_message", "lead_first_message", "delete-none"),
+    ("snap_lead_trials", "lead_trials", "trials"), ("snap_meta", "meta", "replace"))
+
 def _replay(st, e, project, notes, d):
         ev = e.get("ev", "")
         if not isinstance(ev, str):
             raise TypeError("ev")
-        snapshot_types = {"snap_meta": dict, "snap_screens": dict, "snap_handovers": dict,
-                          "snap_signals": dict, "snap_models": dict, "snap_threads": dict,
-                          "snap_more_threads": dict, "snap_tasks": dict, "snap_task": dict,
-                          "snap_reqs": dict, "snap_req": dict, "snap_questions": list,
-                          "snap_plan_approved": bool, "snap_roster_version": int,
-                          "snap_more_tasks": dict, "snap_issues": list, "snap_deliverables": list,
-                          "snap_decisions": list, "snap_promises": list, "snap_notices": list,
-                          "snap_features": dict, "snap_docs": dict, "snap_standing": list,
-                          "snap_qa_pending": list, "snap_archive": dict, "snap_archive_handoffs": list,
-                          "snap_archive_packs": dict, "snap_spawn_refusals": list,
-                          "snap_model_deny": list, "snap_write_lock": (dict, type(None)),
-                          "snap_lead_trials": list}
-        for field, expected in snapshot_types.items():
-            allowed = expected if isinstance(expected, tuple) else (expected,)
+        for field, key, mode in SNAP_RULES:
+            expected = DEFAULT_STATE.get(key)
+            if key in {"write_lock", "lead_first_message"}:
+                allowed = (dict, type(None))
+            elif expected is not None:
+                allowed = (type(expected),)
+            elif field in {"snap_meta", "snap_task", "snap_req", "snap_thread"} or mode == "merge":
+                allowed = (dict,)
+            elif key in {"lead_trials", "roster_version"}:
+                allowed = (list,) if key == "lead_trials" else (int,)
+            else:
+                continue
             if field in e and type(e[field]) not in allowed:
                 notes.append(f"ignored malformed snapshot {field}")
                 e = {k: v for k, v in e.items() if k != field}
@@ -13890,6 +13912,25 @@ def _replay(st, e, project, notes, d):
                 return st
             st = _rebuild_base(name, d, _new_state, default_short)
             st["created"] = e.get("t")
+        if isinstance(e.get("delta"), dict):
+            for key, value in e["delta"].items():
+                if key.endswith("-") and not (isinstance(value, list) and all(isinstance(x, str) for x in value)):
+                    notes.append(f"ignored malformed delta deletion {key[:40]!r}")
+                elif key == "-":
+                    for gone in value:
+                        st.pop(gone, None)
+                elif key.endswith("-") and key[:-1] in DELTA_COLLECTIONS:
+                    collection = st.setdefault(key[:-1], {})
+                    if isinstance(collection, dict):
+                        for row in value:
+                            collection.pop(row, None)
+                elif key in DELTA_COLLECTIONS and isinstance(value, dict):
+                    st.setdefault(key, {}).update(value)
+                else:
+                    st[key] = value
+            if isinstance(e.get("rev"), int) and not isinstance(e.get("rev"), bool):
+                st["rev"] = e["rev"]
+            return st
         if e.get("snap_meta"):
             for k, v in e["snap_meta"].items():
                 if v is not None:
@@ -13897,24 +13938,6 @@ def _replay(st, e, project, notes, d):
                         st["prefs"].update(v)
                     else:
                         st[k] = v
-        if isinstance(e.get("snap_areas"), dict): st["areas"] = e["snap_areas"]
-        if e.get("snap_screens") is not None:
-            if isinstance(e["snap_screens"], dict): st["screens"] = e["snap_screens"]
-            else: notes.append("ignored malformed snap_screens")
-        if e.get("snap_handovers") is not None:
-            if isinstance(e["snap_handovers"], dict): st["handovers"] = e["snap_handovers"]
-            else: notes.append("ignored malformed snap_handovers")
-        if "snap_write_lock" in e:
-            if e["snap_write_lock"] is None: st.pop("write_lock", None)
-            else: st["write_lock"] = e["snap_write_lock"]
-        if isinstance(e.get("snap_lead_trials"), list):
-            if e["snap_lead_trials"] or "lead_trials" in st: st["lead_trials"] = e["snap_lead_trials"]
-        if "snap_lead_first_message" in e:
-            if e["snap_lead_first_message"] is None: st.pop("lead_first_message", None)
-            else: st["lead_first_message"] = e["snap_lead_first_message"]
-        if isinstance(e.get("snap_signals"), dict): st["signals"] = e["snap_signals"]
-        if isinstance(e.get("snap_observations"), dict): st["observations"] = e["snap_observations"]
-        if isinstance(e.get("snap_models"), dict): st["models"] = e["snap_models"]
         if ev == "lead":
             if e.get("session"):
                 st["lead"]["session_id"] = e["session"]
@@ -13953,10 +13976,6 @@ def _replay(st, e, project, notes, d):
                 t["worktree"] = e.get("path")
         if isinstance(e.get("snap_thread"), dict) and th:
             st["threads"][th] = e["snap_thread"]
-        if isinstance(e.get("snap_threads"), dict):
-            st["threads"] = e["snap_threads"]
-        if isinstance(e.get("snap_more_threads"), dict):  # other seats the event changed (stints closed)
-            st["threads"].update(e["snap_more_threads"])
         tk = e.get("task")
         if tk and ev.startswith("task"):
             k = st["tasks"].setdefault(tk, {"title": tk, "owner": None, "deps": [], "accept": "", "status": "planned",
@@ -13967,22 +13986,6 @@ def _replay(st, e, project, notes, d):
                 k["status"] = e["status"]
         if isinstance(e.get("snap_task"), dict) and tk:
             st["tasks"][tk] = e["snap_task"]
-        if isinstance(e.get("snap_tasks"), dict):
-            st["tasks"] = e["snap_tasks"]
-        if isinstance(e.get("snap_more_tasks"), dict):  # tasks an event added besides its own (follow-ups)
-            st["tasks"].update(e["snap_more_tasks"])
-        if isinstance(e.get("snap_roster_version"), int):
-            st["roster_version"] = e["snap_roster_version"]
-        if e.get("snap_model_deny") is not None:
-            st["model_deny"] = e["snap_model_deny"]
-        if e.get("snap_archive") is not None:
-            st["archive"] = e["snap_archive"]
-        if e.get("snap_archive_handoffs") is not None:
-            st["archive_handoffs"] = e["snap_archive_handoffs"]
-        if e.get("snap_archive_packs") is not None:
-            st["archive_packs"] = e["snap_archive_packs"]
-        if e.get("snap_spawn_refusals") is not None:
-            st["spawn_refusals"] = e["snap_spawn_refusals"]
         r = e.get("req")
         if r and ev.startswith("req"):
             q = st["requests"].setdefault(r, {"text": e.get("text") or r, "status": "open", "tasks": [],
@@ -14000,28 +14003,29 @@ def _replay(st, e, project, notes, d):
             if missing:
                 notes.append(f"req-import of {', '.join(missing)} has no content in the log (old format): "
                              "re-import the source file after rebuild")
-        if e.get("snap_questions") is not None:
-            st["questions"] = e["snap_questions"]
-        elif ev == "question":
+        if ev == "question":
             st["questions"].append({"from": e.get("from"), "text": e.get("text"), "answered": False})
         elif ev == "answered":
             i = e["n"] - 1 if isinstance(e.get("n"), int) else e.get("q")  # n: 1-based; q: old 0-based events
             if isinstance(i, int) and 0 <= i < len(st["questions"]):
                 st["questions"][i]["answered"] = True
-        if e.get("snap_plan_approved") is not None:
-            st["plan_approved"] = e["snap_plan_approved"]
-        for k in ("issues", "deliverables", "qa_pending", "decisions", "promises", "notices", "features", "docs", "standing", "last_report_at"):
-            if e.get(f"snap_{k}") is not None:
-                st[k] = e[f"snap_{k}"]
-        if isinstance(e.get("rev"), int) and not isinstance(e.get("rev"), bool):
-            st["rev"] = e["rev"]
-        if e.get("snap_reconcile") is not None:
-            st["reconcile"] = e["snap_reconcile"]
+        for snap, key, mode in SNAP_RULES:
+            if snap in {"snap_meta", "snap_quota", "snap_last_quota_at", "snap_task", "snap_req", "snap_thread"}:
+                continue
+            if snap not in e:
+                continue
+            value = e[snap]
+            if mode == "replace": st[key] = value
+            elif mode == "merge": st.setdefault(key, {}).update(value)
+            elif mode == "delete-none":
+                if value is None: st.pop(key, None)
+                else: st[key] = value
+            elif mode == "trials": st[key] = value
         if e.get("snap_quota") is not None:
             st["quota"] = e["snap_quota"]
             st["last_quota_at"] = e.get("snap_last_quota_at")
-        if e.get("snap_grant_uses") is not None:
-            st["grant_uses"] = e["snap_grant_uses"]
+        if isinstance(e.get("rev"), int) and not isinstance(e.get("rev"), bool):
+            st["rev"] = e["rev"]
         return st
 
 
@@ -14172,7 +14176,6 @@ def _finish_rebuild(d, st, project, sessions, notes, short=None, earlier_shorts=
             notes.append(f"{name}: session set to {sid} from the session list")
             t["session_id"] = sid
             _close_archived(st, sid, name, cur.get("created_at") or now())
-            st.pop("_touched", None)
             if not any(h.get("session_id") == sid and not h.get("to") for h in hist):
                 hist.append({"session_id": sid, "from": cur.get("created_at") or now()})  # back to an earlier one
             if t["status"] == "planned":
@@ -14334,8 +14337,8 @@ def cmd_rebuild(a):
                 bak = d / f"state.json.bak-{stamp}-{i}"
             bak.write_bytes(cur.read_bytes())
             summary["backup"] = str(bak)
-        log(d, {"ev": "rebuild", "rev": st["rev"], "notes": notes, "snap_threads": st["threads"],
-                "snap_roster_version": st.get("roster_version", 0)})
+        log(d, {"ev": "rebuild", "rev": st["rev"], "notes": notes,
+                "delta": state_delta(old if isinstance(old, dict) else {}, st)})
         preview.replace(cur)
         (d / "BOARD.md").write_text(render_board(st), encoding="utf-8")
         summary["applied"] = True
@@ -14659,7 +14662,7 @@ def cmd_context(a):
         host_key = hashlib.sha256(socket.gethostname().encode()).hexdigest()[:8]
         st["versions"][host_key] = {"version": label, "at": now()}
         save(d, st, {"ev": "session-start-version"})
-        if sid and not st.get("write_lock"):  # H9: which version each session started on
+        if sid and not write_locked(st):  # H9: which version each session started on
             with (d / "session-versions.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps({"session": sid, "version": label, "at": os.environ.get("TW_NOW") or now(),
                                     "cwd": str(Path.cwd()), "config_dir": os.environ.get("CLAUDE_CONFIG_DIR") or
@@ -15148,6 +15151,7 @@ def cmd_merge(a):
         if merge_waiver:
             ev["primary_waiver"] = merge_waiver
         fresh = None
+        merge_old = copy.deepcopy(load(d))
         try:  # IL-22: the board lists the merge until a regression round clears it (`qa done`)
             fresh = st = load(d)  # fresh: the checks may have run for minutes
             for fid, feature in st.get("features", {}).items():
@@ -15167,11 +15171,7 @@ def cmd_merge(a):
             save(d, st, ev)
         except Exception as e:  # the base already moved: report it, never fail the merge on bookkeeping
             res["note"] = (res.get("note", "") + f"; regression list not updated ({e})").lstrip("; ")
-            if isinstance(fresh, dict) and isinstance(fresh.get("qa_pending"), list):
-                ev["snap_qa_pending"] = fresh["qa_pending"]  # rebuild then agrees with a state.json already written
-            if isinstance(fresh, dict) and "grant_uses" in fresh:
-                ev["snap_grant_uses"] = fresh["grant_uses"]
-            log(d, ev)
+            log_delta(d, ev, merge_old, fresh or merge_old)
         print(json.dumps(res, ensure_ascii=False))
     finally:
         git("worktree", "remove", "--force", str(wt))
@@ -16439,15 +16439,10 @@ def main():
                 st0 = load(d)
             except (OSError, ValueError, TypeError, AttributeError):
                 st0 = None
-            if st0 and st0.get("write_lock"):
+            if st0 and write_locked(st0, cmd=a):
                 if a.cmd == "lead" and a.session is not None and any(
                         x.get("seat") == "lead" and _ho_open(x) for x in st0.get("handovers", {}).values()):
                     sys.exit(lab(st0, "succ_handover_lock_hint"))
-                direct_writer = (a.cmd in WRITE_LOCK_DIRECT_WRITERS or
-                                 (a.cmd == "model-log" and not a.summary) or (a.cmd == "rebuild" and a.apply) or
-                                 (a.cmd == "board" and getattr(a, "share", False)))
-                if direct_writer:
-                    sys.exit(lab(st0, "lead_write_locked", ho=st0["write_lock"].get("ho")))
     if a.cmd == "succ" and ((a.action == "screened" and not a.screen) or
                              (a.action == "start" and not a.seat)):
         label_state = load(need(d))
@@ -16455,21 +16450,9 @@ def main():
         sys.exit(lab(label_state, "succ_start_seat_required"))
     lock_needed = a.cmd == "succ" or a.cmd == "lead" or (a.cmd == "thread" and a.action == "reseat")
     if lock_needed:
-        d = need(find_dir()); lock_path = d / ".lock"
-        if fcntl:
-            with open(lock_path, "a+") as lock:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                a.f(a)
-        else:
-            deadline=time.monotonic()+30
-            while True:
-                try:
-                    fd=os.open(lock_path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600); os.close(fd); break
-                except FileExistsError:
-                    if time.monotonic()>=deadline: sys.exit("timed out acquiring .teamwork/.lock")
-                    time.sleep(.05)
-            try: a.f(a)
-            finally: lock_path.unlink(missing_ok=True)
+        d = need(find_dir())
+        with ledger_lock(d, ".lock"):
+            a.f(a)
     else:
         a.f(a)
 

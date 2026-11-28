@@ -1,0 +1,273 @@
+{
+  "project": "sample-ledger",
+  "goal": "synthetic-fixture",
+  "created": "2026-11-28T01:39:19-05:00",
+  "rev": 26,
+  "lead": {
+    "session_id": "fake-lead",
+    "sessions": [
+      {
+        "session_id": "fake-lead",
+        "from": "2026-11-28T01:39:20-05:00",
+        "to": null,
+        "reason": "lead changed"
+      }
+    ]
+  },
+  "envs": {
+    "rc": null,
+    "cloud": null
+  },
+  "repo": {
+    "url": null,
+    "path": null,
+    "base": "main"
+  },
+  "threads": {
+    "api": {
+      "kind": "rc",
+      "focus": "",
+      "owns": [],
+      "session_id": "fake-api-new",
+      "status": "working",
+      "branch": "tw/sample-ledger/api",
+      "created": "2026-11-28T01:39:20-05:00",
+      "last_seen": "2026-11-28T04:00:00-05:00",
+      "summary": "synthetic-progress",
+      "sessions": [
+        {
+          "session_id": "fake-api",
+          "from": "2026-11-28T01:39:20-05:00",
+          "to": "2026-11-28T01:42:06-05:00",
+          "reason": "session changed"
+        },
+        {
+          "session_id": "fake-api-new",
+          "from": "2026-11-28T01:42:06-05:00"
+        }
+      ],
+      "worktree": null,
+      "title": "[SL] api",
+      "roster_seen": 2,
+      "last_status_at": "2026-11-28T04:00:00-05:00",
+      "last_report_session": "fake-api-new",
+      "report_count": 1
+    }
+  },
+  "tasks": {
+    "T1": {
+      "title": "sample-task",
+      "owner": "api",
+      "deps": [],
+      "accept": "complete",
+      "touches": [],
+      "topics": [],
+      "status": "approved",
+      "notes": "",
+      "created": "2026-11-28T01:39:20-05:00"
+    },
+    "T9": {
+      "title": "sample-done",
+      "owner": "api",
+      "deps": [],
+      "accept": "complete",
+      "touches": [],
+      "topics": [],
+      "status": "done",
+      "notes": "",
+      "created": "2026-11-28T01:39:44-05:00",
+      "updated": "2026-11-28T03:10:00-05:00",
+      "dispatch_v": 1,
+      "dispatched_at": "2026-11-28T01:39:44-05:00",
+      "review_rounds": 1,
+      "review": {
+        "result": "pass",
+        "reviewer": "fixture",
+        "note": "",
+        "round": 1,
+        "cap": 3,
+        "at": "2026-11-28T03:10:00-05:00",
+        "tests": "ran",
+        "tests_why": "",
+        "base": "0000000",
+        "reviewed": "",
+        "recheck_how": null,
+        "recheck_evidence": null
+      },
+      "primary_legacy": true
+    }
+  },
+  "screens": {},
+  "signals": {},
+  "observations": {},
+  "handovers": {},
+  "plan_approved": true,
+  "questions": [
+    {
+      "from": "lead",
+      "text": "sample-question",
+      "t": "2026-11-28T01:39:21-05:00",
+      "answered": true
+    }
+  ],
+  "decisions": [],
+  "promises": [],
+  "notices": [],
+  "archive": {
+    "fake-api": {
+      "verified_at": "2026-11-28T04:01:00-05:00",
+      "evidence": "synthetic-evidence",
+      "seat": "api",
+      "category": "replaced",
+      "report_count": 1,
+      "archived_at": "2026-11-28T04:02:00-05:00",
+      "user_said": ""
+    }
+  },
+  "spawn_refusals": [],
+  "features": {
+    "F1": {
+      "name": "sample-feature",
+      "phase": "",
+      "reqs": [],
+      "tasks": [],
+      "status": "planned",
+      "evidence": "",
+      "reason": "",
+      "created": "2026-11-28T01:39:21-05:00"
+    }
+  },
+  "requests": {
+    "R1": {
+      "text": "sample-request",
+      "status": "dispatched",
+      "kind": "request",
+      "tasks": [
+        "T1"
+      ],
+      "where": "",
+      "followup": "",
+      "created": "2026-11-28T01:39:21-05:00",
+      "updated": "2026-11-28T01:39:21-05:00"
+    }
+  },
+  "prefs": {
+    "max_parallel": 0,
+    "task_existing_limit": 5,
+    "feature_where_max": 5,
+    "propose_before_start": true,
+    "update_detail": "brief",
+    "checkin_minutes": 10,
+    "short_name": "SL",
+    "require_review": true,
+    "review_max_rounds": 3,
+    "stuck_minutes": 30,
+    "notice_merge": "thread",
+    "urgent_ack_minutes": 5,
+    "language": "",
+    "thread_permission_mode": "auto",
+    "standing_grants": [],
+    "fixtures_dir": "",
+    "check_cmd": "",
+    "check_shards": "",
+    "check_jobs": 4,
+    "check_shard_timeout_minutes": 20,
+    "spawn_policy": "",
+    "perm_policy": "",
+    "gpt_policy": "",
+    "skill_edge": "",
+    "check_timeout_minutes": 60,
+    "default_after_minutes": 30,
+    "ledger_line_every": "report",
+    "stale_minutes": 120,
+    "screen_mode": "shadow",
+    "screen_autograde": true,
+    "signals_red_at": 3,
+    "relay_max_per_day": 2,
+    "succ_watchdog_minutes": 45,
+    "signals_window_minutes": 30,
+    "observe_minutes": 20,
+    "grader_timeout_s": 300,
+    "lead_compact_alert": 2,
+    "lead_compact_swap": 4,
+    "drift_window_hours": 24,
+    "root_mode": "on",
+    "root_symptoms_at": 2,
+    "root_rework_at": 2,
+    "root_full_at": 4,
+    "root_debt_at": 2,
+    "root_fresh_at": 3,
+    "archive_idle_days": 3,
+    "reconcile_every": "wrapup",
+    "selfcheck_every": "wrapup",
+    "quota_every_minutes": 60,
+    "slow_factor": 2,
+    "sweep_every_minutes": 10,
+    "thread_default_after_minutes": 5,
+    "quota_trigger_id": "",
+    "quota_trigger_on": "",
+    "sweep_trigger_id": "",
+    "sweep_trigger_on": "",
+    "disk_low_pct": 10,
+    "disk_low_gb": 30,
+    "disk_private_tmp_gb": 5,
+    "disk_growth_gb_per_hour": 2,
+    "disk_scratch_days": 7,
+    "disk_keep_snapshots": 3,
+    "disk_top_n": 10,
+    "disk_private_budget_s": 5,
+    "disk_scan_budget_s": 30,
+    "disk_preview_budget_s": 3,
+    "disk_scan_interval_hours": 24,
+    "disk_protect_globs": [],
+    "health_load1_cpu_multiple": 8,
+    "health_pipe_min_bytes": 16384,
+    "health_process_max": 3000,
+    "health_disconnect_window": 20,
+    "health_app_server_idle_hours": 2,
+    "health_orphan_min_minutes": 120,
+    "require_primary": false
+  },
+  "updated": "2026-11-28T04:02:00-05:00",
+  "roster_version": 3,
+  "plan_user_said": [
+    {
+      "t": "2026-11-28T01:39:20-05:00",
+      "text": "fixture"
+    },
+    {
+      "t": "2026-11-28T01:39:44-05:00",
+      "text": "fixture"
+    }
+  ],
+  "issues": [
+    {
+      "id": "I1",
+      "text": "sample-issue",
+      "owner": null,
+      "status": "open",
+      "ref": "",
+      "reporters": [],
+      "created": "2026-11-28T01:39:21-05:00",
+      "updated": "2026-11-28T01:39:21-05:00"
+    }
+  ],
+  "prefs_user_said": [
+    {
+      "t": "2026-11-28T01:39:57-05:00",
+      "set": [
+        "require_primary=false"
+      ],
+      "text": "fixture"
+    }
+  ],
+  "qa_pending": [
+    {
+      "branch": "feature/demo",
+      "sha": "fixture-commit-1",
+      "base": "main",
+      "to": "fixture-commit-3",
+      "at": "2026-11-28T01:39:58-05:00"
+    }
+  ]
+}

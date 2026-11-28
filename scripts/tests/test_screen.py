@@ -385,8 +385,8 @@ class T72ScreenAutomationSignalsStats(TwCase):
     def test_save_and_patch_state_share_save_lock_helper(self):
         from unittest.mock import patch
         tw=__import__("tw"); ledger=self.dir/".teamwork"
-        real=tw._with_save_lock
-        with patch.object(tw,"_with_save_lock",wraps=real) as lock:
+        real=tw.ledger_lock
+        with patch.object(tw,"ledger_lock",wraps=real) as lock:
             tw.save(ledger,tw.load(ledger),{"ev":"lock-test"})
             self.assertTrue(tw._patch_state(ledger,"lock_test",lambda current,latest:True,{"ev":"lock-test"}))
         self.assertEqual(lock.call_count,2)

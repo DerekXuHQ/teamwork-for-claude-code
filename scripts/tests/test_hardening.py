@@ -171,8 +171,9 @@ class T76BatchB(TwCase):
         self.tw("rebuild", "--apply")
         log = [json.loads(x) for x in (self.dir / ".teamwork" / "log.jsonl").read_text().splitlines()]
         event = next(x for x in reversed(log) if x.get("ev") == "rebuild")
-        self.assertIn("api", event["snap_threads"])
-        self.assertIn("snap_roster_version", event)
+        self.assertIn("delta", event)
+        self.assertNotIn("snap_threads", event)
+        self.assertNotIn("snap_roster_version", event)
         state = self.state(); state["threads"] = {}
         (self.dir / ".teamwork" / "state.json").write_text(json.dumps(state), encoding="utf-8")
         self.tw("rebuild", "--apply")

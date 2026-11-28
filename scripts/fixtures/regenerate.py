@@ -17,6 +17,7 @@ LOCAL_SESSION = source.LOCAL_SESSION
 # Each row identifies source inputs, selection, and redaction. Generated-only
 # samples have no raw source argument and are emitted by source._generate_t79().
 SAMPLES = {
+    "old-snap-log.jsonl": {"source": None, "select": None, "redact": None},
     "t71_real_candidate.jsonl": {"source": "candidate_source", "select": source._quiz_rows, "redact": source.scrub,
                                   "bridge": "bridge-transcript-cse_fixture-remote-session.jsonl"},
     "bridge-transcript-cse_fixture-remote-session.jsonl": {"source": "bridge_source", "select": source._bridge_rows,

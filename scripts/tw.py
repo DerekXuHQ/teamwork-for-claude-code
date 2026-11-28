@@ -538,8 +538,8 @@ LABELS = {
         "signal_relay_count": "This seat has relayed {n} times today.",
         "signals_quiz_pass": "Half quiz {id}: passed", "signals_quiz_fail": "Half quiz {id}: incorrect answers; resend these facts", "signals_quiz_red": "{id} failed twice; seat marked red. Relay: {command}",
         "screen_stats_retake": "For a second screen on the same session: TW screen ask <seat> --session <id> --retake",
-        "signals_quiz_usage": "Usage: signals quiz HQ<n> <seat> --answers <file>", "screen_sweep_running": "A screen sweep is already running",
-        "compact_mandatory": "Compacted {n} time(s). Before your next message, you must:\nStep A. Use Read to open {rules}; reread the Rules section (language, messages, approvals).\nStep B. Without looking anything up, answer the quiz below; put [quiz {id}] on the first answer line, then one numbered answer per question.\nStep C. Then continue as usual.\nQuiz {id}:\n{quiz}",
+        "signals_quiz_usage": "Usage: signals quiz HQ<n> <seat> --answers <file|-|answer text>", "screen_sweep_running": "A screen sweep is already running",
+        "compact_mandatory": "Compacted {n} time(s). Before your next message, you must do these three steps (a check for you: do them, but keep the quiz, answers and command out of your reply to the user):\nStep 1. Use Read to open {rules}; reread {sections}.\nStep 2. Answer the quiz below from memory with this command (replace the answers):\n{command}\nStep 3. Follow the command output. If it asks you to tell the user nothing, continue normally and do not mention the quiz.\nQuiz {id}:\n{quiz}", "compact_write_locked": "Compacted {n} time(s). Before your next message, use Read to open {rules} and reread {sections}.",
         "brief_language_zh": "Reply to the user in Chinese.", "brief_language_en": "Reply to the user in English.",
         "brief_quiz_language_question": "What language should you use to reply to the user?",
         "brief_lead": "You are {project} ({tag}) lead, session {session}.",
@@ -550,22 +550,19 @@ LABELS = {
         "brief_thread_report": "Report only to the lead; end every turn with a tw-status block. Send anything you need to wait on to the lead; do not leave it only in STATUS.",
         "brief_privacy": "Private content (session IDs, email, home-directory paths, private project material) must never enter the repository or any public place.",
         "brief_standing_more": "{n} more: tw.py memory --standing-list",
-        "compact_thread_rules": "Use Read to open {rules}; reread the thread protocol sections Language, Messages and STATUS.",
-        "compact_drift_unavailable": "Local transcript unavailable; drift signals were not calculated",
-        "compact_ambiguous": "compact_ambiguous: multiple project/seat matches: {candidates}",
-        "compact_quiz_unavailable": "compact_quiz_unavailable: could not save or load the required quiz",
-        "compact_write_locked": "Compacted {n} time(s). Before your next message, you must:\n1. Use Read to open {rules}; reread the Rules section (language, messages, approvals).",
+        "compact_sections_lead": "the Rules section (language, messages, approvals)", "compact_sections_thread": "the thread protocol sections Language, Messages and STATUS",
+        "compact_answer_user": "Use Read to open {rules} and reread it; in this turn's reply to the user, add only this sentence: ‘Compaction self-check had an incorrect answer; the rules have now been reread.’", "compact_reread_user": "Use Read to open {rules} and reread it first, then add only this sentence to the reply to the user: ‘The rules were not reread before the compaction self-check; they have now been reread.’",
+        "compact_answer_lead": "Use Read to open {rules} and reread it; in your next message to lead, add only this sentence: ‘Compaction self-check had an incorrect answer; the rules have now been reread.’", "compact_reread_lead": "Use Read to open {rules} and reread it first, then add only this sentence in your next message to lead: ‘The rules were not reread before the compaction self-check; they have now been reread.’",
+        "compact_ambiguous": "compact_ambiguous: multiple project/seat matches: {candidates}", "compact_quiz_unavailable": "compact_quiz_unavailable: could not save or load the required quiz",
         "compact_v_unanswered": "unanswered", "compact_v_yes": "yes", "compact_v_no": "no",
         "compact_swap_reason": "repeated context compaction",
-        "compact_alert": "This turn, tell the user: context was compacted {n} times. Drift signals: {drift}.",
-        "compact_alert_thread": "Tell the lead in STATUS that context was compacted {n} times. Drift signals: {drift}.",
-        "compact_swap": "Consider a successor: {command}",
-        "compact_board": "Compacted {n} times · post-compaction quiz {quiz}: {result} · rules reread: {reread}",
+        "compact_alert": "In this turn's reply to the user, add only this sentence: ‘Reminder: this session has been compacted {n} times.’", "compact_alert_thread": "In your next message to lead, add only this sentence: ‘Compacted {n} times.’",
+        "compact_swap_alert": "In this turn's reply to the user, add only this sentence: ‘This session has been compacted {n} times; consider handing it to a new session.’", "compact_swap_alert_thread": "In your next message to lead, add only this sentence: ‘Compacted {n} times; consider handing it to a new session.’",
+        "compact_swap": "Consider a successor: {command}", "compact_board": "Compacted {n} times · post-compaction quiz {quiz}: {result} · rules reread: {reread}",
         "compact_drift_summary": "drift: agent work {agents}, silent threads {threads}, big-picture replies missing required parts {big}",
         "drift_self_work_line": "Self-work drift: {n} (agents {agents}, thread sends {sends})",
         "drift_silent_line": "Silent-thread drift: {n} thread(s): {names}",
         "drift_dajuguan_line": "Big-picture drift: {n} incomplete reply/replies",
-        "compact_check_item": "post-compaction self-check",
         "signals_quiz_reason": "failed the half quiz twice after compaction",
         "screen_retake_no_relead": "A statistics retake cannot open a lead replacement",
         "signal_color_red": "red", "signal_color_yellow": "yellow", "signal_color_green": "green", "signal_sep": "; ",
@@ -847,8 +844,8 @@ LABELS = {
         "signal_relay_count": "今天这个席位已接力 {n} 次。",
         "signals_quiz_pass": "半份测验 {id}：通过", "signals_quiz_fail": "半份测验 {id}：有答错，补发这些事实", "signals_quiz_red": "{id} 连错两次，该席 signals 标红。接力命令：{command}",
         "screen_stats_retake": "同一张卡测两次：TW screen ask <seat> --session <id> --retake",
-        "signals_quiz_usage": "用法：signals quiz HQ<n> <seat> --answers <文件>", "screen_sweep_running": "已有一个体检补考进程在运行",
-        "compact_mandatory": "刚被压缩（第 {n} 次）。下一条消息前必须先做完：\n第一步：用 Read 打开 {rules}，重读 Rules 一节（语言、消息、审批）。\n第二步：不查资料，直接答下面的小测；答案第一行写 [quiz {id}]，然后按题号逐题作答。\n第三步：答完照常继续。\n小测 {id}：\n{quiz}",
+        "signals_quiz_usage": "用法：signals quiz HQ<n> <seat> --answers <文件|-|答案文本>", "screen_sweep_running": "已有一个体检补考进程在运行",
+        "compact_mandatory": "刚被压缩（第 {n} 次）。下一条消息前必须先做完这三步（这是给你自己的检查：照做，但题目、答案和命令都不要写进给用户的回复）：\n第一步：用 Read 打开 {rules}，重读{sections}。\n第二步：不查资料，直接答下面的小测，用这条命令作答（把答案换进去）：\n{command}\n第三步：照命令输出做；输出没让你告诉用户什么，就照常继续，回复里不提小测。\n小测 {id}：\n{quiz}", "compact_write_locked": "刚被压缩（第 {n} 次）。下一条消息前先用 Read 打开 {rules}，重读{sections}。",
         "brief_language_zh": "回复用户一律用中文。", "brief_language_en": "Reply to the user in English.",
         "brief_quiz_language_question": "你该用什么语言回复用户？",
         "brief_lead": "你是 {project}（{tag}）的 lead，会话 {session}",
@@ -859,22 +856,19 @@ LABELS = {
         "brief_thread_report": "只向 lead 汇报，每回合结尾写 tw-status 块；有要等的事就发给 lead，不能只写在 STATUS 里",
         "brief_privacy": "私有内容（会话 ID、邮箱、家目录路径、私有项目资料）绝不进仓库或任何公开处",
         "brief_standing_more": "还有 {n} 条：tw.py memory --standing-list",
-        "compact_thread_rules": "用 Read 打开 {rules}，重读线程协议的 Language、Messages 和 STATUS 三节。",
-        "compact_drift_unavailable": "记录不在本机，跑偏信号未算",
-        "compact_ambiguous": "compact_ambiguous：匹配到多个项目/席位：{candidates}",
-        "compact_quiz_unavailable": "compact_quiz_unavailable：必做小测无法保存或读取",
-        "compact_write_locked": "刚被压缩（第 {n} 次）。下一条消息前必须先做完：\n1. 用 Read 打开 {rules}，重读 Rules 一节（语言、消息、审批）。",
+        "compact_sections_lead": "其中的 Rules 一节（语言、消息、审批）", "compact_sections_thread": "线程协议的 Language、Messages 和 STATUS 三节",
+        "compact_answer_user": "先用 Read 打开 {rules} 重读，然后在这一回合给用户的回复里只加这一句：「压缩后自检有答错，已补读规则。」", "compact_reread_user": "先用 Read 打开 {rules} 重读，然后在给用户的回复里只加这一句：「压缩后没先重读规则，已补读。」",
+        "compact_answer_lead": "先用 Read 打开 {rules} 重读，然后在下一条发给 lead 的消息里加这一句：「压缩后自检有答错，已补读规则。」", "compact_reread_lead": "先用 Read 打开 {rules} 重读，然后在下一条发给 lead 的消息里加这一句：「压缩后没先重读规则，已补读。」",
+        "compact_ambiguous": "compact_ambiguous：匹配到多个项目/席位：{candidates}", "compact_quiz_unavailable": "compact_quiz_unavailable：必做小测无法保存或读取",
         "compact_v_unanswered": "未答", "compact_v_yes": "是", "compact_v_no": "否",
         "compact_swap_reason": "多次压缩",
-        "compact_alert": "这一回合要告诉用户：已压缩 {n} 次。跑偏信号：{drift}。",
-        "compact_alert_thread": "在 STATUS 里告诉 lead：已压缩 {n} 次。跑偏信号：{drift}。",
-        "compact_swap": "建议换座：{command}",
-        "compact_board": "压缩 {n} 次 · 压缩后小测 {quiz}：{result} · 重读规则：{reread}",
+        "compact_alert": "在这一回合给用户的回复里只加这一句：「提醒：这个会话已压缩 {n} 次。」", "compact_alert_thread": "在下一条发给 lead 的消息里加这一句：「已压缩 {n} 次。」",
+        "compact_swap_alert": "在这一回合给用户的回复里只加这一句：「这个会话已压缩 {n} 次，建议换一个新会话接手。」", "compact_swap_alert_thread": "在下一条发给 lead 的消息里加这一句：「已压缩 {n} 次，建议换一个新会话接手。」",
+        "compact_swap": "建议换座：{command}", "compact_board": "压缩 {n} 次 · 压缩后小测 {quiz}：{result} · 重读规则：{reread}",
         "compact_drift_summary": "跑偏：自己开 agent {agents} 次、沉默线程 {threads} 个、大局观回复缺项 {big} 条",
         "drift_self_work_line": "自己开 agent：{n}（agent {agents} 次，派线程 {sends} 次）",
         "drift_silent_line": "沉默线程：{n} 个（{names}）",
         "drift_dajuguan_line": "大局观回复缺项：{n} 条",
-        "compact_check_item": "压缩后自检",
         "signals_quiz_reason": "压缩后测验两次不过",
         "screen_retake_no_relead": "统计用补考不能触发更换 lead",
         "signal_color_red": "红", "signal_color_yellow": "黄", "signal_color_green": "绿", "signal_sep": "；",
@@ -8657,34 +8651,16 @@ def _compact_sweep(d,st):
         answer_i=next((i for i,r in enumerate(rows) if _row_role(r)=="assistant" and (_when(r.get("timestamp") or r.get("created_at") or r.get("time")) or EPOCH)>quiz_at and re.search(rf"\[quiz\s+{re.escape(qid)}\]",_row_text(r),re.I)),None)
         if answer_i is None: continue
         compact_i=next((i for i in range(answer_i-1,-1,-1) if _row_is_compact(rows[i])),None)
-        answer=""; reread=False
-        if answer_i is not None:
-            read_start=compact_i+1 if compact_i is not None else 0
-            read_uses={}; read_results={}
-            for r in rows[read_start:answer_i]:
-                stamp=_when(r.get("timestamp") or r.get("created_at") or r.get("time"))
-                if compact_i is None and (not stamp or stamp<quiz_at): continue
-                role=_row_role(r)
-                for b in _row_content(r):
-                    if not isinstance(b,dict): continue
-                    if role=="assistant" and b.get("type") in ("tool_use","tool_call") and str(b.get("name") or "").lower()=="read":
-                        fp=str((b.get("input") or {}).get("file_path") or (b.get("arguments") or {}).get("file_path") or "")
-                        relevant=fp.endswith("SKILL.md") if seat=="lead" else bool(fp.endswith("worker-protocol.md") or fp.endswith("SKILL.md"))
-                        if relevant and b.get("id"): read_uses[str(b["id"])]=True
-                    elif b.get("type")=="tool_result" and b.get("tool_use_id"):
-                        result_text=_tool_result_text(b.get("content")).lstrip()
-                        read_results[str(b["tool_use_id"])]=not (b.get("is_error") or result_text.startswith("<tool_use_error>"))
-            reread=any(read_results.get(tool_id,False) for tool_id in read_uses)
-            chunks=[]
-            for r in rows[answer_i:]:
-                if _row_role(r) in ("user","peer"): break
-                if _row_role(r)=="assistant":
-                    text=_row_text(r)
-                    if not chunks:
-                        marker=re.search(rf"\[quiz\s+{re.escape(qid)}\]",text,re.I)
-                        if marker: text=text[marker.end():]
-                    chunks.append(text)
-            answer="\n".join(chunks)
+        reread=_compact_reread(rows,seat,compact_i,answer_i,quiz_at); chunks=[]
+        for r in rows[answer_i:]:
+            if _row_role(r) in ("user","peer"): break
+            if _row_role(r)=="assistant":
+                text=_row_text(r)
+                if not chunks:
+                    marker=re.search(rf"\[quiz\s+{re.escape(qid)}\]",text,re.I)
+                    if marker: text=text[marker.end():]
+                chunks.append(text)
+        answer="\n".join(chunks)
         checked=bool(answer_i is not None and answer.strip())
         passed=False
         if checked: passed,_=_signals_quiz_grade_text(d,load(d),qid,seat,answer)
@@ -8694,6 +8670,27 @@ def _compact_sweep(d,st):
         _patch_state(d,("signals",seat),patch,{"ev":"compact-check","seat":seat})
         results.append({"seat":seat,**item})
     return results
+
+
+def _compact_reread(rows,seat,compact_i,end_i,quiz_at=None):
+    uses={}; results={}; names=("SKILL.md",) if seat=="lead" else ("worker-protocol.md","SKILL.md")
+    for row in rows[(compact_i+1 if compact_i is not None else 0):end_i]:
+        stamp=_when(row.get("timestamp") or row.get("created_at") or row.get("time"))
+        if compact_i is None and (not stamp or not quiz_at or stamp<quiz_at): continue
+        role=_row_role(row)
+        for block in _row_content(row):
+            if not isinstance(block,dict): continue
+            name=str(block.get("name") or "").lower(); args=block.get("input") or block.get("arguments") or {}
+            if role=="assistant" and block.get("type") in ("tool_use","tool_call") and name in ("read","bash"):
+                path=str(args.get("file_path") or "") if name=="read" else ""
+                command=str(args.get("command") or "") if name=="bash" else ""  # a shell read of the rules file counts only if its output shows the rules heading
+                shell=bool(command and re.search(r"\b(cat|sed|awk|head|tail|less)\b",command) and any(n in command for n in names) and not re.search(r"\s-i\b|>|\btee\b|\becho\b|\bprintf\b",command))
+                if (path.endswith(names) or shell) and block.get("id"): uses[str(block["id"])]="bash" if shell and not path else "read"
+            elif block.get("type")=="tool_result" and block.get("tool_use_id"):
+                text=_tool_result_text(block.get("content")).lstrip(); ok=not (block.get("is_error") or text.startswith("<tool_use_error>"))
+                results[str(block["tool_use_id"])]=(ok,text)
+    heads=("## Rules",) if seat=="lead" else ("## Language","## Messages","## STATUS","## Rules")
+    return any(results.get(i,(False,""))[0] and (kind=="read" or any(h in results[i][1] for h in heads)) for i,kind in uses.items())
 
 
 def _observation_label(st, seat):
@@ -9541,20 +9538,26 @@ def _signals_analyze(d, st, seat, rows, bad_lines=0, persist=True):
 
 
 def _signals_half_quiz(d,st,seat,compact_identity=None):
-    """After a compaction: about half a handover quiz (L-d) from the ledger alone. Each question names one word of a
-    rule, decision or the task's done-when; the answer (kept in the keys folder, outside the project) is the rest."""
+    """Build a post-compaction quiz from ledger facts; answers stay in the keys folder outside the project."""
     facts=[str(x.get("what") or x.get("question") or "") for x in st.get("decisions",[]) if x.get("answered") or x.get("confirmed")]
     facts+=[str(x) for x in st.get("standing",[])]
     mem=(d/"MEMORY.md").read_text(encoding="utf-8") if (d/"MEMORY.md").exists() else ""
     facts+=[line.lstrip("- ").split(" _(",1)[0] for line in mem.splitlines() if line.startswith("- ") and "_(temporary:" not in line]
-    material=[]
+    material=[]; seen=set()
+    def add(question,keywords,fact):
+        identity="".join(unicodedata.normalize("NFKC",question).split()).casefold()
+        if identity not in seen: seen.add(identity); material.append({"question":question,"keywords":keywords,"fact":fact})
     for text in dict.fromkeys(x for x in facts if x.strip()):
         key=_succ_keywords(text)
         if key and len(key[0])>2 and re.search(r"[\u3400-\u9fff]",key[0]): key=[key[0][:2],key[0][2:],*key[1:]]  # as succ quiz
-        if len(key)>=2: material.append({"question":lab(st,"succ_question_user",x=key[0]),"keywords":key[1:4],"fact":text})
+        if len(key)>=2: add(lab(st,"succ_question_user",x=key[0]),key[1:4],text)
     task_id,task=next(((k,t) for k,t in st.get("tasks",{}).items() if t.get("owner")==seat and t.get("status") not in ("done","merged","dropped")),(None,{}))
     words=_succ_keywords(task.get("accept") or "")
-    if task_id and words: material.insert(0,{"question":lab(st,"succ_question_task",task=task_id),"keywords":words,"fact":task.get("accept") or ""})
+    if task_id and words:
+        question=lab(st,"succ_question_task",task=task_id); identity="".join(unicodedata.normalize("NFKC",question).split()).casefold()
+        fact="".join(unicodedata.normalize("NFKC",task.get("accept") or "").split()).casefold()
+        material=[x for x in material if "".join(unicodedata.normalize("NFKC",x["question"]).split()).casefold()!=identity and "".join(unicodedata.normalize("NFKC",x["fact"]).split()).casefold()!=fact]
+        material.insert(0,{"question":question,"keywords":words,"fact":task.get("accept") or ""}); seen.add(identity)
     material=material[:5]
     if not material:
         question=_signals_p7(st,seat)
@@ -9562,7 +9565,8 @@ def _signals_half_quiz(d,st,seat,compact_identity=None):
         material=[{"question":question,"keywords":_succ_keywords(answer)[:6],"fact":answer}]
     lang_name="中文" if _zh(st) else "English"
     language_question=lab(st,"brief_quiz_language_question")
-    material=[{"question":language_question,"keywords":[lang_name],"fact":language_question+" "+lang_name}]+material[:4]
+    language_key="".join(unicodedata.normalize("NFKC",language_question).split()).casefold()
+    material=[{"question":language_question,"keywords":[lang_name],"fact":language_question+" "+lang_name}]+[x for x in material if "".join(unicodedata.normalize("NFKC",x["question"]).split()).casefold()!=language_key][:4]
     previous=(st.get("signals",{}).get(seat,{}) or {}).get("half_quiz",{})
     if compact_identity is not None and previous.get("at") and _when(previous.get("at")) and _when(compact_identity) and _when(previous.get("at")) >= _when(compact_identity)-dt.timedelta(seconds=1):
         existing=_keys_dir(st)/f"{seat}-{previous.get('id')}.json"
@@ -9650,31 +9654,22 @@ def _compact_quiz_text(d,st,seat,qid):
 
 
 def _compact_block(d,st,seat,count,qid,quiz_text,local_session):
-    if seat=="lead": rules_line=str(Path(__file__).resolve().parents[1]/"SKILL.md")
-    else:
-        rules=Path(__file__).resolve().parents[1]/"templates"/"worker-protocol.md"
-        rules_line=lab(st,"compact_thread_rules",rules=rules)
+    rules=Path(__file__).resolve().parents[1]/("SKILL.md" if seat=="lead" else "templates/worker-protocol.md")
+    sections=lab(st,"compact_sections_lead" if seat=="lead" else "compact_sections_thread")
     if write_locked(st):
-        return _brief_card(st,seat)+"\n"+lab(st,"compact_write_locked",n=count,rules=rules_line)+"\n\n"
+        return _brief_card(st,seat)+"\n"+lab(st,"compact_write_locked",n=count,rules=rules,sections=sections)+"\n\n"
     quiz_body="\n".join(x for x in str(quiz_text).splitlines() if re.match(r"\s*[0-9]+\.",x)) or str(quiz_text)  # the questions only: the lead-facing heading says "send it to the seat"
-    required=lab(st,"compact_mandatory",n=count,rules=rules_line,id=qid,quiz=quiz_body)
-    try:
-        rows,found=_session_rows(local_session) if local_session else ([],False)
-        if found:
-            end_at=_when(now())
-            cutoff=end_at-dt.timedelta(hours=int(pref(st, 'drift_window_hours') or 24))
-            rows=[r for r in rows if not (_when(r.get("timestamp") or r.get("created_at") or r.get("time"))) or _when(r.get("timestamp") or r.get("created_at") or r.get("time"))>=cutoff]
-            analysis,_=_signals_analyze(d,st,seat,rows,persist=False)
-            counts=analysis["counts"]
-            drift=lab(st,"compact_drift_summary",agents=counts.get("drift_self_work",0),threads=counts.get("drift_silent_threads",0),big=counts.get("drift_dajuguan",0))
-        else: drift=lab(st,"compact_drift_unavailable")
-    except Exception:
-        drift=lab(st,"compact_drift_unavailable")
-    if count>=int(pref(st, 'lead_compact_alert')):
-        required+="\n"+lab(st,"compact_alert_thread" if seat!="lead" else "compact_alert",n=count,drift=drift)
+    try: questions=json.loads((_keys_dir(st)/f"{seat}-{qid}.json").read_text(encoding="utf-8")).get("questions",[]) if qid else []
+    except (OSError,ValueError): questions=[]
+    answer_example="；".join(f"{i+1}. …" for i in range(len(questions)))
+    command=" ".join(shlex.quote(x) for x in ("python3",str(Path(__file__).resolve()),"-C",str(d.parent.resolve()),"signals","quiz",qid,seat,"--answers",answer_example))
+    required=lab(st,"compact_mandatory",n=count,rules=rules,sections=sections,command=command,id=qid,quiz=quiz_body)
     if count>=int(pref(st, 'lead_compact_swap')):
+        required+="\n"+lab(st,"compact_swap_alert_thread" if seat!="lead" else "compact_swap_alert",n=count)
         command=f"TW succ start {seat} --reason \"{lab(st,'compact_swap_reason')}\""
         required+="\n"+lab(st,"compact_swap",command=command)
+    elif count>=int(pref(st, 'lead_compact_alert')):
+        required+="\n"+lab(st,"compact_alert_thread" if seat!="lead" else "compact_alert",n=count)
     return _brief_card(st,seat)+"\n"+required+"\n\n"
 
 
@@ -9687,9 +9682,10 @@ def _signals_quiz_grade_text(d,st,hqid,seat,raw):
         answers=[str(parsed.get(str(i+1),parsed.get(item.get("question"),""))) for i,item in enumerate(items)] if isinstance(parsed,dict) else [str(x) for x in parsed]
     except (ValueError,TypeError):
         numbered={}
-        for line in raw.splitlines():
-            match=re.match(r"^\s*(\d+)\s*[.、．)）:：]\s*(.+)",line)
-            if match: numbered[int(match.group(1))]=match.group(2).strip()
+        parts=re.split(r"(?:^|[\n；;])\s*(\d+)\s*[.、．)）:：](?!\d)\s*",raw); last=0
+        for n,text in zip(parts[1::2],parts[2::2]):  # a number only opens a new answer when it is higher than the last one
+            if int(n)>last: last=int(n); numbered[last]=text.strip()
+            elif last: numbered[last]+="；"+n+". "+text.strip()
         if numbered: answers=[numbered.get(i+1,"") for i in range(len(items))]
         else: answers=[line.strip() for line in raw.splitlines() if line.strip()]
     answers=[x for x in answers if not re.match(r"^\s*\[quiz\s+HQ[0-9]+\]",x)]
@@ -9767,14 +9763,28 @@ def _screen_stats(d,st,replay=None):
 
 def _signals_quiz_grade(d,st,hqid,seat,answers_path):
     if not re.fullmatch(r"HQ[0-9]+",hqid or "") or seat not in st.get("threads",{}) and seat!="lead": sys.exit(lab(st,"screen_unknown_seat",seat=seat))
-    passed,wrong=_signals_quiz_grade_text(d,st,hqid,seat,Path(answers_path).read_text(encoding="utf-8"))
+    try: raw=sys.stdin.read() if answers_path=="-" else Path(answers_path).read_text(encoding="utf-8") if Path(answers_path).is_file() else answers_path
+    except OSError: raw=answers_path
+    passed,wrong=_signals_quiz_grade_text(d,st,hqid,seat,raw)
     if not wrong and not passed: sys.exit(lab(st,"screen_unknown"))
-    sig=load(d)["signals"].get(seat,{})
+    latest=load(d); sig=latest["signals"].get(seat,{})
     prior=(sig.get("quizzes") or {}).get(hqid,{"attempts":1})
     lines=[]
+    compact=(latest.get("signals",{}).get(seat) or {}).get("compact_check") or {}
+    is_compact=compact.get("quiz")==hqid
+    reread=False; found=False
+    if is_compact:
+        session=(latest.get("compactions",{}).get(seat) or {}).get("session")
+        rows,found=_session_rows(session) if session else ([],False)
+        if found:
+            compact_i=next((i for i in range(len(rows)-1,-1,-1) if _row_is_compact(rows[i])),None)
+            reread=_compact_reread(rows,seat,compact_i,len(rows),_when((latest["signals"].get(seat) or {}).get("half_quiz",{}).get("at")))
+        item={"quiz":hqid,"answered":True,"passed":bool(passed),"reread":bool(reread),"count":compact.get("count",1),"at":now()}
+        _patch_state(d,("signals",seat),lambda current,latest: {**(current or {}),"compact_check":item},{"ev":"compact-check","seat":seat})
     if wrong:
         lines.append(lab(st,"signals_quiz_fail",id=hqid))
         lines.extend(f"{i+1}. {item.get('fact') or item.get('question')}" for i,item in enumerate(wrong))
+        if is_compact: lines.append(lab(st,"compact_answer_lead" if seat!="lead" else "compact_answer_user",rules=Path(__file__).resolve().parents[1]/("SKILL.md" if seat=="lead" else "templates/worker-protocol.md")))
         if prior.get("attempts",1)>=2:
             reason=lab(st,"signals_quiz_reason")
             sig["color"]="red"; sig["color_label"]=lab(st,"signal_color_red"); sig["red_reason"]=reason
@@ -9783,8 +9793,9 @@ def _signals_quiz_grade(d,st,hqid,seat,answers_path):
             sticky.append({"kind":"quiz_red","id":hqid,"session":_seat_session(st,seat),"at":now(),"reason":reason})
             command=lab(st,"signals_relay_command",seat=seat,signals=reason)
             lines.append(lab(st,"signals_quiz_red",id=hqid,command=command))
-    else:
+    elif not is_compact or reread or not found:
         lines.append(lab(st,"signals_quiz_pass",id=hqid))
+    if is_compact and found and not reread and not wrong: lines.append(lab(st,"compact_reread_lead" if seat!="lead" else "compact_reread_user",rules=Path(__file__).resolve().parents[1]/("SKILL.md" if seat=="lead" else "templates/worker-protocol.md")))
     if (wrong and prior.get("attempts",1)>=2) or passed:
         def mark(current,latest):
             current=current or {}; sticky=current.get("sticky",[])
@@ -10712,7 +10723,7 @@ def cmd_selfcheck(a):
         compact=st["compactions"]["lead"]
         check=(st.get("signals",{}).get("lead") or {}).get("compact_check") or {}
         items.append(item("compact_check",bool(check.get("answered") and check.get("passed")),
-                          _compact_label(st,"lead"),"read SKILL.md Rules and answer the recorded [quiz HQ<n>]"))
+                          _compact_label(st,"lead"),"use the command in the compact block to answer"))
     modeitem, proj = items[0], st.get("project")
     # Every checklist entry states whether it was measured, recorded, or left untested.
     for x in items:

@@ -4,6 +4,175 @@ except ImportError:
     from _base import *
 
 
+class T87QuietQuiz(T80Helpers, unittest.TestCase):
+    def setUp(self):
+        self.tmp=Path(tempfile.mkdtemp(prefix="tw-t87-")); self.oldcwd=Path.cwd()
+        self.project=self.tmp/"project"; self.project.mkdir(); self.keys=self.tmp/"keys"; self.keys.mkdir()
+        self.config=self.tmp/"claude"; self.config.mkdir()
+        self.env={k:v for k,v in os.environ.items() if k != "TEAMWORK_DIR"}
+        self.env.update(TW_KEYS_DIR=str(self.keys),CLAUDE_CONFIG_DIR=str(self.config),TW_NOW=dt.datetime.now().astimezone().isoformat(timespec="seconds"))
+        os.chdir(self.project); self.cli("init","demo","--goal","test project"); self.cli("prefs","--set","language=zh")
+    def tearDown(self): os.chdir(self.oldcwd); shutil.rmtree(self.tmp)
+    def setup_compaction(self, seat="lead"):
+        session=self.sid()
+        if seat=="lead": self.cli("lead","--session",session)
+        else: self.cli("thread","add",seat,"--session",session)
+        return session
+    def answer_values(self,seat="lead"):
+        items=json.loads((self.keys/"demo"/f"{seat}-HQ1.json").read_text(encoding="utf-8"))["questions"]
+        return ["中文" if i==0 else " ".join(x["keywords"]) for i,x in enumerate(items)]
+    def record_read(self,session,seat="lead"):
+        base=dt.datetime.fromisoformat(self.env["TW_NOW"])
+        path="/tmp/SKILL.md" if seat=="lead" else "/tmp/worker-protocol.md"
+        self.record(session,[
+            {"type":"user","isCompactSummary":True,"timestamp":(base-dt.timedelta(seconds=1)).isoformat(),"message":{"content":"summary"}},
+            {"type":"assistant","timestamp":base.isoformat(),"message":{"content":[{"type":"tool_use","id":"read-ok","name":"Read","input":{"file_path":path}}]}},
+            {"type":"user","timestamp":(base+dt.timedelta(seconds=1)).isoformat(),"message":{"content":[{"type":"tool_result","tool_use_id":"read-ok","content":"rules"}]}}
+        ])
+
+    def test_00_quiet_quiz_command_grades_and_records_without_user_notice(self):
+        st=self.state(); st["standing"]=["能根治就根治：提交前跑检查并报告结果。","能根治的先根治：提交前跑检查并报告结果。","变更要有证据：记录验证命令。","消息简短明确：先给结论。"]
+        (self.project/".teamwork"/"state.json").write_text(json.dumps(st,ensure_ascii=False),encoding="utf-8")
+        session=self.setup_compaction(); first=self.hook(session); second=self.hook(session)
+        for context in (first,second):
+            questions=[line.split(". ",1)[1] for line in context.splitlines() if re.match(r"\s*\d+\. ",line)]
+            self.assertEqual(len(questions),len(set(questions)))
+            self.assertEqual(questions[0],"你该用什么语言回复用户？")
+            self.assertNotIn("[quiz",context)
+            self.assertIn("必须先做完",context); self.assertIn("不要写进给用户的回复",context)
+            command=next(line for line in context.splitlines() if "signals" in line and "--answers" in line)
+            self.assertIn("-C "+str(self.project),command)
+        self.assertIn("（第 1 次）",first); self.assertIn("（第 2 次）",second)
+        self.record_read(session); answers="；".join(f"{i+1}. {x}" for i,x in enumerate(self.answer_values()))
+        command=[sys.executable,str(TW.resolve()),"-C",str(self.project),"signals","quiz","HQ1","lead","--answers",answers]
+        result=subprocess.run(command,cwd=self.project,env=self.env,text=True,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr); self.assertEqual(result.stdout.strip(),"半份测验 HQ1：通过")
+        self.assertNotIn("给用户",result.stdout)
+        check=self.state()["signals"]["lead"]["compact_check"]
+        self.assertEqual({k:check[k] for k in ("answered","passed","reread")},{"answered":True,"passed":True,"reread":True})
+        self.assertIn("过",tw._compact_label(self.state(),"lead")); self.assertIn("重读规则：是",tw._compact_label(self.state(),"lead"))
+        self.assertFalse(self.hook(session,"resume").startswith("回复用户一律用中文。"))
+
+    def test_deduplicates_matching_standing_questions(self):
+        from unittest.mock import patch
+        st=self.state(); st["standing"]=["能根治就根治：提交前跑全量检查。","能根治的先根治：提交前跑全量检查。"]
+        (self.project/".teamwork"/"state.json").write_text(json.dumps(st,ensure_ascii=False),encoding="utf-8")
+        with patch.dict(os.environ,self.env): tw._signals_half_quiz(self.project/".teamwork",st,"lead")
+        questions=json.loads((self.keys/"demo"/"lead-HQ1.json").read_text())["questions"]
+        self.assertEqual(len([x for x in questions if x["fact"] in st["standing"]]),1)
+
+    def test_colliding_material_leaves_only_language_and_task_question(self):
+        from unittest.mock import patch
+        st=self.state(); st["standing"]=["能根治就根治：提交前跑全量检查。","能根治的先根治：提交前跑全量检查。"]
+        st["tasks"]={"T1":{"owner":"lead","status":"active","accept":"测试结果记录在报告中"}}
+        (self.project/".teamwork"/"state.json").write_text(json.dumps(st,ensure_ascii=False),encoding="utf-8")
+        with patch.dict(os.environ,self.env): tw._signals_half_quiz(self.project/".teamwork",st,"lead")
+        items=json.loads((self.keys/"demo"/"lead-HQ1.json").read_text())["questions"]
+        self.assertEqual(items[0]["question"],"你该用什么语言回复用户？")
+        self.assertEqual(items[1]["question"],tw.lab(st,"succ_question_task",task="T1"))
+
+    def test_task_and_standing_with_same_fact_ask_once(self):
+        from unittest.mock import patch
+        st=self.state(); st["standing"]=["测试结果记录在报告中","消息简短明确：先给结论。"]
+        st["tasks"]={"T1":{"owner":"lead","status":"active","accept":"测试结果记录在报告中"}}
+        (self.project/".teamwork"/"state.json").write_text(json.dumps(st,ensure_ascii=False),encoding="utf-8")
+        with patch.dict(os.environ,self.env): tw._signals_half_quiz(self.project/".teamwork",st,"lead")
+        facts=[x["fact"] for x in json.loads((self.keys/"demo"/"lead-HQ1.json").read_text())["questions"]]
+        self.assertEqual(facts.count("测试结果记录在报告中"),1)
+
+    def test_decimal_inside_answer_does_not_open_next_answer(self):
+        from unittest.mock import patch
+        keys=self.keys/"demo"; keys.mkdir(parents=True,exist_ok=True)
+        (keys/"lead-HQ9.json").write_text(json.dumps({"questions":[{"question":"a","keywords":["兼容"]},{"question":"b","keywords":["中文"]}]},ensure_ascii=False),encoding="utf-8")
+        st=self.state(); d=self.project/".teamwork"
+        with patch.dict(os.environ,self.env): passed,wrong=tw._signals_quiz_grade_text(d,st,"HQ9","lead","1. 用 2.5 版；2.5 版保留兼容；2. 中文")
+        self.assertTrue(passed,wrong)
+
+    def test_shell_read_without_rules_heading_or_writing_is_not_reread(self):
+        rows=[{"type":"user","isCompactSummary":True,"message":{"content":"s"}},
+              {"type":"assistant","message":{"content":[{"type":"tool_use","id":"a","name":"Bash","input":{"command":"grep -c x SKILL.md"}}]}},
+              {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a","content":"3"}]}},
+              {"type":"assistant","message":{"content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"sed -i '' s/a/b/ SKILL.md; cat SKILL.md"}}]}},
+              {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b","content":"## Rules"}]}}]
+        self.assertFalse(tw._compact_reread(rows,"lead",0,len(rows)))
+
+    def test_answers_from_file_are_accepted(self):
+        session=self.setup_compaction(); self.hook(session); self.record_read(session)
+        values=self.answer_values(); path=self.project/"answer.txt"; path.write_text("\n".join(f"{i+1}. {v}" for i,v in enumerate(values)),encoding="utf-8")
+        result=subprocess.run([sys.executable,str(TW.resolve()),"-C",str(self.project),"signals","quiz","HQ1","lead","--answers",str(path)],cwd=self.project,env=self.env,text=True,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr); self.assertIn("通过",result.stdout)
+    def test_answers_from_stdin_are_accepted(self):
+        # '-' reads stdin; the fixture runner uses this separate invocation to supply the payload.
+        session=self.setup_compaction(); self.hook(session); self.record_read(session)
+        answers="\n".join(f"{i+1}. {v}" for i,v in enumerate(self.answer_values()))
+        result=subprocess.run([sys.executable,str(TW.resolve()),"-C",str(self.project),"signals","quiz","HQ1","lead","--answers","-"],input=answers,cwd=self.project,env=self.env,text=True,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr); self.assertIn("通过",result.stdout)
+    def test_wrong_answer_without_reread_gives_one_sentence(self):
+        session=self.setup_compaction(); self.hook(session)
+        base=dt.datetime.fromisoformat(self.env["TW_NOW"])
+        self.record(session,[{"type":"user","isCompactSummary":True,"timestamp":(base-dt.timedelta(seconds=1)).isoformat(),"message":{"content":"summary"}},
+            {"type":"assistant","timestamp":base.isoformat(),"message":{"content":[{"type":"tool_use","id":"e1","name":"Bash","input":{"command":"echo SKILL.md; echo '## Rules'"}}]}},
+            {"type":"user","timestamp":(base+dt.timedelta(seconds=1)).isoformat(),"message":{"content":[{"type":"tool_result","tool_use_id":"e1","content":"SKILL.md\n## Rules"}]}}])
+        result=subprocess.run([sys.executable,str(TW.resolve()),"-C",str(self.project),"signals","quiz","HQ1","lead","--answers","1. 错误"],cwd=self.project,env=self.env,text=True,capture_output=True)
+        self.assertEqual(result.stdout.count("只加这一句"),1,result.stdout); self.assertIn("Read 打开",result.stdout)
+        self.assertFalse(self.state()["signals"]["lead"]["compact_check"]["reread"])  # echo of the heading is not a reread
+    def test_wrong_answer_emits_user_sentence_and_marks_failed(self):
+        session=self.setup_compaction(); self.hook(session); self.record_read(session)
+        result=subprocess.run([sys.executable,str(TW.resolve()),"-C",str(self.project),"signals","quiz","HQ1","lead","--answers","1. 错误"],cwd=self.project,env=self.env,text=True,capture_output=True)
+        self.assertIn("压缩后自检有答错，已补读规则。",result.stdout); self.assertFalse(self.state()["signals"]["lead"]["compact_check"]["passed"])
+    def test_shell_read_of_rules_counts_as_reread(self):
+        # real Opus session reread the Rules with `awk ... SKILL.md` instead of the Read tool
+        session=self.setup_compaction(); self.hook(session)
+        base=dt.datetime.fromisoformat(self.env["TW_NOW"])
+        self.record(session,[{"type":"user","isCompactSummary":True,"timestamp":(base-dt.timedelta(seconds=1)).isoformat(),"message":{"content":"summary"}},
+            {"type":"assistant","timestamp":base.isoformat(),"message":{"content":[{"type":"tool_use","id":"sh-1","name":"Bash","input":{"command":"awk '/^## Rules/{f=1} f' /x/SKILL.md | head -80"}}]}},
+            {"type":"user","timestamp":(base+dt.timedelta(seconds=1)).isoformat(),"message":{"content":[{"type":"tool_result","tool_use_id":"sh-1","content":"## Rules"}]}}])
+        answer="\n".join(f"{i+1}. {v}" for i,v in enumerate(self.answer_values()))
+        result=subprocess.run([sys.executable,str(TW.resolve()),"-C",str(self.project),"signals","quiz","HQ1","lead","--answers",answer],cwd=self.project,env=self.env,text=True,capture_output=True)
+        self.assertNotIn("已补读",result.stdout); self.assertTrue(self.state()["signals"]["lead"]["compact_check"]["reread"])
+    def test_missing_read_emits_reread_sentence(self):
+        session=self.setup_compaction(); self.hook(session)
+        base=dt.datetime.fromisoformat(self.env["TW_NOW"])
+        self.record(session,[{"type":"user","isCompactSummary":True,"timestamp":(base-dt.timedelta(seconds=1)).isoformat(),"message":{"content":"summary"}}])
+        answer="\n".join(f"{i+1}. {v}" for i,v in enumerate(self.answer_values()))
+        result=subprocess.run([sys.executable,str(TW.resolve()),"-C",str(self.project),"signals","quiz","HQ1","lead","--answers",answer],cwd=self.project,env=self.env,text=True,capture_output=True)
+        self.assertIn("压缩后没先重读规则，已补读。",result.stdout); self.assertFalse(self.state()["signals"]["lead"]["compact_check"]["reread"])
+    def test_no_local_record_gives_no_reread_notice(self):
+        session=self.setup_compaction(); self.hook(session)
+        answer="\n".join(f"{i+1}. {v}" for i,v in enumerate(self.answer_values()))
+        result=subprocess.run([sys.executable,str(TW.resolve()),"-C",str(self.project),"signals","quiz","HQ1","lead","--answers",answer],cwd=self.project,env=self.env,text=True,capture_output=True)
+        self.assertIn("通过",result.stdout); self.assertNotIn("已补读",result.stdout)
+    def test_thread_output_directs_notice_to_lead(self):
+        from unittest.mock import patch
+        session=self.setup_compaction("api")
+        with patch.dict(os.environ,self.env): text=tw._after_compact(self.project/".teamwork",self.state(),"api",session)
+        self.assertIn("线程 api",text); self.assertIn("signals quiz HQ1 api --answers",text)
+        self.assertEqual(text.count("用 Read 打开"),1); self.assertTrue(text.split("用 Read 打开",1)[1].splitlines()[0].rstrip().endswith("worker-protocol.md，重读线程协议的 Language、Messages 和 STATUS 三节。"))
+        self.record_read(session,"api"); result=subprocess.run([sys.executable,str(TW.resolve()),"-C",str(self.project),"signals","quiz","HQ1","api","--answers","1. 错"],cwd=self.project,env=self.env,text=True,capture_output=True)
+        self.assertIn("在下一条发给 lead 的消息里",result.stdout)
+    def test_alert_and_swap_have_only_user_reminder_and_no_drift_text(self):
+        session=self.setup_compaction()
+        for _ in range(2): text=self.hook(session)
+        self.assertIn("提醒：这个会话已压缩 2 次。",text); self.assertNotIn("跑偏",text); self.assertNotIn("未算",text)
+        for _ in range(2): text=self.hook(session)
+        self.assertIn("这个会话已压缩 4 次，建议换一个新会话接手。",text); self.assertIn("TW succ start lead",text)
+    def test_successful_normal_compaction_never_mentions_user_sentence(self):
+        session=self.setup_compaction(); text=self.hook(session); self.record_read(session)
+        answer="\n".join(f"{i+1}. {v}" for i,v in enumerate(self.answer_values()))
+        result=subprocess.run([sys.executable,str(TW.resolve()),"-C",str(self.project),"signals","quiz","HQ1","lead","--answers",answer],cwd=self.project,env=self.env,text=True,capture_output=True)
+        self.assertNotIn("只加这一句",text+result.stdout)
+    def test_legacy_quiz_marker_remains_sweep_compatible(self):
+        session=self.setup_compaction(); self.hook(session); self.record_read(session)
+        answer="[quiz HQ1]\n"+"\n".join(f"{i+1}. {v}" for i,v in enumerate(self.answer_values()))
+        base=dt.datetime.fromisoformat(self.env["TW_NOW"])
+        rows=[{"type":"user","isCompactSummary":True,"timestamp":(base-dt.timedelta(seconds=1)).isoformat(),"message":{"content":"summary"}},
+              {"type":"assistant","timestamp":base.isoformat(),"message":{"content":[{"type":"tool_use","id":"read-ok","name":"Read","input":{"file_path":"/tmp/SKILL.md"}}]}},
+              {"type":"user","timestamp":(base+dt.timedelta(seconds=1)).isoformat(),"message":{"content":[{"type":"tool_result","tool_use_id":"read-ok","content":"rules"}]}},
+              {"type":"assistant","timestamp":(base+dt.timedelta(seconds=2)).isoformat(),"message":{"content":answer}}]
+        self.record(session,rows); result=json.loads(self.cli("screen","sweep","--json").stdout)
+        self.assertTrue(result["compact_checks"][0]["passed"]); self.assertTrue(result["compact_checks"][0]["reread"])
+
+
 class T80Compact(T80Helpers, unittest.TestCase):
     def setUp(self):
         self.tmp=Path(tempfile.mkdtemp(prefix="tw-t80-")); self.oldcwd=Path.cwd()
@@ -21,7 +190,7 @@ class T80Compact(T80Helpers, unittest.TestCase):
     def test_00_compact_hook_quiz_sweep_and_board(self):
         session=self.sid(); self.cli("lead","--session",session)
         context=self.hook(session)
-        self.assertTrue(context.startswith("回复用户一律用中文。")); self.assertIn("刚被压缩（第 1 次）",context); self.assertIn("[quiz HQ1]",context); self.assertIn("1.",context)
+        self.assertTrue(context.startswith("回复用户一律用中文。")); self.assertIn("刚被压缩（第 1 次）",context); self.assertNotIn("[quiz",context); self.assertIn("--answers",context); self.assertIn("1.",context)
         question,answer=tw.SCREEN_BANK["zh"]["P7"][0]; base=dt.datetime.fromisoformat(self.env["TW_NOW"])
         questions=json.loads((self.keys/"demo"/"lead-HQ1.json").read_text(encoding="utf-8"))["questions"]
         quiz_answer="[quiz HQ1]\n"+"\n".join(f"{i+1}. "+" ".join(q["keywords"]) for i,q in enumerate(questions))
@@ -78,7 +247,7 @@ class T80Compact(T80Helpers, unittest.TestCase):
         base=dt.datetime.fromisoformat(self.env["TW_NOW"])
         self.record(session,[{"type":"assistant","timestamp":(base-dt.timedelta(seconds=1)).isoformat(),"message":{"role":"assistant","content":[{"type":"tool_use","name":"Agent","input":{}} for _ in range(3)]}}])
         self.hook(session); text=self.hook(session)
-        self.assertIn("已压缩 2 次",text); self.assertIn("自己开 agent 1 次",text)
+        self.assertIn("提醒：这个会话已压缩 2 次。",text); self.assertNotIn("跑偏",text); self.assertNotIn("未算",text)
         self.assertEqual(self.state()["compactions"]["lead"]["count"],2)
     def test_fourth_compaction_prints_successor_command(self):
         session=self.sid(); self.cli("lead","--session",session)
@@ -152,12 +321,12 @@ class T80Compact(T80Helpers, unittest.TestCase):
         finally: sys.stdin.close(); sys.stdin=oldstdin; os.environ.clear(); os.environ.update(old)
         emitted=json.loads(output.getvalue())["hookSpecificOutput"]["additionalContext"]
         self.assertIn("下一条消息前必须先做完",emitted)
-        self.assertIn("跑偏信号：记录不在本机，跑偏信号未算",emitted)
+        self.assertNotIn("跑偏",emitted); self.assertNotIn("未算",emitted)
     def test_write_lock_still_emits_without_ledger_mutation(self):
         session=self.sid(); self.cli("lead","--session",session)
         st=self.state(); st["write_lock"]={"ho":"HO1"}; (self.project/".teamwork"/"state.json").write_text(json.dumps(st),encoding="utf-8")
         text=self.hook(session); self.assertTrue(text.startswith("回复用户一律用中文。")); self.assertNotIn("lead",self.state().get("compactions",{}))
-        self.assertIn("重读 Rules 一节",text); self.assertNotIn("[quiz HQ",text); self.assertEqual(sum(line.startswith("1.") for line in text.splitlines()),1); self.assertNotIn("原始意图",text)
+        self.assertIn("重读其中的 Rules 一节",text); self.assertNotIn("[quiz HQ",text); self.assertEqual(text.count("用 Read 打开"),1); self.assertNotIn("原始意图",text)
 
 
 class ScreenShadow(TwCase):

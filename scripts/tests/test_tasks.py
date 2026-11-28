@@ -768,6 +768,21 @@ class PrimaryOutcome(TwCase):
         result = self.done_after_verify()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_fixtures_gate_counts_hand_built_fixture_paths(self):
+        for body in ('        Path(__file__).parents[1] / "fixtures" / "state.json"\n',
+                     '        os.path.join(root, "scripts", "fixtures", "state.json")\n',
+                     '        Path("scripts/fixtures/state.json").read_text()\n'):
+            with self.subTest(body=body):
+                self.tearDown(); self.setUp()
+                self.fixture_done("    def test_reads(self):\n" + body)
+                result = self.done_after_verify()
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_fixtures_gate_ignores_fixture_word_outside_a_path(self):
+        self.fixture_done('    def test_reads(self):\n        message = "read the fixtures first"\n        Path("other") / "data.json"\n')
+        result = self.done_after_verify()
+        self.assertNotEqual(result.returncode, 0)
+
     def test_fixtures_gate_ignores_comments_and_strings(self):
         self.fixture_done("    def test_reads(self):\n        # sample('fake.jsonl')\n        note = 'place(\\\"fake\\\") fixtures_dir'\n        assert note\n")
         result = self.done_after_verify()
@@ -2924,6 +2939,40 @@ class T82R9CandidatePaths(TwCase):
         self.assertEqual(len(pending), 30)
         self.assertEqual(paths[0], str(scratch / "old-39"))
         self.assertEqual(report["pending_omitted"], 10)
+
+    def test_scratch_age_is_the_newest_file_in_the_tree_and_checkouts_evidence_fallback_stay(self):
+        tw = self.twmod
+        scratch = self.home / ".dev-scratch" / "tmp"; old = time.time() - 30 * 86400
+        def aged(root, keep_fresh=()):
+            for p in sorted(root.rglob("*"), key=lambda x: -len(x.parts)) + [root]:
+                if p not in keep_fresh: os.utime(p, (old, old), follow_symlinks=False)
+        (scratch / "deep-fresh" / "a" / "b").mkdir(parents=True); fresh = scratch / "deep-fresh" / "a" / "b" / "work.log"; fresh.write_text("x")
+        (scratch / "checkout").mkdir(); (scratch / "checkout" / ".git").write_text("gitdir: elsewhere")
+        (scratch / "evid" / "run").mkdir(parents=True); proof = scratch / "evid" / "run" / "proof.txt"; proof.write_text("x")
+        (scratch / "plain" / "x").mkdir(parents=True); (scratch / "plain" / "x" / "f").write_text("x")
+        private = self.project / ".teamwork/private/thread/tmp/copy"; (private / "inner").mkdir(parents=True); (private / "inner" / "now.txt").write_text("x")
+        for name in ("deep-fresh", "checkout", "evid", "plain"): aged(scratch / name, keep_fresh=(fresh,))
+        aged(private, keep_fresh=(private / "inner" / "now.txt",))
+        # Evidence named by ANOTHER project's ledger on this machine.
+        (self.project / ".teamwork" / "state.json").write_text(json.dumps({"tasks": {"T1": {"evidence": str(proof)}}}), encoding="utf-8")
+        report = {"pct": 1, "free": 0, "projects": [str(self.project)], "health": {"simulator_devices": []}, "measure_cache": {}}
+        with mock.patch.object(tw, "_disk_has_unmerged_worktree", return_value=False):
+            pending = {row["path"] for row in tw._disk_candidates(self.dir / ".teamwork", report, True, deadline=time.monotonic() + 3, measure=False)}
+            auto = {row["path"] for row in tw._disk_candidates(self.dir / ".teamwork", report, deadline=time.monotonic() + 3, measure=False)}
+            self.assertIn(str(scratch / "plain"), pending)
+            for kept in ("deep-fresh", "checkout", "evid"): self.assertNotIn(str(scratch / kept), pending)
+            self.assertNotIn(str(private), auto)
+            (self.home / ".dev-scratch" / ".LOCAL_FALLBACK").write_text("local")
+            again = {row["path"] for row in tw._disk_candidates(self.dir / ".teamwork", report, True, deadline=time.monotonic() + 3, measure=False)}
+        self.assertFalse([p for p in again if p.startswith(str(scratch))])
+
+    def test_unreadable_line_in_another_ledger_marks_the_protection_scan_incomplete(self):
+        tw = self.twmod
+        (self.project / ".teamwork" / "state.json").write_text("{}", encoding="utf-8")
+        log = self.project / ".teamwork" / "log.jsonl"; log.write_text('{"ev": "x"}\n\n', encoding="utf-8")
+        status = {}; tw._disk_guards(self.dir / ".teamwork", status=status); self.assertTrue(status["complete"])
+        log.write_text('{"ev": "x", "evidence": "/some/pro\n', encoding="utf-8")
+        status = {}; tw._disk_guards(self.dir / ".teamwork", status=status); self.assertFalse(status["complete"])
 
     def test_expired_ranking_deadline_still_lists_cached_auto_and_pending(self):
         tw = self.twmod

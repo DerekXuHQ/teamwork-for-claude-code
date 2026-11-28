@@ -587,6 +587,7 @@ LABELS = {
         "opening_recommended": " (recommended)",
         "opening_change": "To change it later, say so in one sentence; the lead then runs: prefs --set {pref}={value} --user-said \"<your words>\"",
         "opening_rule": "Until answered: permissions are managed and GPT is used wherever it can (the recommended defaults); spawn takes the last answer. Any of the three can be changed later in one sentence.",
+        "opening_field_report": "Used teamwork for a while? Tell us what worked: https://github.com/DerekXuHQ/teamwork-for-claude-code/issues/new?template=field-report.yml",
         "opening_defaults_detail": "defaults in effect: {pairs} (change any time)",
         "lead_screen_howto": "Answer in this turn; save the answers to a file → screen brief {screen} --answers <file> → hand the brief to a newly started fable subagent to grade → screen record; on a pass send screen clear-msg, then ask the two opening questions; if grading is unavailable run screen unavailable, mark the lead as not screened and start work as usual",
         "lead_screen_status": "Lead opening screen {screen}: {status}",
@@ -1041,6 +1042,7 @@ LABELS = {
         "opening_last": "{value}（原话「{text}」）", "opening_unanswered": "还没回答：{keys}",
         "opening_change": "以后想改，说一句话就行；lead 会跑：prefs --set {pref}={value} --user-said \"<你的话>\"",
         "opening_rule": "没回答时：权限按托管（managed），GPT 能用就用（推荐默认）；开线程沿用上次的答案。任何一项以后一句话就能改。",
+        "opening_field_report": "用了一阵 teamwork？填一份实地报告，告诉我们哪些好用、哪些不好用：https://github.com/DerekXuHQ/teamwork-for-claude-code/issues/new?template=field-report.yml",
         "opening_defaults_detail": "按默认：{pairs}（可随时改）",
         "lead_screen_howto": "这一轮就答；答案存文件 → screen brief {screen} --answers <文件> → 交给新开的 fable 子 agent 评分 → screen record；通过就发 screen clear-msg，再问两问；评分不可用就 screen unavailable，标未体检，照常开工",
         "lead_screen_status": "lead 开局体检 {screen}：{status}",
@@ -10539,6 +10541,7 @@ def cmd_opening(a):
               if result["unanswered_now"] else lab(st, "opening_all_answered"))
         for name, status in result["thread_screens"].items(): print(f"{name}: {status}")
         print(result["rule"])
+        print(lab(st, "opening_field_report"))
 
 
 def _lead_opening_screen(d, st):

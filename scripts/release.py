@@ -7,11 +7,14 @@ not at the clone, so a merge into main reaches nobody until it is published, and
   release.py publish --ref main --apply
   release.py rollback --apply          back to the previous release (or --to <name>; `edge` = the clone)
   release.py edge --apply              run the clone live again (the old way)
+  release.py features                  check README feature sections against the ledger
 
 Dry run by default. Never deletes: old snapshots stay under <config dir>/teamwork-releases/."""
 
 import argparse
 import datetime
+import difflib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -20,8 +23,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import re
 
 CLONE = Path(__file__).resolve().parents[1]
+FEATURE_MARKERS = ("<!-- features:start -->", "<!-- features:end -->")
 
 LABELS = {
     "en": {
@@ -157,12 +162,149 @@ def history(data):
     return data.get("history") or [x for x in (data.get("previous"), data.get("current")) if x]
 
 
+def _feature_rows(repo, ledger):
+    tw = repo / "scripts" / "tw.py"
+    if not tw.exists() or not (ledger / ".teamwork").exists():
+        raise ValueError(f"missing feature CLI: {tw}" if not tw.exists() else f"ledger has no .teamwork directory: {ledger}")
+    result = subprocess.run([sys.executable, str(tw), "-C", str(ledger), "feature", "list", "--json"], capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError(f"cannot read ledger features: {result.stderr.strip()}")
+    data = json.loads(result.stdout)
+    rows = data.get("features", data) if isinstance(data, dict) else data
+    return {fid: row for fid, row in rows.items() if row.get("status") == "landed"} if isinstance(rows, dict) else {
+        row["id"]: row for row in rows if row.get("status") == "landed"}
+
+
+def _region(text):
+    start, end = FEATURE_MARKERS
+    if start not in text or end not in text or text.index(start) >= text.index(end):
+        return None
+    a, b = text.index(start), text.index(end) + len(end)
+    return a, b, text[a:b]
+
+
+def _privacy_terms(repo, ledger):
+    spec = importlib.util.spec_from_file_location("release_tw", repo / "scripts" / "tw.py")
+    if not spec or not spec.loader: raise ValueError("cannot load scripts/tw.py privacy helpers")
+    tw = importlib.util.module_from_spec(spec); spec.loader.exec_module(tw)
+    private, _, _ = tw.load_private(ledger / ".teamwork"); terms = private + tw.home_terms()
+    checks = [(r"[^\s<>]+@[^\s<>]+\.[^\s<>]+", "email", re.I), ("/" + "Users/|/home/", "home path", 0), (r"session_\w{10,}", "session id", 0), ("work" + "less", "private term", re.I)]
+    return terms, checks
+
+
+def _rewrite_features(text, landed, filename, terms, checks):
+    found = _region(text)
+    a, b, region = found if found is not None else (None, None, None)
+    if found is None:
+        missing = [(fid, row.get("name", "")) for fid, row in sorted(landed.items())]
+        for fid, name in missing: print(f"missing in {filename}: {fid} {name}")
+        rewritten, dropped, new_region = text, [], None
+    else:
+        lines = region.splitlines()
+        groups, current, heading, preamble = {}, None, {}, []
+        all_ids, dropped = set(), []
+        for line in lines[1:-1]:
+            gh = re.search(r"<!--\s*group:([A-Za-z]+)\s*-->", line)
+            if gh:
+                current = gh.group(1)
+                groups.setdefault(current, [])
+                heading[current] = line
+                continue
+            if current is None:
+                preamble.append(line)
+                continue
+            ids_match = re.search(r"<!--\s*f:([^>]*)-->", line)
+            ids = re.findall(r"[A-Za-z]+\d+", ids_match.group(1)) if ids_match else []
+            if not ids:
+                groups[current].append((None, line))
+                continue
+            valid = [fid for fid in ids if fid in landed]
+            all_ids.update(ids)
+            if not valid:
+                dropped.append((" ".join(ids), line.strip()[:40]))
+                continue
+            line = re.sub(r"<!--\s*f:[^>]*-->", "<!-- f:" + " ".join(valid) + " -->", line)
+            groups[current].append((min(int(re.search(r"\d+$", fid).group()) for fid in valid), line))
+        output = [lines[0], *preamble]
+        for key in sorted(groups, key=lambda k: (k.upper(), len(k))):
+            if key in heading: output.append(heading[key])
+            rows = groups[key]
+            output.extend(line for _, line in sorted((x for x in rows if x[0] is not None), key=lambda x: x[0]))
+            output.extend(line for _, line in rows if _ is None)
+        output.append(lines[-1])
+        new_region = "\n".join(output)
+        rewritten = text[:a] + new_region + text[b:]
+        for ids, snippet in dropped: print(f"dropped from {filename}: {ids} ({snippet})")
+        missing = [(fid, row.get("name", "")) for fid, row in sorted(landed.items()) if fid not in all_ids]
+        for fid, name in missing: print(f"missing in {filename}: {fid} {name}")
+        missing.extend((fid, snippet) for ids, snippet in dropped for fid in ids.split())
+    marker = re.compile(r"<!--\s*(?:features:(?:start|end)|group:[A-Za-z]+|f:[^>]*)\s*-->"); hits = []
+    for number, line in enumerate(rewritten.splitlines(), 1):
+        clean = marker.sub("", line)
+        for pattern, label, flags in checks:
+            if re.search(pattern, clean, flags): hits.append((number, label))
+        if any(term and term.casefold() in clean.casefold() for term in terms): hits.append((number, "private term"))
+    if found is not None:
+        start, end = FEATURE_MARKERS
+        region_text = rewritten[rewritten.index(start):rewritten.index(end) + len(end)]
+        for number, line in enumerate(region_text.splitlines(), 1):
+            if re.search(r"(?<![A-Za-z0-9])(?:R|T|IL-)\d+(?![A-Za-z0-9])", marker.sub("", line)):
+                actual = rewritten[:rewritten.index(start)].count("\n") + number
+                hits.append((actual, "ledger ref"))
+    hits = list(dict.fromkeys(hits))
+    for number, label in hits: print(f"private in {filename}:{number} ({label})")
+    return rewritten, missing, hits, (region, new_region) if found is not None else None, dropped
+
+
+def check_features(repo, ledger, sources=None, apply=False):
+    if not (ledger / ".teamwork").exists(): return True, [], []
+    landed = _feature_rows(repo, ledger)
+    terms, checks = _privacy_terms(repo, ledger)
+    missing, hits, failures = [], [], False
+    writes, privacy_any = [], False
+    for filename in ("README.md", "README.zh.md"):
+        before = sources[filename] if sources is not None else (repo / filename).read_text(encoding="utf-8")
+        after, absent, found_hits, regions, dropped = _rewrite_features(before, landed, filename, terms, checks)
+        print(f"{filename}: {len(landed)} landed, {len(landed) - len(absent)} on the page, {len(absent)} missing, "
+              f"{len(found_hits)} privacy hits")
+        missing.extend((filename, fid, name) for fid, name in absent)
+        hits.extend((filename, number, label) for number, label in found_hits)
+        failures = failures or bool(absent or found_hits or dropped)
+        privacy_any = privacy_any or bool(found_hits)
+        if regions and regions[0] != regions[1]:
+            if apply:
+                writes.append((repo / filename, after))
+            else:
+                print("".join(difflib.unified_diff(regions[0].splitlines(True), regions[1].splitlines(True),
+                                                   fromfile=filename, tofile=filename + " (updated)")), end="")
+                print("run features --apply")
+                failures = True
+    if apply and not privacy_any:
+        for path, content in writes: path.write_text(content, encoding="utf-8")
+    return not failures, missing, hits
+
+
 def publish(args, dirs, repo):
     sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", f"{args.ref}^{{commit}}"],
                          capture_output=True, text=True)
     if sha.returncode:
         raise ValueError(f"cannot resolve ref: {args.ref}")
     sha = sha.stdout.strip()
+    ledger = args.ledger.resolve() if args.ledger else repo
+    if args.ledger and not (ledger / ".teamwork").exists(): raise ValueError(f"ledger has no .teamwork directory: {ledger}")
+    sources = {}
+    for filename in ("README.md", "README.zh.md"):
+        shown = subprocess.run(["git", "-C", str(repo), "show", f"{sha}:{filename}"], capture_output=True, text=True)
+        if shown.returncode:
+            print("note: published ref has no README feature documents; skipping feature check")
+            sources = None
+            break
+        sources[filename] = shown.stdout
+    if sources is not None:
+        _, missing, hits = check_features(repo, ledger, sources=sources)
+        if hits: raise ValueError("README feature privacy hit; refusing to publish")
+        if missing:
+            print("README features: missing or dropped: " + ", ".join(f"{f}:{fid}" for f, fid, _ in missing))
     at = timestamp()
     name = f"r{at}-{sha[:7]}"
     with tempfile.TemporaryDirectory(prefix="tw-release-") as td:
@@ -357,6 +499,8 @@ def main():
     x = sub.add_parser("edge"); skill_arg(x); x.add_argument("--apply", action="store_true")
     x = sub.add_parser("status"); skill_arg(x); x.add_argument("--json", action="store_true"); x.set_defaults(apply=False)
     x = sub.add_parser("compare"); skill_arg(x); x.add_argument("--since", required=True); x.add_argument("--days", type=int, default=7); x.add_argument("--projects", default=".")
+    x = sub.add_parser("features"); x.add_argument("--ledger", type=Path); x.add_argument("--apply", action="store_true")
+    x = sub.choices["publish"]; x.add_argument("--ledger", type=Path)
     a = p.parse_args()
     if a.command == "compare" and a.days < 1:
         p.error("compare --days must be a positive whole number")
@@ -364,6 +508,13 @@ def main():
     dirs = configs(a)
     if a.command == "compare":
         compare(a); return
+    if a.command == "features":
+        try:
+            ledger = (a.ledger or repo).resolve()
+            if a.ledger and not (ledger / ".teamwork").exists(): raise ValueError(f"ledger has no .teamwork directory: {ledger}")
+            ok, _, _ = check_features(repo, ledger, apply=a.apply)
+        except (ValueError, OSError, json.JSONDecodeError) as e: sys.exit(str(e))
+        sys.exit(0 if ok else 1)
     if not dirs:
         sys.exit("no config dir with skills/teamwork found under ~/.claude*; pass --config-dir")
     bad = [str(_link(c, a.skill)) for c in dirs if a.command != "status" and

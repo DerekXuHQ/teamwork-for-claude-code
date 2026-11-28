@@ -1353,5 +1353,151 @@ class SyntheticFixtureBoundary(TwCase):
             self.assertRegex(source, r"\b(?:sample|place)\s*\(")
 
 
+class ReleaseFeatures(TwCase):
+    def setUp(self):
+        super().setUp()
+        self.repo = self.dir / "publish-repo"
+        self.repo.mkdir()
+        (self.repo / "SKILL.md").write_text("test skill\n")
+        (self.repo / "scripts").mkdir()
+        shutil.copy2(RELEASE, self.repo / "scripts" / "release.py")
+        shutil.copy2(TW, self.repo / "scripts" / "tw.py")
+        shutil.copy2(TW.parent / "quota.py", self.repo / "scripts" / "quota.py")
+        self.ledger = self.dir / "ledger"
+        self.ledger.mkdir()
+        subprocess.run([sys.executable, str(TW), "init", "ledger"], cwd=self.ledger, env=self.env,
+                       check=True, capture_output=True, text=True)
+        self._features({"A1": ("Alpha", "landed"), "A2": ("Second", "landed"),
+                        "B1": ("Beta", "landed"), "C1": ("Removed", "dropped")})
+
+    def _features(self, rows):
+        path = self.ledger / ".teamwork" / "state.json"
+        state = json.loads(path.read_text())
+        state["features"] = {fid: {"name": name, "status": status} for fid, (name, status) in rows.items()}
+        path.write_text(json.dumps(state), encoding="utf-8")
+
+    def _run_release(self, *args):
+        return subprocess.run([sys.executable, str(RELEASE), "--repo", str(self.repo), *args],
+                              env=self.env, capture_output=True, text=True)
+
+    def _git_init(self):
+        def git(*args):
+            return subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True, text=True)
+        git("init", "-q", "-b", "main")
+        for name in ("README.md", "README.zh.md"):
+            if not (self.repo / name).exists(): (self.repo / name).write_text("plain\n")
+        git("add", "-A")
+        git("-c", "user.name=test", "-c", "user.email=" + "test" + "@" + "example.invalid", "commit", "-qm", "initial")
+        return git
+
+    def test_features_dry_run_reports_missing_and_writes_nothing(self):
+        for name in ("README.md", "README.zh.md"): (self.repo / name).write_text("plain\n")
+        before = [(self.repo / n).read_bytes() for n in ("README.md", "README.zh.md")]
+        result = self._run_release("features", "--ledger", str(self.ledger))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.count("missing in README.md:"), 3)
+        self.assertEqual(before, [(self.repo / n).read_bytes() for n in ("README.md", "README.zh.md")])
+
+    def test_features_apply_orders_groups_lines_and_keeps_manual(self):
+        body = ("<!-- features:start -->\n### Beta <!-- group:B -->\n- beta <!-- f:B1 -->\n"
+                "### Alpha <!-- group:A -->\n- second <!-- f:A2 C1 -->\n- manual stays\n"
+                "- alpha <!-- f:A1 -->\n<!-- features:end -->\n")
+        for name in ("README.md", "README.zh.md"): (self.repo / name).write_text(body)
+        result = self._run_release("features", "--ledger", str(self.ledger), "--apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        updated = (self.repo / "README.md").read_text()
+        self.assertLess(updated.index("group:A"), updated.index("group:B"))
+        self.assertLess(updated.index("alpha"), updated.index("second"))
+        self.assertIn("manual stays", updated)
+        self.assertNotIn("C1", updated)
+
+    def _both_readmes(self, body):
+        for name in ("README.md", "README.zh.md"):
+            (self.repo / name).write_text(body, encoding="utf-8")
+
+    def _region_body(self, item="- Alpha <!-- f:A1 -->"):
+        return f"<!-- features:start -->\n### A <!-- group:A -->\n{item}\n<!-- features:end -->\n"
+
+    def test_private_bullet_word_is_caught_without_writing(self):
+        (self.ledger / ".teamwork" / "PRIVATE.md").write_text("- privatephrase\n", encoding="utf-8")
+        self._both_readmes(self._region_body("- privatephrase <!-- f:A1 -->"))
+        before = [(self.repo / n).read_bytes() for n in ("README.md", "README.zh.md")]
+        result = self._run_release("features", "--ledger", str(self.ledger), "--apply")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("private term", result.stdout)
+        self.assertNotIn("privatephrase", result.stdout)
+        self.assertEqual(before, [(self.repo / n).read_bytes() for n in ("README.md", "README.zh.md")])
+
+    def test_glued_chinese_ledger_ref_is_caught(self):
+        self._both_readmes(self._region_body("- 功能见台账R12号 <!-- f:A1 -->"))
+        result = self._run_release("features", "--ledger", str(self.ledger))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ledger ref", result.stdout)
+
+    def test_comment_content_is_scanned(self):
+        self._both_readmes(self._region_body("- Alpha <!-- note R12 --> <!-- f:A1 -->"))
+        result = self._run_release("features", "--ledger", str(self.ledger))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ledger ref", result.stdout)
+
+    def test_outside_region_home_path_is_scanned(self):
+        self._both_readmes("/home/example/private\n" + self._region_body())
+        result = self._run_release("features", "--ledger", str(self.ledger))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("home path", result.stdout)
+
+    def test_preamble_before_first_group_is_kept(self):
+        self._both_readmes("<!-- features:start -->\nPreamble one\nPreamble two\n### A <!-- group:A -->\n- Alpha <!-- f:A1 -->\n- Second <!-- f:A2 -->\n### B <!-- group:B -->\n- Beta <!-- f:B1 -->\n<!-- features:end -->\n")
+        result = self._run_release("features", "--ledger", str(self.ledger), "--apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        updated = (self.repo / "README.md").read_text(encoding="utf-8")
+        self.assertLess(updated.index("Preamble one"), updated.index("Preamble two"))
+        self.assertLess(updated.index("Preamble two"), updated.index("group:A"))
+
+    def test_dropped_non_landed_id_fails_and_reports_text(self):
+        self._both_readmes(self._region_body("- Gone feature entry <!-- f:C1 -->"))
+        result = self._run_release("features", "--ledger", str(self.ledger))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("dropped from README.md: C1 (- Gone feature entry", result.stdout)
+
+    def test_stale_order_fails_dry_run(self):
+        self._both_readmes("<!-- features:start -->\n### B <!-- group:B -->\n- Beta <!-- f:B1 -->\n### A <!-- group:A -->\n- Alpha <!-- f:A1 -->\n<!-- features:end -->\n")
+        result = self._run_release("features", "--ledger", str(self.ledger))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("run features --apply", result.stdout)
+        self.assertIn("--- README.md", result.stdout)
+
+    def test_explicit_bad_ledger_fails(self):
+        result = self._run_release("features", "--ledger", str(self.dir / "missing-ledger"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no .teamwork directory", result.stderr)
+
+    def test_publish_reminder_and_privacy_refusal(self):
+        git = self._git_init()
+        config = self.dir / "config"; (config / "skills").mkdir(parents=True)
+        (config / "skills" / "teamwork").symlink_to(self.repo)
+        result = self._run_release("--config-dir", str(config), "publish", "--ref", "HEAD", "--ledger", str(self.ledger))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("README features: missing or dropped:", result.stdout)
+        self.assertFalse((config / "teamwork-releases").exists())
+        (self.repo / "README.md").write_text("<!-- features:start -->\n- R12 <!-- f:A1 -->\n<!-- features:end -->\n")
+        git("add", "README.md")
+        git("-c", "user.name=test", "-c", "user.email=" + "test" + "@" + "example.invalid", "commit", "-qm", "private")
+        result = self._run_release("--config-dir", str(config), "publish", "--ref", "HEAD", "--ledger", str(self.ledger))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("privacy hit", result.stderr)
+        self.assertFalse((config / "teamwork-releases").exists())
+
+    def test_opening_includes_field_report_link_in_english(self):
+        self.tw("prefs", "--set", "language=en")
+        self.assertIn("https://github.com/DerekXuHQ/teamwork-for-claude-code/issues/new?template=field-report.yml", self.tw("opening").stdout)
+
+    def test_opening_includes_field_report_link_in_chinese(self):
+        self.tw("prefs", "--set", "language=zh")
+        out = self.tw("opening").stdout
+        self.assertIn("用了一阵 teamwork？填一份实地报告", out)
+        self.assertIn("https://github.com/DerekXuHQ/teamwork-for-claude-code/issues/new?template=field-report.yml", out)
+
+
 if __name__ == "__main__":
     unittest.main()
